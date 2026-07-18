@@ -1,0 +1,22 @@
+; Supervisor config for the Deployment Service's queue worker.
+; CHANGE_ME paths before installing to /etc/supervisor/conf.d/.
+;
+; --queue=default is explicit (matches config/queue.php's 'database'
+; connection default queue name). --tries and --backoff here are a
+; process-level fallback; ProcessGitHubWebhookPush and any future job
+; already declare their own $tries/$backoff/$timeout, which take
+; precedence over these flags for that job.
+
+[program:deployment-service-worker]
+process_name=%(program_name)s_%(process_num)02d
+command=/usr/bin/php /CHANGE_ME/path/to/deployment-system/service/artisan queue:work database --queue=default --sleep=3 --tries=3 --backoff=30 --max-time=3600
+directory=/CHANGE_ME/path/to/deployment-system/service
+autostart=true
+autorestart=true
+stopasgroup=true
+killasgroup=true
+user=CHANGE_ME_DEPLOY_USER
+numprocs=1
+redirect_stderr=true
+stdout_logfile=/CHANGE_ME/path/to/deployment-system/service/storage/logs/queue-worker.log
+stopwaitsecs=65

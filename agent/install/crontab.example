@@ -1,0 +1,4 @@
+# Alternative to systemd on hosts without service-manager access (e.g. shared
+# cPanel hosting). Runs one poll cycle per minute instead of a long-running
+# daemon. CHANGE_ME paths before installing with `crontab -e`.
+* * * * * /usr/bin/php /CHANGE_ME/path/to/deployment-system/agent/agent.php --once >> /CHANGE_ME/path/to/deployment-system/agent/storage/logs/cron.log 2>&1

@@ -1,0 +1,23 @@
+# This root .gitignore covers the repo as a whole; service/.gitignore and
+# agent/.gitignore already cover their own directories in detail (Laravel
+# vendor/build artifacts, agent/config.php with live credentials). These
+# entries are a defense-in-depth backstop, not a replacement for those.
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors/IDEs
+.vscode/
+.idea/
+*.swp
+
+# Never commit real credentials or local env files from anywhere in the repo
+.env
+.env.*
+!.env.example
+config.php
+!config.example.php
+*.pem
+*.key

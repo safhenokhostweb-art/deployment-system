@@ -1,0 +1,77 @@
+@extends('layouts.app')
+
+@section('title', 'Deployment ' . $deployment->public_id)
+
+@section('content')
+<h1>{{ $deployment->project->name }} &mdash; <span class="badge badge-{{ $deployment->status }}">{{ $deployment->status }}</span></h1>
+
+<div class="card">
+    <table>
+        <tr><th>Commit</th><td><code>{{ $deployment->commit_hash }}</code></td></tr>
+        @if ($deployment->previous_commit_hash)
+        <tr><th>Previous commit</th><td><code>{{ $deployment->previous_commit_hash }}</code></td></tr>
+        @endif
+        <tr><th>Branch</th><td>{{ $deployment->branch }}</td></tr>
+        <tr><th>Action</th><td>{{ $deployment->action }}</td></tr>
+        <tr><th>Trigger</th><td>{{ $deployment->trigger }} @if($deployment->triggered_by) by {{ $deployment->triggered_by }} @endif</td></tr>
+        @if ($deployment->rollbackOf)
+        <tr><th>Rollback of</th><td><a href="{{ route('deployments.show', $deployment->rollbackOf) }}">deployment {{ $deployment->rollbackOf->public_id }}</a></td></tr>
+        @endif
+        @if ($deployment->approved_by)
+        <tr><th>Approved by</th><td>{{ $deployment->approved_by }} at {{ $deployment->approved_at }}</td></tr>
+        @endif
+        <tr><th>Server</th><td><a href="{{ route('servers.show', $deployment->server) }}">{{ $deployment->server->name }}</a></td></tr>
+        <tr><th>Queued</th><td>{{ $deployment->queued_at?->diffForHumans() ?? '—' }}</td></tr>
+        <tr><th>Started</th><td>{{ $deployment->started_at?->diffForHumans() ?? '—' }}</td></tr>
+        <tr><th>Finished</th><td>{{ $deployment->finished_at?->diffForHumans() ?? '—' }}</td></tr>
+        @if ($deployment->failure_message)
+        <tr><th>Failure</th><td>{{ $deployment->failure_message }}</td></tr>
+        @endif
+    </table>
+
+    <div style="margin-top:1rem;display:flex;gap:0.6rem;">
+        @if ($deployment->status === 'pending_approval')
+            <form method="POST" action="{{ route('deployments.approve', $deployment) }}">
+                @csrf
+                <button type="submit" class="btn btn-primary">Approve &amp; queue</button>
+            </form>
+            <form method="POST" action="{{ route('deployments.cancel', $deployment) }}">
+                @csrf
+                <button type="submit" class="btn btn-danger">Cancel</button>
+            </form>
+        @elseif ($deployment->status === 'queued')
+            <form method="POST" action="{{ route('deployments.cancel', $deployment) }}">
+                @csrf
+                <button type="submit" class="btn btn-danger">Cancel</button>
+            </form>
+        @elseif ($deployment->status === 'succeeded')
+            <form method="POST" action="{{ route('deployments.rollback', $deployment) }}" onsubmit="return confirm('Roll back to this commit? This queues a new deployment targeting it.');">
+                @csrf
+                <button type="submit" class="btn">Roll back to this commit</button>
+            </form>
+        @endif
+    </div>
+</div>
+
+<div class="card">
+    <h3>Pipeline log</h3>
+    @forelse ($deployment->logEntries as $entry)
+        <h4 style="margin-bottom:0.2rem;">
+            {{ $entry->sequence }}. {{ $entry->step_name }}
+            @if ($entry->exit_code === 0)
+                <span class="badge badge-succeeded">exit 0</span>
+            @elseif ($entry->exit_code !== null)
+                <span class="badge badge-failed">exit {{ $entry->exit_code }}</span>
+            @endif
+            @if ($entry->timed_out)
+                <span class="badge badge-failed">timed out</span>
+            @endif
+            <span class="muted">({{ $entry->duration_ms }}ms)</span>
+        </h4>
+        <p class="muted" style="margin-top:0;"><code>{{ $entry->command }}</code></p>
+        <pre>{{ $entry->output }}</pre>
+    @empty
+        <p class="muted">No log entries yet — the agent hasn't picked this job up.</p>
+    @endforelse
+</div>
+@endsection
