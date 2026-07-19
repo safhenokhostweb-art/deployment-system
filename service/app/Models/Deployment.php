@@ -18,6 +18,8 @@ class Deployment extends Model
     public const STATUS_SUCCEEDED = 'succeeded';
     public const STATUS_FAILED = 'failed';
     public const STATUS_CANCELLED = 'cancelled';
+    /** Multi-target only (Phase 3-C.2): some tasks succeeded, some didn't. */
+    public const STATUS_PARTIAL_SUCCESS = 'partial_success';
 
     public const ACTION_DEPLOY = 'deploy';
     public const ACTION_ROLLBACK = 'rollback';
@@ -103,6 +105,7 @@ class Deployment extends Model
             self::STATUS_SUCCEEDED,
             self::STATUS_FAILED,
             self::STATUS_CANCELLED,
+            self::STATUS_PARTIAL_SUCCESS,
         ], true);
     }
 }

@@ -4,6 +4,7 @@ use App\Http\Controllers\Dashboard\AgentController;
 use App\Http\Controllers\Dashboard\AuthController;
 use App\Http\Controllers\Dashboard\DashboardController;
 use App\Http\Controllers\Dashboard\DeploymentController;
+use App\Http\Controllers\Dashboard\DeploymentTaskController;
 use App\Http\Controllers\Dashboard\ProjectController;
 use App\Http\Controllers\Dashboard\ServerController;
 use Illuminate\Support\Facades\Route;
@@ -42,4 +43,6 @@ Route::middleware('auth')->group(function () {
     Route::post('/deployments/{deployment}/approve', [DeploymentController::class, 'approve'])->name('deployments.approve');
     Route::post('/deployments/{deployment}/cancel', [DeploymentController::class, 'cancel'])->name('deployments.cancel');
     Route::post('/deployments/{deployment}/rollback', [DeploymentController::class, 'rollback'])->name('deployments.rollback');
+
+    Route::get('/deployment-tasks/{deploymentTask}', [DeploymentTaskController::class, 'show'])->name('deployment-tasks.show');
 });

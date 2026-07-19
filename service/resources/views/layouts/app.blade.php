@@ -23,6 +23,7 @@
         .badge-succeeded { background: #d4f7dc; color: #14622e; }
         .badge-failed { background: #ffd7d7; color: #8a1f1f; }
         .badge-cancelled { background: #eee; color: #555; }
+        .badge-partial_success { background: #ffe9c7; color: #8a4b00; }
         .btn { display: inline-block; padding: 0.45rem 0.9rem; border-radius: 6px; border: 1px solid #d0d7de; background: #fff; cursor: pointer; font-size: 0.85rem; text-decoration: none; color: #1c1e21; }
         .btn-primary { background: #1c2733; color: #fff; border-color: #1c2733; }
         .btn-danger { background: #a41e1e; color: #fff; border-color: #a41e1e; }

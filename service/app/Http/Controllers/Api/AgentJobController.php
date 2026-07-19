@@ -4,19 +4,30 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Agent;
+use App\Models\AgentJob;
 use App\Models\Deployment;
 use App\Models\Server;
 use App\Services\Deployment\AgentJobService;
+use App\Services\Deployment\AgentTaskService;
 use Illuminate\Http\Request;
 
 /**
  * All routes here sit behind VerifyAgentRequestSignature. The authenticated
- * Server is available via $request->attributes->get('deployment_agent_server').
+ * Server is available via $request->attributes->get('deployment_agent_server'),
+ * and the authenticated Agent (new-domain callers only) via
+ * $request->attributes->get('deployment_agent').
+ *
+ * Phase 3-C.2: `next`/`updateStatus`/`appendLog` now resolve either a
+ * legacy Deployment or a new-domain AgentJob behind the *same* endpoints —
+ * no new URL an agent needs to learn. The legacy branch of each method is
+ * the exact, unmodified call it made before this phase; the new branch is
+ * only ever reached when the legacy lookup finds nothing.
  */
 class AgentJobController extends Controller
 {
     public function __construct(
         private readonly AgentJobService $jobs,
+        private readonly AgentTaskService $tasks,
     ) {
     }
 
@@ -71,32 +82,81 @@ class AgentJobController extends Controller
 
         $claimed = $this->jobs->claimNextJob($server);
 
-        if ($claimed === null) {
-            return response()->json(['job' => null]);
+        if ($claimed !== null) {
+            return response()->json($claimed);
         }
 
-        return response()->json($claimed);
+        // New-domain claiming is only reachable for Agent-authenticated
+        // callers — a DeploymentTarget always needs a real Agent to record
+        // as the claimer, and a legacy Server credential has no Agent row
+        // to attribute an AgentJob to.
+        $agent = $request->attributes->get('deployment_agent');
+
+        if ($agent instanceof Agent) {
+            $claimedTask = $this->tasks->claimNextTask($agent);
+
+            if ($claimedTask !== null) {
+                return response()->json($claimedTask);
+            }
+        }
+
+        return response()->json(['job' => null]);
     }
 
-    public function updateStatus(Request $request, Deployment $deployment)
+    public function updateStatus(Request $request, string $id)
     {
         $server = $this->authenticatedServer($request);
-        $this->authorizeServerOwnsDeployment($server, $deployment);
+
+        if ($deployment = Deployment::where('public_id', $id)->first()) {
+            $this->authorizeServerOwnsDeployment($server, $deployment);
+
+            $validated = $request->validate([
+                'status' => 'required|string|in:running,succeeded,failed',
+                'message' => 'nullable|string|max:5000',
+            ]);
+
+            $updated = $this->jobs->updateStatus($deployment, $validated['status'], $validated['message'] ?? null);
+
+            return response()->json(['status' => $updated->status]);
+        }
+
+        $agentJob = AgentJob::where('public_id', $id)->firstOrFail();
+        $this->authorizeServerOwnsAgentJob($server, $agentJob);
 
         $validated = $request->validate([
             'status' => 'required|string|in:running,succeeded,failed',
             'message' => 'nullable|string|max:5000',
         ]);
 
-        $updated = $this->jobs->updateStatus($deployment, $validated['status'], $validated['message'] ?? null);
+        $updated = $this->tasks->updateStatus($agentJob, $validated['status'], $validated['message'] ?? null);
 
         return response()->json(['status' => $updated->status]);
     }
 
-    public function appendLog(Request $request, Deployment $deployment)
+    public function appendLog(Request $request, string $id)
     {
         $server = $this->authenticatedServer($request);
-        $this->authorizeServerOwnsDeployment($server, $deployment);
+
+        if ($deployment = Deployment::where('public_id', $id)->first()) {
+            $this->authorizeServerOwnsDeployment($server, $deployment);
+
+            $validated = $request->validate([
+                'sequence' => 'required|integer|min:1',
+                'step_name' => 'required|string|max:255',
+                'command' => 'required|string',
+                'output' => 'nullable|string',
+                'exit_code' => 'nullable|integer',
+                'duration_ms' => 'nullable|integer|min:0',
+                'timed_out' => 'nullable|boolean',
+            ]);
+
+            $entry = $this->jobs->recordLog($deployment, $validated);
+
+            return response()->json(['id' => $entry->id], 201);
+        }
+
+        $agentJob = AgentJob::where('public_id', $id)->firstOrFail();
+        $this->authorizeServerOwnsAgentJob($server, $agentJob);
 
         $validated = $request->validate([
             'sequence' => 'required|integer|min:1',
@@ -108,7 +168,7 @@ class AgentJobController extends Controller
             'timed_out' => 'nullable|boolean',
         ]);
 
-        $entry = $this->jobs->recordLog($deployment, $validated);
+        $entry = $this->tasks->recordLog($agentJob, $validated);
 
         return response()->json(['id' => $entry->id], 201);
     }
@@ -121,5 +181,12 @@ class AgentJobController extends Controller
     private function authorizeServerOwnsDeployment(Server $server, Deployment $deployment): void
     {
         abort_unless($deployment->server_id === $server->id, 403, 'This deployment does not belong to the authenticated server.');
+    }
+
+    private function authorizeServerOwnsAgentJob(Server $server, AgentJob $agentJob): void
+    {
+        $targetServerId = $agentJob->deploymentTask->deploymentTarget->server_id;
+
+        abort_unless($targetServerId === $server->id, 403, 'This job does not belong to the authenticated server.');
     }
 }

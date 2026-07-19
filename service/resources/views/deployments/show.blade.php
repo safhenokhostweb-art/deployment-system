@@ -53,6 +53,33 @@
     </div>
 </div>
 
+@if ($deployment->tasks->isNotEmpty())
+<div class="card">
+    <h3>Targets ({{ $deployment->project->environments->first()?->name ?? 'environment' }})</h3>
+    <table>
+        <thead><tr><th>Target</th><th>Server</th><th>Status</th><th>Agent (current attempt)</th><th></th></tr></thead>
+        <tbody>
+        @foreach ($deployment->tasks as $task)
+            <tr>
+                <td>{{ $task->deploymentTarget->name }}</td>
+                <td><a href="{{ route('servers.show', $task->deploymentTarget->server) }}">{{ $task->deploymentTarget->server->name }}</a></td>
+                <td><span class="badge badge-{{ $task->status }}">{{ $task->status }}</span></td>
+                <td>
+                    @php $lastJob = $task->agentJobs->last(); @endphp
+                    @if ($lastJob)
+                        {{ $lastJob->agent->name ?? $lastJob->agent->public_id }} (attempt {{ $lastJob->attempt }})
+                    @else
+                        <span class="muted">not claimed yet</span>
+                    @endif
+                </td>
+                <td><a href="{{ route('deployment-tasks.show', $task) }}">Details →</a></td>
+            </tr>
+        @endforeach
+        </tbody>
+    </table>
+</div>
+@endif
+
 <div class="card">
     <h3>Pipeline log</h3>
     @forelse ($deployment->logEntries as $entry)

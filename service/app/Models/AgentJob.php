@@ -5,6 +5,8 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Str;
 
 /**
  * One concrete claim-and-execute attempt of a DeploymentTask by a
@@ -22,12 +24,14 @@ class AgentJob extends Model
     public const STATUS_CANCELLED = 'cancelled';
 
     protected $fillable = [
+        'public_id',
         'deployment_task_id',
         'agent_id',
         'attempt',
         'status',
         'started_at',
         'finished_at',
+        'last_activity_at',
     ];
 
     protected function casts(): array
@@ -35,7 +39,15 @@ class AgentJob extends Model
         return [
             'started_at' => 'datetime',
             'finished_at' => 'datetime',
+            'last_activity_at' => 'datetime',
         ];
+    }
+
+    protected static function booted(): void
+    {
+        static::creating(function (AgentJob $agentJob): void {
+            $agentJob->public_id ??= (string) Str::uuid();
+        });
     }
 
     public function deploymentTask(): BelongsTo
@@ -46,5 +58,19 @@ class AgentJob extends Model
     public function agent(): BelongsTo
     {
         return $this->belongsTo(Agent::class);
+    }
+
+    public function logEntries(): HasMany
+    {
+        return $this->hasMany(AgentJobLogEntry::class)->orderBy('sequence');
+    }
+
+    public function isTerminal(): bool
+    {
+        return in_array($this->status, [
+            self::STATUS_SUCCEEDED,
+            self::STATUS_FAILED,
+            self::STATUS_CANCELLED,
+        ], true);
     }
 }

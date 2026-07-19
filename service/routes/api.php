@@ -21,6 +21,10 @@ Route::post('/agent/register', [AgentRegistrationController::class, 'register'])
 Route::middleware('agent.signed')->prefix('agent')->group(function () {
     Route::post('/heartbeat', [AgentJobController::class, 'heartbeat'])->name('agent.heartbeat');
     Route::get('/jobs/next', [AgentJobController::class, 'next'])->name('agent.jobs.next');
-    Route::post('/jobs/{deployment:public_id}/status', [AgentJobController::class, 'updateStatus'])->name('agent.jobs.status');
-    Route::post('/jobs/{deployment:public_id}/log', [AgentJobController::class, 'appendLog'])->name('agent.jobs.log');
+    // Plain {id} rather than implicit {deployment:public_id} model binding
+    // — Phase 3-C.2 needs to resolve either a legacy Deployment or a
+    // new-domain AgentJob by the same public_id-shaped string, tried in
+    // that order inside AgentJobController.
+    Route::post('/jobs/{id}/status', [AgentJobController::class, 'updateStatus'])->name('agent.jobs.status');
+    Route::post('/jobs/{id}/log', [AgentJobController::class, 'appendLog'])->name('agent.jobs.log');
 });

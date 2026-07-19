@@ -24,7 +24,16 @@ class Environment extends Model
         'name',
         'key',
         'status',
+        'locked_by_deployment_id',
+        'locked_at',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            'locked_at' => 'datetime',
+        ];
+    }
 
     public function project(): BelongsTo
     {
@@ -34,5 +43,21 @@ class Environment extends Model
     public function deploymentTargets(): HasMany
     {
         return $this->hasMany(DeploymentTarget::class);
+    }
+
+    public function lockedByDeployment(): BelongsTo
+    {
+        return $this->belongsTo(Deployment::class, 'locked_by_deployment_id');
+    }
+
+    /**
+     * Task 7: an Environment is available to a *different* in-flight
+     * Deployment only when unlocked, or already locked by that same
+     * Deployment (claiming a second target of the same rollout must not
+     * be blocked by its own lock).
+     */
+    public function isLockedByAnotherDeployment(int $deploymentId): bool
+    {
+        return $this->locked_by_deployment_id !== null && $this->locked_by_deployment_id !== $deploymentId;
     }
 }

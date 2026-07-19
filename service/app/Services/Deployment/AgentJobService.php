@@ -32,6 +32,15 @@ class AgentJobService
             $deployment = Deployment::query()
                 ->where('server_id', $server->id)
                 ->where('status', Deployment::STATUS_QUEUED)
+                // Phase 3-C.2: a multi-target Deployment aggregate can also
+                // reach status=queued, but it must only ever be claimed
+                // through its DeploymentTasks (AgentTaskService), never
+                // directly — otherwise it would be executed once, whole,
+                // against whichever server this row's (non-authoritative)
+                // server_id happens to hold, instead of once per target.
+                // Every legacy Deployment has zero tasks, always, so this
+                // excludes nothing that existed before this phase.
+                ->whereDoesntHave('tasks')
                 ->oldest('queued_at')
                 ->lockForUpdate()
                 ->with('project')

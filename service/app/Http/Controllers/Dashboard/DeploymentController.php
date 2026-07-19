@@ -19,7 +19,12 @@ class DeploymentController extends Controller
 
     public function show(Deployment $deployment)
     {
-        $deployment->load(['project', 'server', 'logEntries', 'rollbackOf']);
+        $deployment->load([
+            'project', 'server', 'logEntries', 'rollbackOf',
+            'tasks.deploymentTarget.server',
+            'tasks.deploymentTarget.environment',
+            'tasks.agentJobs.agent',
+        ]);
 
         return view('deployments.show', compact('deployment'));
     }
