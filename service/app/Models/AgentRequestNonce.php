@@ -10,6 +10,7 @@ class AgentRequestNonce extends Model
 
     protected $fillable = [
         'server_id',
+        'agent_id',
         'nonce',
     ];
 }

@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Dashboard\AgentController;
 use App\Http\Controllers\Dashboard\AuthController;
 use App\Http\Controllers\Dashboard\DashboardController;
 use App\Http\Controllers\Dashboard\DeploymentController;
@@ -19,6 +20,15 @@ Route::middleware('auth')->group(function () {
     Route::post('/servers', [ServerController::class, 'store'])->name('servers.store');
     Route::get('/servers/{server}', [ServerController::class, 'show'])->name('servers.show');
     Route::post('/servers/{server}/rotate-token', [ServerController::class, 'rotateToken'])->name('servers.rotate-token');
+    Route::post('/servers/{server}/agents', [AgentController::class, 'createRegistration'])->name('agents.create-registration');
+
+    Route::get('/agents', [AgentController::class, 'index'])->name('agents.index');
+    Route::get('/agents/pending', [AgentController::class, 'pending'])->name('agents.pending');
+    Route::get('/agents/{agent:public_id}', [AgentController::class, 'show'])->name('agents.show');
+    Route::post('/agents/{agent:public_id}/approve', [AgentController::class, 'approve'])->name('agents.approve');
+    Route::post('/agents/{agent:public_id}/reject', [AgentController::class, 'reject'])->name('agents.reject');
+    Route::post('/agents/{agent:public_id}/disable', [AgentController::class, 'disable'])->name('agents.disable');
+    Route::post('/agents/{agent:public_id}/reenable', [AgentController::class, 'reenable'])->name('agents.reenable');
 
     Route::get('/projects', [ProjectController::class, 'index'])->name('projects.index');
     Route::get('/projects/create', [ProjectController::class, 'create'])->name('projects.create');

@@ -41,6 +41,32 @@
 </div>
 
 <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+        <h3>Agents on this server</h3>
+        <form method="POST" action="{{ route('agents.create-registration', $server) }}">
+            @csrf
+            <button type="submit" class="btn btn-small">Register new agent</button>
+        </form>
+    </div>
+    <p class="muted">Optional going forward — this server keeps authenticating exactly as it does today via its own credentials above whether or not any Agent is registered here.</p>
+    <table>
+        <thead><tr><th>Name / public_id</th><th>Status</th><th>Version</th><th>Last heartbeat</th></tr></thead>
+        <tbody>
+        @forelse ($server->agents as $agent)
+            <tr>
+                <td><a href="{{ route('agents.show', $agent) }}">{{ $agent->name ?? $agent->public_id }}</a></td>
+                <td>{{ $agent->status }}</td>
+                <td>{{ $agent->agent_version ?? '—' }}</td>
+                <td>{{ $agent->last_seen_at?->diffForHumans() ?? 'never' }}</td>
+            </tr>
+        @empty
+            <tr><td colspan="4" class="muted">No agents registered for this server yet.</td></tr>
+        @endforelse
+        </tbody>
+    </table>
+</div>
+
+<div class="card">
     <h3>Projects on this server</h3>
     <table>
         <thead><tr><th>Name</th><th>Repository</th><th>Branch</th><th>Environment</th></tr></thead>

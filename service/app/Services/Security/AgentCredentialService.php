@@ -27,6 +27,18 @@ class AgentCredentialService
         return 'sec_' . Str::random(48);
     }
 
+    /**
+     * Short-lived, single-use secret for the agent self-registration
+     * handshake (docs/PHASE_3B_AGENT_IDENTITY_AUDIT.md §4). Stored
+     * encrypted (reversible), not hashed like agent_token — it's used as
+     * an HMAC signing key during verification, the same role
+     * signing_secret plays, not a bearer value that's merely compared.
+     */
+    public function generateRegistrationToken(): string
+    {
+        return 'regtok_' . Str::random(48);
+    }
+
     public function hashToken(string $token): string
     {
         return hash('sha256', $token);

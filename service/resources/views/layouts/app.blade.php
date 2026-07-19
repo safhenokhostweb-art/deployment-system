@@ -44,6 +44,7 @@
         <a href="{{ route('dashboard.index') }}">Dashboard</a>
         <a href="{{ route('projects.index') }}">Projects</a>
         <a href="{{ route('servers.index') }}">Servers</a>
+        <a href="{{ route('agents.index') }}">Agents</a>
         <form action="{{ route('logout') }}" method="POST" style="display:inline">
             @csrf
             <button type="submit" class="btn btn-small" style="background:transparent;border-color:#57606a;color:#cfd8e3;">Log out</button>

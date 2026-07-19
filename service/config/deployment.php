@@ -57,4 +57,16 @@ return [
     'deployment_log_output_retention_days' => (int) env('DEPLOYMENT_LOG_OUTPUT_RETENTION_DAYS', 90),
     'audit_log_retention_days' => (int) env('DEPLOYMENT_AUDIT_LOG_RETENTION_DAYS', 365),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Agent registration
+    |--------------------------------------------------------------------------
+    |
+    | How long a one-time registration token (issued when an operator starts
+    | registering a new agent for a Server) remains valid before it must be
+    | reissued. Short by design — see docs/PHASE_3B_AGENT_IDENTITY_AUDIT.md §4.
+    |
+    */
+    'agent_registration_token_ttl_minutes' => (int) env('DEPLOYMENT_AGENT_REGISTRATION_TOKEN_TTL_MINUTES', 30),
+
 ];

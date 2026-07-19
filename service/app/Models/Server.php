@@ -53,6 +53,11 @@ class Server extends Model
         return $this->hasMany(Deployment::class);
     }
 
+    public function agents(): HasMany
+    {
+        return $this->hasMany(Agent::class);
+    }
+
     /**
      * A server is "online" if it has made any authenticated call (poll,
      * heartbeat, log, or status update — all update last_seen_at) within

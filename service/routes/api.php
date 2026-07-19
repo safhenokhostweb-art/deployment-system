@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\AgentJobController;
+use App\Http\Controllers\Api\AgentRegistrationController;
 use App\Http\Controllers\Api\GitHubWebhookController;
 use Illuminate\Support\Facades\Route;
 
@@ -8,6 +9,12 @@ use Illuminate\Support\Facades\Route;
 // (X-Hub-Signature-256), not by session/token, so no auth middleware here.
 Route::post('/webhooks/github/{projectKey}', [GitHubWebhookController::class, 'handle'])
     ->name('webhooks.github');
+
+// A pending agent has no signing_secret yet, so this cannot sit behind
+// 'agent.signed' — it verifies its own, narrower scheme keyed by the
+// one-time registration token. See AgentRegistrationController.
+Route::post('/agent/register', [AgentRegistrationController::class, 'register'])
+    ->name('agent.register');
 
 // Deployment Agent -> Deployment Service. Bearer token + HMAC request
 // signature required on every call (see VerifyAgentRequestSignature).
