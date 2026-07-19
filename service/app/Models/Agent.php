@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Str;
 
 /**
@@ -68,6 +69,16 @@ class Agent extends Model
     public function server(): BelongsTo
     {
         return $this->belongsTo(Server::class);
+    }
+
+    public function deploymentTargets(): HasMany
+    {
+        return $this->hasMany(DeploymentTarget::class);
+    }
+
+    public function agentJobs(): HasMany
+    {
+        return $this->hasMany(AgentJob::class);
     }
 
     public function isApproved(): bool

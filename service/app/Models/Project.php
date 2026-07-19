@@ -57,6 +57,16 @@ class Project extends Model
         return $this->hasMany(Deployment::class);
     }
 
+    /**
+     * New Deployment Domain (docs/PHASE_3C_DEPLOYMENT_DOMAIN_AUDIT.md) —
+     * empty for every project that hasn't been explicitly given a real
+     * Environment. See DeploymentTargetResolver.
+     */
+    public function environments(): HasMany
+    {
+        return $this->hasMany(Environment::class);
+    }
+
     public function latestSuccessfulDeployment(): ?Deployment
     {
         return $this->deployments()

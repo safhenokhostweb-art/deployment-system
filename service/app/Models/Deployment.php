@@ -85,6 +85,18 @@ class Deployment extends Model
         return $this->hasMany(DeploymentLogEntry::class)->orderBy('sequence');
     }
 
+    /**
+     * New Deployment Domain (docs/PHASE_3C_DEPLOYMENT_DOMAIN_AUDIT.md) —
+     * empty for every deployment created through the legacy single-target
+     * path (nothing creates DeploymentTask rows for those). Only present
+     * once a future multi-target orchestrator (not built in this phase)
+     * fans a Deployment out across several DeploymentTargets.
+     */
+    public function tasks(): HasMany
+    {
+        return $this->hasMany(DeploymentTask::class);
+    }
+
     public function isTerminal(): bool
     {
         return in_array($this->status, [
