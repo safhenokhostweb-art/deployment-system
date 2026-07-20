@@ -37,6 +37,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/projects/{project}', [ProjectController::class, 'show'])->name('projects.show');
     Route::get('/projects/{project}/edit', [ProjectController::class, 'edit'])->name('projects.edit');
     Route::put('/projects/{project}', [ProjectController::class, 'update'])->name('projects.update');
+    Route::post('/projects/{project}/rotate-webhook-secret', [ProjectController::class, 'rotateWebhookSecret'])->name('projects.rotate-webhook-secret');
     Route::post('/projects/{project}/deploy', [ProjectController::class, 'deployManual'])->name('projects.deploy');
 
     Route::get('/deployments/{deployment}', [DeploymentController::class, 'show'])->name('deployments.show');
@@ -45,4 +46,6 @@ Route::middleware('auth')->group(function () {
     Route::post('/deployments/{deployment}/rollback', [DeploymentController::class, 'rollback'])->name('deployments.rollback');
 
     Route::get('/deployment-tasks/{deploymentTask}', [DeploymentTaskController::class, 'show'])->name('deployment-tasks.show');
+    Route::post('/deployment-tasks/{deploymentTask}/rollback', [DeploymentTaskController::class, 'rollback'])->name('deployment-tasks.rollback');
+    Route::post('/deployment-tasks/{deploymentTask}/health-check', [DeploymentTaskController::class, 'runHealthCheck'])->name('deployment-tasks.health-check');
 });

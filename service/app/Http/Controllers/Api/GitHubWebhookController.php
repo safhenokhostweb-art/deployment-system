@@ -6,7 +6,9 @@ use App\Http\Controllers\Controller;
 use App\Jobs\ProcessGitHubWebhookPush;
 use App\Models\AuditLogEntry;
 use App\Models\Project;
+use App\Models\WebhookDelivery;
 use App\Services\Security\GitHubWebhookVerifier;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 
@@ -49,6 +51,28 @@ class GitHubWebhookController extends Controller
         }
 
         $event = $request->header('X-GitHub-Event');
+        $deliveryId = $request->header('X-GitHub-Delivery');
+
+        // Task 2: GitHub redelivers a webhook (e.g. after a timeout or a
+        // non-2xx response) using the *same* X-GitHub-Delivery value.
+        // Recording it here, before anything else, makes a redelivery a
+        // cheap no-op instead of a second Deployment. A caller that
+        // doesn't send this header (only ever a test, in practice — real
+        // GitHub always sends it) skips this check entirely, so nothing
+        // about existing behavior changes for it.
+        if ($deliveryId !== null && !$this->recordDelivery($deliveryId, $project, $event)) {
+            AuditLogEntry::record(
+                actorType: AuditLogEntry::ACTOR_GITHUB,
+                actorIdentifier: $projectKey,
+                action: 'webhook.duplicate_delivery_rejected',
+                subjectType: Project::class,
+                subjectId: $project->id,
+                metadata: ['event' => $event, 'delivery_id' => $deliveryId],
+                ipAddress: $request->ip(),
+            );
+
+            return response()->json(['message' => 'Duplicate delivery, already processed']);
+        }
 
         AuditLogEntry::record(
             actorType: AuditLogEntry::ACTOR_GITHUB,
@@ -106,5 +130,25 @@ class GitHubWebhookController extends Controller
         return response()->json([
             'message' => 'Push accepted, deployment is being created',
         ], Response::HTTP_ACCEPTED);
+    }
+
+    /**
+     * @return bool true if this is the first time delivery_id has been
+     *              seen (safe to proceed), false if it's a duplicate.
+     */
+    private function recordDelivery(string $deliveryId, Project $project, ?string $event): bool
+    {
+        try {
+            WebhookDelivery::create([
+                'delivery_id' => $deliveryId,
+                'project_id' => $project->id,
+                'event' => $event,
+            ]);
+
+            return true;
+        } catch (QueryException) {
+            // Unique(delivery_id) violation: already recorded.
+            return false;
+        }
     }
 }

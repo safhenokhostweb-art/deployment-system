@@ -19,14 +19,26 @@
     </table>
 </div>
 
+@if (session('generated_webhook_secret'))
+<div class="card" style="border-color:#a41e1e;">
+    <h3>Save this now — shown in full only once</h3>
+    <p class="muted">Paste this into the GitHub webhook's "Secret" field now. It won't be shown in full again — use "Rotate" below if you ever lose it.</p>
+    <div class="secret-box">{{ session('generated_webhook_secret') }}</div>
+</div>
+@endif
+
 <div class="card">
     <h3>GitHub webhook setup</h3>
     <p class="muted">In the repository's Settings &rarr; Webhooks &rarr; Add webhook:</p>
     <label>Payload URL</label>
     <div class="secret-box">{{ $webhookUrl }}</div>
-    <label>Secret</label>
-    <div class="secret-box">{{ $project->github_webhook_secret }}</div>
+    <label>Secret @if(!session('generated_webhook_secret')) <span class="muted">(masked — rotate to see a full value again)</span> @endif</label>
+    <div class="secret-box">{{ $maskedWebhookSecret }}</div>
     <p class="muted">Content type: <code>application/json</code>. Events: just the <code>push</code> event.</p>
+    <form method="POST" action="{{ route('projects.rotate-webhook-secret', $project) }}" onsubmit="return confirm('Rotating invalidates the current webhook secret immediately. Update it in GitHub right after. Continue?');">
+        @csrf
+        <button type="submit" class="btn btn-danger btn-small">Rotate webhook secret</button>
+    </form>
 </div>
 
 <div class="card">

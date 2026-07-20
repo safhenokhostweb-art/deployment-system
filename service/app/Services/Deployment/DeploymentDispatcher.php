@@ -2,6 +2,7 @@
 
 namespace App\Services\Deployment;
 
+use App\Events\DeploymentStarted;
 use App\Models\AuditLogEntry;
 use App\Models\Deployment;
 use App\Models\DeploymentTask;
@@ -23,6 +24,12 @@ use Illuminate\Support\Facades\DB;
  * hope. A Project with real Environment/DeploymentTarget rows takes the new
  * multi-target path instead, and never falls back to the legacy one even
  * if it currently has zero active targets (see createMultiTarget()).
+ *
+ * Phase 3-D: the one deliberate addition to the legacy bodies is a single
+ * `event(new DeploymentStarted(...))` call when a deployment reaches
+ * `queued` — dispatching an event with no registered listener changes no
+ * behavior (Task 7's notification foundation; see
+ * docs/PHASE_3D_PRODUCTION_READINESS_REPORT.md §8).
  */
 class DeploymentDispatcher
 {
@@ -100,6 +107,8 @@ class DeploymentDispatcher
             subjectId: $deployment->id,
         );
 
+        event(new DeploymentStarted($deployment));
+
         return $deployment->refresh();
     }
 
@@ -171,6 +180,10 @@ class DeploymentDispatcher
                 metadata: ['project_id' => $project->id, 'commit_hash' => $commitHash, 'branch' => $branch],
             );
 
+            if ($deployment->status === Deployment::STATUS_QUEUED) {
+                event(new DeploymentStarted($deployment));
+            }
+
             return $deployment;
         });
     }
@@ -203,6 +216,8 @@ class DeploymentDispatcher
                 subjectId: $deployment->id,
                 metadata: ['project_id' => $project->id, 'commit_hash' => $commitHash],
             );
+
+            event(new DeploymentStarted($deployment));
 
             return $deployment;
         });
@@ -273,6 +288,10 @@ class DeploymentDispatcher
                 subjectId: $deployment->id,
                 metadata: ['project_id' => $project->id, 'commit_hash' => $commitHash, 'branch' => $branch, 'target_count' => count($targets)],
             );
+
+            if ($autoApprove) {
+                event(new DeploymentStarted($deployment));
+            }
 
             return $deployment;
         });

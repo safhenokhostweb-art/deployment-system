@@ -7,6 +7,7 @@
 
 <div class="card">
     <table>
+        <tr><th>Deployment ID</th><td><code>{{ $deployment->public_id }}</code></td></tr>
         <tr><th>Commit</th><td><code>{{ $deployment->commit_hash }}</code></td></tr>
         @if ($deployment->previous_commit_hash)
         <tr><th>Previous commit</th><td><code>{{ $deployment->previous_commit_hash }}</code></td></tr>
@@ -16,6 +17,10 @@
         <tr><th>Trigger</th><td>{{ $deployment->trigger }} @if($deployment->triggered_by) by {{ $deployment->triggered_by }} @endif</td></tr>
         @if ($deployment->rollbackOf)
         <tr><th>Rollback of</th><td><a href="{{ route('deployments.show', $deployment->rollbackOf) }}">deployment {{ $deployment->rollbackOf->public_id }}</a></td></tr>
+        @endif
+        @php $rollbackDeployment = \App\Models\Deployment::where('rollback_of_deployment_id', $deployment->id)->latest()->first(); @endphp
+        @if ($rollbackDeployment)
+        <tr><th>Rollback status</th><td>Rolled back by <a href="{{ route('deployments.show', $rollbackDeployment) }}">{{ $rollbackDeployment->public_id }}</a> (<span class="badge badge-{{ $rollbackDeployment->status }}">{{ $rollbackDeployment->status }}</span>)</td></tr>
         @endif
         @if ($deployment->approved_by)
         <tr><th>Approved by</th><td>{{ $deployment->approved_by }} at {{ $deployment->approved_at }}</td></tr>
@@ -57,21 +62,27 @@
 <div class="card">
     <h3>Targets ({{ $deployment->project->environments->first()?->name ?? 'environment' }})</h3>
     <table>
-        <thead><tr><th>Target</th><th>Server</th><th>Status</th><th>Agent (current attempt)</th><th></th></tr></thead>
+        <thead><tr><th>Target</th><th>Server</th><th>Status</th><th>Agent</th><th>Attempts</th><th></th></tr></thead>
         <tbody>
         @foreach ($deployment->tasks as $task)
             <tr>
                 <td>{{ $task->deploymentTarget->name }}</td>
                 <td><a href="{{ route('servers.show', $task->deploymentTarget->server) }}">{{ $task->deploymentTarget->server->name }}</a></td>
-                <td><span class="badge badge-{{ $task->status }}">{{ $task->status }}</span></td>
+                <td>
+                    <span class="badge badge-{{ $task->status }}">{{ $task->status }}</span>
+                    @if ($task->next_retry_at)
+                        <span class="badge badge-queued">retry {{ $task->next_retry_at->diffForHumans() }}</span>
+                    @endif
+                </td>
                 <td>
                     @php $lastJob = $task->agentJobs->last(); @endphp
                     @if ($lastJob)
-                        {{ $lastJob->agent->name ?? $lastJob->agent->public_id }} (attempt {{ $lastJob->attempt }})
+                        {{ $lastJob->agent->name ?? $lastJob->agent->public_id }}
                     @else
                         <span class="muted">not claimed yet</span>
                     @endif
                 </td>
+                <td>{{ $task->agentJobs->count() }}</td>
                 <td><a href="{{ route('deployment-tasks.show', $task) }}">Details →</a></td>
             </tr>
         @endforeach

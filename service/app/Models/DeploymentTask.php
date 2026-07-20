@@ -27,7 +27,15 @@ class DeploymentTask extends Model
         'deployment_id',
         'deployment_target_id',
         'status',
+        'next_retry_at',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            'next_retry_at' => 'datetime',
+        ];
+    }
 
     public function deployment(): BelongsTo
     {
@@ -42,5 +50,10 @@ class DeploymentTask extends Model
     public function agentJobs(): HasMany
     {
         return $this->hasMany(AgentJob::class);
+    }
+
+    public function healthChecks(): HasMany
+    {
+        return $this->hasMany(DeploymentHealthCheck::class)->latest();
     }
 }

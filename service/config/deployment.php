@@ -69,4 +69,21 @@ return [
     */
     'agent_registration_token_ttl_minutes' => (int) env('DEPLOYMENT_AGENT_REGISTRATION_TOKEN_TTL_MINUTES', 30),
 
+    /*
+    |--------------------------------------------------------------------------
+    | DeploymentTask retry policy (new domain only)
+    |--------------------------------------------------------------------------
+    |
+    | Off by default (max attempts = 1, i.e. no auto-retry) — a deployment
+    | pipeline (git reset + migrate + ...) is not guaranteed idempotent, so
+    | blindly re-running a half-applied migration could do real harm. Set
+    | above 1 to opt in; backoff seconds are consumed in order, then the
+    | last value repeats for any further attempt. Legacy (single-target)
+    | deployments are entirely unaffected by this — they have no concept
+    | of attempts beyond the one AgentJobService already provides.
+    |
+    */
+    'task_max_attempts' => (int) env('DEPLOYMENT_TASK_MAX_ATTEMPTS', 1),
+    'task_retry_backoff_seconds' => array_map('intval', explode(',', (string) env('DEPLOYMENT_TASK_RETRY_BACKOFF_SECONDS', '30,120,300'))),
+
 ];

@@ -40,6 +40,11 @@ class AgentTaskService
         return DB::transaction(function () use ($agent) {
             $candidates = DeploymentTask::query()
                 ->where('status', DeploymentTask::STATUS_QUEUED)
+                ->where(function ($query) {
+                    // Task 3: a task awaiting its retry backoff window
+                    // isn't claimable yet, even though it's still "queued".
+                    $query->whereNull('next_retry_at')->orWhere('next_retry_at', '<=', now());
+                })
                 ->whereHas('deploymentTarget', fn ($query) => $query->where('server_id', $agent->server_id))
                 ->oldest('created_at')
                 ->lockForUpdate()
@@ -72,7 +77,7 @@ class AgentTaskService
 
     private function claim(DeploymentTask $task, Agent $agent): array
     {
-        $task->update(['status' => DeploymentTask::STATUS_RUNNING]);
+        $task->update(['status' => DeploymentTask::STATUS_RUNNING, 'next_retry_at' => null]);
 
         $attemptNumber = $task->agentJobs()->count() + 1;
 
@@ -141,18 +146,53 @@ class AgentTaskService
             metadata: ['status' => $status, 'message' => $message],
         );
 
-        if (in_array($status, [AgentJob::STATUS_SUCCEEDED, AgentJob::STATUS_FAILED], true)) {
+        if ($status === AgentJob::STATUS_SUCCEEDED) {
             $task = $agentJob->deploymentTask;
-            $task->update([
-                'status' => $status === AgentJob::STATUS_SUCCEEDED
-                    ? DeploymentTask::STATUS_SUCCEEDED
-                    : DeploymentTask::STATUS_FAILED,
-            ]);
-
+            $task->update(['status' => DeploymentTask::STATUS_SUCCEEDED]);
             $this->aggregator->recalculate($task->deployment);
+        } elseif ($status === AgentJob::STATUS_FAILED) {
+            $this->handleFailedAttempt($agentJob);
         }
 
         return $agentJob->refresh();
+    }
+
+    /**
+     * Task 3: retry policy. Off by default (task_max_attempts = 1) — see
+     * config/deployment.php for why blind auto-retry isn't the default.
+     * When enabled, the task goes back to `queued` with a backoff delay
+     * instead of straight to `failed`, so the next eligible poll (after
+     * the delay) creates a brand-new AgentJob attempt — never a retried
+     * copy of the old one, preserving full independent history per try.
+     */
+    private function handleFailedAttempt(AgentJob $agentJob): void
+    {
+        $task = $agentJob->deploymentTask;
+        $maxAttempts = (int) config('deployment.task_max_attempts');
+
+        if ($agentJob->attempt < $maxAttempts) {
+            $backoff = config('deployment.task_retry_backoff_seconds');
+            $delaySeconds = $backoff[min($agentJob->attempt - 1, count($backoff) - 1)];
+
+            $task->update([
+                'status' => DeploymentTask::STATUS_QUEUED,
+                'next_retry_at' => now()->addSeconds($delaySeconds),
+            ]);
+
+            AuditLogEntry::record(
+                actorType: AuditLogEntry::ACTOR_SYSTEM,
+                actorIdentifier: null,
+                action: 'deployment_task.retry_scheduled',
+                subjectType: DeploymentTask::class,
+                subjectId: $task->id,
+                metadata: ['failed_attempt' => $agentJob->attempt, 'next_retry_in_seconds' => $delaySeconds],
+            );
+
+            return;
+        }
+
+        $task->update(['status' => DeploymentTask::STATUS_FAILED]);
+        $this->aggregator->recalculate($task->deployment);
     }
 
     public function recordLog(AgentJob $agentJob, array $payload): AgentJobLogEntry

@@ -8,7 +8,42 @@
     Deployment: <a href="{{ route('deployments.show', $task->deployment) }}">{{ $task->deployment->project->name }} @ {{ substr($task->deployment->commit_hash, 0, 12) }}</a>
     &mdash; Environment: {{ $task->deploymentTarget->environment->name }}
     &mdash; Server: <a href="{{ route('servers.show', $task->deploymentTarget->server) }}">{{ $task->deploymentTarget->server->name }}</a>
+    @if ($task->next_retry_at)
+        &mdash; <span class="badge badge-queued">retry scheduled {{ $task->next_retry_at->diffForHumans() }}</span>
+    @endif
 </p>
+
+@if ($task->status === 'succeeded')
+<div class="card">
+    <form method="POST" action="{{ route('deployment-tasks.rollback', $task) }}" onsubmit="return confirm('Roll back only this target ({{ $task->deploymentTarget->name }}) to this commit? Other targets in this environment are not affected.');">
+        @csrf
+        <button type="submit" class="btn">Roll back this target to this commit</button>
+    </form>
+
+    <h3 style="margin-top:1.5rem;">Health check</h3>
+    <form method="POST" action="{{ route('deployment-tasks.health-check', $task) }}" style="display:flex;gap:0.6rem;align-items:flex-end;flex-wrap:wrap;">
+        @csrf
+        <div style="flex:1;min-width:220px;">
+            <label style="margin-top:0;">URL to check</label>
+            <input type="text" name="url" placeholder="https://example.com/health" required>
+        </div>
+        <div style="width:120px;">
+            <label style="margin-top:0;">Expected status</label>
+            <input type="text" name="expected_status" value="200">
+        </div>
+        <button type="submit" class="btn btn-primary">Run check</button>
+    </form>
+
+    @forelse ($task->healthChecks as $check)
+        <p style="margin:0.6rem 0 0;">
+            <span class="badge badge-{{ $check->status === 'success' ? 'succeeded' : ($check->status === 'failed' ? 'failed' : 'pending_approval') }}">{{ $check->status }}</span>
+            <span class="muted">{{ $check->type }} — {{ $check->result_message }} ({{ $check->checked_at?->diffForHumans() ?? 'pending' }})</span>
+        </p>
+    @empty
+        <p class="muted" style="margin-top:0.6rem;">No health checks run yet.</p>
+    @endforelse
+</div>
+@endif
 
 <div class="card">
     <h3>Attempts</h3>

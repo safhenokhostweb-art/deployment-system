@@ -2,6 +2,9 @@
 
 namespace App\Services\Deployment;
 
+use App\Events\DeploymentFailed;
+use App\Events\DeploymentSucceeded;
+use App\Events\RollbackCompleted;
 use App\Models\AuditLogEntry;
 use App\Models\Deployment;
 use App\Models\DeploymentLogEntry;
@@ -111,6 +114,16 @@ class AgentJobService
             subjectId: $deployment->id,
             metadata: ['status' => $status, 'message' => $message],
         );
+
+        // Task 7: notification foundation — no listener registered yet,
+        // so dispatching changes no behavior.
+        if ($status === Deployment::STATUS_SUCCEEDED) {
+            event($deployment->action === Deployment::ACTION_ROLLBACK
+                ? new RollbackCompleted($deployment)
+                : new DeploymentSucceeded($deployment));
+        } elseif ($status === Deployment::STATUS_FAILED) {
+            event(new DeploymentFailed($deployment, $message));
+        }
 
         return $deployment->refresh();
     }

@@ -2,6 +2,9 @@
 
 namespace App\Services\Deployment;
 
+use App\Events\DeploymentFailed;
+use App\Events\DeploymentSucceeded;
+use App\Events\RollbackCompleted;
 use App\Models\AuditLogEntry;
 use App\Models\Deployment;
 use App\Models\DeploymentTask;
@@ -47,6 +50,17 @@ class DeploymentStatusAggregator
             subjectId: $deployment->id,
             metadata: ['status' => $newStatus],
         );
+
+        // Task 7: notification foundation — no listener registered yet.
+        // partial_success fires DeploymentFailed too — a mixed-outcome
+        // rollout needs attention just as much as a fully failed one.
+        if ($newStatus === Deployment::STATUS_SUCCEEDED) {
+            event($deployment->action === Deployment::ACTION_ROLLBACK
+                ? new RollbackCompleted($deployment)
+                : new DeploymentSucceeded($deployment));
+        } elseif (in_array($newStatus, [Deployment::STATUS_FAILED, Deployment::STATUS_PARTIAL_SUCCESS], true)) {
+            event(new DeploymentFailed($deployment));
+        }
 
         return $deployment->refresh();
     }

@@ -44,6 +44,7 @@ class ProjectController extends Controller
     public function store(Request $request): RedirectResponse
     {
         $validated = $this->validateProject($request);
+        $plainWebhookSecret = Str::random(40);
 
         $project = Project::create([
             'project_key' => $validated['project_key'],
@@ -54,7 +55,7 @@ class ProjectController extends Controller
             'server_id' => $validated['server_id'],
             'pipeline' => $validated['pipeline'],
             'auto_deploy' => $request->boolean('auto_deploy'),
-            'github_webhook_secret' => Str::random(40),
+            'github_webhook_secret' => $plainWebhookSecret,
         ]);
 
         AuditLogEntry::record(
@@ -66,7 +67,8 @@ class ProjectController extends Controller
         );
 
         return redirect()->route('projects.show', $project)
-            ->with('status', 'Project created. Configure the GitHub webhook URL and secret shown below.');
+            ->with('generated_webhook_secret', $plainWebhookSecret)
+            ->with('status', 'Project created. Configure the GitHub webhook URL and secret shown below — the secret is shown in full only once.');
     }
 
     public function show(Project $project)
@@ -74,8 +76,35 @@ class ProjectController extends Controller
         $project->load('server');
         $deployments = $project->deployments()->with('server')->latest('id')->take(30)->get();
         $webhookUrl = route('webhooks.github', $project->project_key);
+        // Task 6 (Phase 3-D): unlike the "shown once" secret above, the
+        // webhook secret genuinely needs to be re-checkable later (e.g.
+        // reconfiguring GitHub after it was deleted there) — but it must
+        // never be redisplayed in full on every page load. Masked here;
+        // "Rotate" issues a fresh one shown once, mirroring the Server/
+        // Agent credential pattern.
+        $secret = $project->github_webhook_secret;
+        $maskedWebhookSecret = substr($secret, 0, 4) . str_repeat('•', max(strlen($secret) - 8, 0)) . substr($secret, -4);
 
-        return view('projects.show', compact('project', 'deployments', 'webhookUrl'));
+        return view('projects.show', compact('project', 'deployments', 'webhookUrl', 'maskedWebhookSecret'));
+    }
+
+    public function rotateWebhookSecret(Request $request, Project $project): RedirectResponse
+    {
+        $plainWebhookSecret = Str::random(40);
+
+        $project->update(['github_webhook_secret' => $plainWebhookSecret]);
+
+        AuditLogEntry::record(
+            actorType: AuditLogEntry::ACTOR_USER,
+            actorIdentifier: $request->user()->email,
+            action: 'project.webhook_secret_rotated',
+            subjectType: Project::class,
+            subjectId: $project->id,
+        );
+
+        return redirect()->route('projects.show', $project)
+            ->with('generated_webhook_secret', $plainWebhookSecret)
+            ->with('status', 'Webhook secret rotated. Update it in GitHub now — the old secret stops working immediately.');
     }
 
     public function edit(Project $project)
