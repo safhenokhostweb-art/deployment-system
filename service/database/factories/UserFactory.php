@@ -27,6 +27,14 @@ class UserFactory extends Factory
         return [
             'name' => fake()->name(),
             'email' => fake()->unique()->safeEmail(),
+            // Matches the users.role column's own DB-level default — set
+            // explicitly here (rather than relying on that default) because
+            // Eloquent's create() does not reflect DB-computed defaults back
+            // onto the returned in-memory instance, and $this->actingAs($user)
+            // uses that exact instance without re-fetching from the database.
+            // Every pre-Phase-4-F test creates a user via this factory and
+            // expects full access, so this keeps that guarantee true.
+            'role' => User::ROLE_ADMIN,
             'email_verified_at' => now(),
             'password' => static::$password ??= Hash::make('password'),
             'remember_token' => Str::random(10),
