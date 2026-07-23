@@ -51,4 +51,15 @@ return [
     // Where the agent writes its own operational log (not deployment logs,
     // which are streamed to the service).
     'log_dir' => __DIR__ . '/storage/logs',
+
+    // Phase 4-H, Local Discovery — strictly opt-in. Leave commented out
+    // (or empty) to keep this agent behaving exactly as it does today:
+    // absent means the discovery poll never runs, no code path is
+    // reachable, and nothing changes for legacy agents. Set to an
+    // absolute path (e.g. '/home/example/www') to let this agent scan
+    // that folder's immediate subdirectories on request and report back
+    // only structured metadata — project name/path/type/framework
+    // version and sanitized git info. Never reads or sends .env files,
+    // passwords, tokens, or SSH keys.
+    // 'workspace_root' => '/home/example/www',
 ];
