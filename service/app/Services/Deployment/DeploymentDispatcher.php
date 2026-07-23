@@ -57,23 +57,39 @@ class DeploymentDispatcher
         );
     }
 
-    public function createManual(Project $project, string $commitHash, string $triggeredBy): Deployment
+    /**
+     * @param array{release_label?: ?string, release_notes?: ?string}|null $release
+     */
+    public function createManual(Project $project, string $commitHash, string $triggeredBy, ?array $release = null): Deployment
     {
         $targets = $this->resolver->resolveTargetsFor($project);
 
-        if ($this->isLegacyTargetSet($targets)) {
-            return $this->createLegacyManual($project, $commitHash, $triggeredBy);
+        $deployment = $this->isLegacyTargetSet($targets)
+            ? $this->createLegacyManual($project, $commitHash, $triggeredBy)
+            : $this->createMultiTarget(
+                project: $project,
+                targets: $targets,
+                commitHash: $commitHash,
+                branch: $project->branch,
+                trigger: Deployment::TRIGGER_MANUAL,
+                triggeredBy: $triggeredBy,
+                autoApprove: true, // manual trigger by an authenticated operator is already the approval, exactly as legacy does today
+            );
+
+        // Phase 4-I Task 7: a deliberate follow-up update, not a change to
+        // either creation path above — createLegacyManual()'s body stays
+        // the exact, unmodified pre-3-C.2 method, and createMultiTarget()
+        // is untouched too. A caller that never sends a release label (any
+        // pre-4-I caller, including every existing test) triggers no extra
+        // write at all.
+        if (!empty($release['release_label']) || !empty($release['release_notes'])) {
+            $deployment->update([
+                'release_label' => $release['release_label'] ?? null,
+                'release_notes' => $release['release_notes'] ?? null,
+            ]);
         }
 
-        return $this->createMultiTarget(
-            project: $project,
-            targets: $targets,
-            commitHash: $commitHash,
-            branch: $project->branch,
-            trigger: Deployment::TRIGGER_MANUAL,
-            triggeredBy: $triggeredBy,
-            autoApprove: true, // manual trigger by an authenticated operator is already the approval, exactly as legacy does today
-        );
+        return $deployment;
     }
 
     public function approve(Deployment $deployment, string $approvedBy): Deployment

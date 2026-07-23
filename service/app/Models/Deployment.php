@@ -37,6 +37,8 @@ class Deployment extends Model
         'commit_hash',
         'previous_commit_hash',
         'branch',
+        'release_label',
+        'release_notes',
         'trigger',
         'triggered_by',
         'approved_by',
@@ -107,5 +109,29 @@ class Deployment extends Model
             self::STATUS_CANCELLED,
             self::STATUS_PARTIAL_SUCCESS,
         ], true);
+    }
+
+    /**
+     * Phase 4-I Task 7: a friendly release identifier when one was set on
+     * manual deploy, falling back to a short commit hash for every
+     * deployment created before this phase (or through the webhook/rollback
+     * paths, which don't collect one) — never blank.
+     */
+    public function displayLabel(): string
+    {
+        return $this->release_label ?: substr($this->commit_hash, 0, 10);
+    }
+
+    /**
+     * Wall-clock duration once the deployment has actually started —
+     * null while still pending_approval/queued (nothing to measure yet).
+     */
+    public function durationSeconds(): ?int
+    {
+        if ($this->started_at === null) {
+            return null;
+        }
+
+        return ($this->finished_at ?? now())->diffInSeconds($this->started_at);
     }
 }
