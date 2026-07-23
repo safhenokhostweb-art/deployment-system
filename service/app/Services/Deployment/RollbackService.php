@@ -2,6 +2,7 @@
 
 namespace App\Services\Deployment;
 
+use App\Events\RollbackStarted;
 use App\Models\AuditLogEntry;
 use App\Models\Deployment;
 use App\Models\DeploymentTarget;
@@ -53,6 +54,11 @@ class RollbackService
                     'reverting_from_commit' => $currentCommit,
                 ],
             );
+
+            // Phase 4-J Task 2: mirrors DeploymentDispatcher::approve()'s own
+            // "audit log then event" ordering — purely additive
+            // instrumentation, no change to the rollback itself.
+            event(new RollbackStarted($rollback));
 
             return $rollback;
         });
@@ -137,6 +143,8 @@ class RollbackService
                     'reverting_from_commit' => $currentCommit,
                 ],
             );
+
+            event(new RollbackStarted($rollbackDeployment));
 
             return $rollbackDeployment;
         });

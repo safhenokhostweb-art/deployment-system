@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Events\DeploymentFailed;
 use App\Models\AgentJob;
 use App\Models\AuditLogEntry;
 use App\Models\Deployment;
@@ -65,6 +66,12 @@ class DetectStalledDeployments extends Command
                 subjectId: $deployment->id,
                 metadata: ['timeout_minutes' => $timeoutMinutes],
             );
+
+            // Phase 4-J Task 2: this path previously updated status with no
+            // event at all, so a stalled legacy deployment never produced a
+            // notification (unlike an agent-reported failure). Purely
+            // additive — the status/audit-log logic above is unchanged.
+            event(new DeploymentFailed($deployment, $deployment->failure_message));
         }
 
         return $stalled->count();

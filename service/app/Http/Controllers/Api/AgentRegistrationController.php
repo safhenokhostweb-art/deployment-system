@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Events\AgentApprovalRequired;
 use App\Http\Controllers\Controller;
 use App\Models\Agent;
 use App\Models\AgentRequestNonce;
@@ -107,6 +108,11 @@ class AgentRegistrationController extends Controller
             metadata: ['os' => $validated['os'], 'architecture' => $validated['architecture']],
             ipAddress: $request->ip(),
         );
+
+        // Phase 4-J: pure instrumentation — the only consumer is
+        // NotificationEventSubscriber, which only ever creates a
+        // Notification row. No existing behavior here changes.
+        event(new AgentApprovalRequired($agent));
 
         return response()->json(['status' => Agent::STATUS_PENDING_APPROVAL]);
     }

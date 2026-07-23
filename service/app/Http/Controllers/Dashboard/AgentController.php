@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Dashboard;
 
+use App\Events\AgentConnected;
 use App\Http\Controllers\Controller;
 use App\Models\Agent;
 use App\Models\AuditLogEntry;
@@ -9,6 +10,7 @@ use App\Models\Server;
 use App\Services\Security\AgentCredentialService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Gate;
 
 class AgentController extends Controller
 {
@@ -19,6 +21,8 @@ class AgentController extends Controller
 
     public function index()
     {
+        Gate::authorize('agents.view');
+
         $agents = Agent::with('server')
             ->where('status', '!=', Agent::STATUS_PENDING_APPROVAL)
             ->latest()
@@ -29,6 +33,8 @@ class AgentController extends Controller
 
     public function pending()
     {
+        Gate::authorize('agents.view');
+
         $pending = Agent::with('server')
             ->where('status', Agent::STATUS_PENDING_APPROVAL)
             ->latest()
@@ -39,6 +45,8 @@ class AgentController extends Controller
 
     public function show(Agent $agent)
     {
+        Gate::authorize('agents.view');
+
         $agent->load('server');
 
         return view('agents.show', compact('agent'));
@@ -53,6 +61,8 @@ class AgentController extends Controller
      */
     public function createRegistration(Request $request, Server $server): RedirectResponse
     {
+        Gate::authorize('agents.approve');
+
         $plainRegistrationToken = $this->credentials->generateRegistrationToken();
 
         $agent = Agent::create([
@@ -83,6 +93,8 @@ class AgentController extends Controller
 
     public function approve(Request $request, Agent $agent): RedirectResponse
     {
+        Gate::authorize('agents.approve');
+
         abort_unless($agent->status === Agent::STATUS_PENDING_APPROVAL, 409, 'Only a pending agent can be approved.');
         abort_if($agent->name === null, 409, 'This agent has not completed its registration call yet — approving now would issue credentials it has no way to receive.');
 
@@ -105,6 +117,9 @@ class AgentController extends Controller
             subjectId: $agent->id,
         );
 
+        // Phase 4-J: pure instrumentation for NotificationEventSubscriber.
+        event(new AgentConnected($agent));
+
         return redirect()
             ->route('agents.show', $agent)
             ->with('generated_token', $plainToken)
@@ -114,6 +129,8 @@ class AgentController extends Controller
 
     public function reject(Request $request, Agent $agent): RedirectResponse
     {
+        Gate::authorize('agents.approve');
+
         abort_unless($agent->status === Agent::STATUS_PENDING_APPROVAL, 409, 'Only a pending agent can be rejected.');
 
         AuditLogEntry::record(
@@ -132,6 +149,8 @@ class AgentController extends Controller
 
     public function disable(Request $request, Agent $agent): RedirectResponse
     {
+        Gate::authorize('agents.disable');
+
         abort_unless($agent->status === Agent::STATUS_APPROVED, 409, 'Only an approved agent can be disabled.');
 
         $agent->update(['status' => Agent::STATUS_DISABLED]);
@@ -149,6 +168,8 @@ class AgentController extends Controller
 
     public function reenable(Request $request, Agent $agent): RedirectResponse
     {
+        Gate::authorize('agents.disable');
+
         abort_unless($agent->status === Agent::STATUS_DISABLED, 409, 'Only a disabled agent can be re-enabled.');
 
         $agent->update(['status' => Agent::STATUS_APPROVED]);
@@ -162,5 +183,37 @@ class AgentController extends Controller
         );
 
         return redirect()->route('agents.show', $agent)->with('status', 'Agent re-enabled.');
+    }
+
+    /**
+     * A pending agent is removed via reject() above instead — this covers
+     * the other case: an approved agent must be disabled first (same
+     * "stop it, then remove it" shape as disable()/reenable()), so a hard
+     * delete never silently revokes a still-live credential. agent_jobs
+     * ->restrictOnDelete()'s this agent at the schema level; discovery_jobs/
+     * operation_jobs cascadeOnDelete and deployment_targets.agent_id
+     * nullOnDelete need no such check.
+     */
+    public function destroy(Request $request, Agent $agent): RedirectResponse
+    {
+        Gate::authorize('agents.delete');
+
+        abort_unless($agent->status === Agent::STATUS_DISABLED, 409, __('messages.errors.agent_delete_requires_disabled'));
+        abort_if($agent->agentJobs()->exists(), 409, __('messages.errors.agent_has_job_history'));
+
+        $serverId = $agent->server_id;
+
+        AuditLogEntry::record(
+            actorType: AuditLogEntry::ACTOR_USER,
+            actorIdentifier: $request->user()->email,
+            action: 'agent.deleted',
+            subjectType: Agent::class,
+            subjectId: $agent->id,
+            metadata: ['server_id' => $serverId],
+        );
+
+        $agent->delete();
+
+        return redirect()->route('servers.show', $serverId)->with('status', __('messages.flash.agent_deleted'));
     }
 }

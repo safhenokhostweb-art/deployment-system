@@ -23,6 +23,15 @@ Schedule::command('deployments:detect-stalled')
     ->withoutOverlapping()
     ->onOneServer();
 
+// Phase 4-J: same 5-minute cadence DetectOfflineAgents' own sweep-window
+// math assumes (see its docblock) — changing this interval without
+// updating SWEEP_MINUTES there would open a gap where a transition is
+// missed entirely.
+Schedule::command('agents:detect-offline')
+    ->everyFiveMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();
+
 Schedule::command('deployment-system:prune-logs')
     ->dailyAt('03:00')
     ->withoutOverlapping()
