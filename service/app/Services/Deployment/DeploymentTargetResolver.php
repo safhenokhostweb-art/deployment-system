@@ -2,6 +2,7 @@
 
 namespace App\Services\Deployment;
 
+use App\Models\Environment;
 use App\Models\Project;
 
 /**
@@ -25,10 +26,26 @@ class DeploymentTargetResolver
      */
     public function resolveTargetsFor(Project $project): array
     {
-        $environment = $project->environments()->first();
+        // Presence of a real Environment row is what decides the branch —
+        // never target/status count — so a half-configured or fully
+        // disabled project never silently falls back to legacy behavior,
+        // which would hide the misconfiguration behind an unrelated server.
+        if ($project->environments()->doesntExist()) {
+            return [$this->synthesizeLegacyTarget($project)];
+        }
+
+        // Phase 4-C.5: once a project can have more than one Environment
+        // (Production/Staging/Development), picking literally the first
+        // row by id — regardless of status — would risk silently
+        // dispatching to a disabled environment. Filtering to active here
+        // is safe because environments/deployment_targets held zero real
+        // rows before this phase (docs/PHASE_3C_DEPLOYMENT_DOMAIN_AUDIT.md),
+        // so no existing deployment behavior depended on the old
+        // unfiltered lookup — see docs/PHASE_4C5_ENVIRONMENT_TARGET_UI_REPORT.md §1.
+        $environment = $project->environments()->where('status', Environment::STATUS_ACTIVE)->first();
 
         if ($environment === null) {
-            return [$this->synthesizeLegacyTarget($project)];
+            return [];
         }
 
         return $environment->deploymentTargets()
