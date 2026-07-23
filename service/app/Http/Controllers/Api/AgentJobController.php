@@ -52,7 +52,18 @@ class AgentJobController extends Controller
                 'os' => 'nullable|string|max:100',
                 'architecture' => 'nullable|string|max:100',
                 'capabilities' => 'nullable|array',
+                // Phase 4-K Task 11: Server Health Foundation — all three
+                // optional. An agent binary that predates this phase never
+                // sends them, and forceFill() below leaves the column at
+                // whatever it already was (null, for every such agent).
+                'cpu_load_percent' => 'nullable|numeric|min:0|max:1000',
+                'memory_usage_percent' => 'nullable|numeric|min:0|max:100',
+                'disk_usage_percent' => 'nullable|numeric|min:0|max:100',
             ]);
+
+            $reportedHealth = array_key_exists('cpu_load_percent', $validated)
+                || array_key_exists('memory_usage_percent', $validated)
+                || array_key_exists('disk_usage_percent', $validated);
 
             $agent->forceFill([
                 'agent_version' => $validated['agent_version'],
@@ -60,6 +71,10 @@ class AgentJobController extends Controller
                 'architecture' => $validated['architecture'] ?? $agent->architecture,
                 'capabilities' => $validated['capabilities'] ?? $agent->capabilities,
                 'ip_address' => $request->ip(),
+                'cpu_load_percent' => $validated['cpu_load_percent'] ?? $agent->cpu_load_percent,
+                'memory_usage_percent' => $validated['memory_usage_percent'] ?? $agent->memory_usage_percent,
+                'disk_usage_percent' => $validated['disk_usage_percent'] ?? $agent->disk_usage_percent,
+                'health_reported_at' => $reportedHealth ? now() : $agent->health_reported_at,
             ])->save();
 
             return response()->json(['status' => 'ok']);

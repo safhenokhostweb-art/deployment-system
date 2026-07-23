@@ -39,6 +39,10 @@ class Agent extends Model
         'last_seen_at',
         'approved_by',
         'approved_at',
+        'cpu_load_percent',
+        'memory_usage_percent',
+        'disk_usage_percent',
+        'health_reported_at',
     ];
 
     protected $hidden = [
@@ -56,6 +60,7 @@ class Agent extends Model
             'registration_token_expires_at' => 'datetime',
             'last_seen_at' => 'datetime',
             'approved_at' => 'datetime',
+            'health_reported_at' => 'datetime',
         ];
     }
 
@@ -79,6 +84,16 @@ class Agent extends Model
     public function agentJobs(): HasMany
     {
         return $this->hasMany(AgentJob::class);
+    }
+
+    public function discoveryJobs(): HasMany
+    {
+        return $this->hasMany(DiscoveryJob::class);
+    }
+
+    public function operationJobs(): HasMany
+    {
+        return $this->hasMany(OperationJob::class);
     }
 
     public function isApproved(): bool

@@ -1,6 +1,8 @@
 <?php
 
+use App\Http\Controllers\Api\AgentDiscoveryController;
 use App\Http\Controllers\Api\AgentJobController;
+use App\Http\Controllers\Api\AgentOperationController;
 use App\Http\Controllers\Api\AgentRegistrationController;
 use App\Http\Controllers\Api\GitHubWebhookController;
 use Illuminate\Support\Facades\Route;
@@ -27,4 +29,15 @@ Route::middleware('agent.signed')->prefix('agent')->group(function () {
     // that order inside AgentJobController.
     Route::post('/jobs/{id}/status', [AgentJobController::class, 'updateStatus'])->name('agent.jobs.status');
     Route::post('/jobs/{id}/log', [AgentJobController::class, 'appendLog'])->name('agent.jobs.log');
+
+    // Phase 4-H: Local Discovery. Strictly opt-in on the agent side (only
+    // polled when the agent's own config sets workspace_root) and a no-op
+    // for legacy Server-only credentials — see AgentDiscoveryController.
+    Route::get('/discovery-jobs/next', [AgentDiscoveryController::class, 'next'])->name('agent.discovery-jobs.next');
+    Route::post('/discovery-jobs/{id}/report', [AgentDiscoveryController::class, 'report'])->name('agent.discovery-jobs.report');
+
+    // Phase 4-K: Operations Command Center. Same signed channel, same
+    // Agent-identity-only rule as Discovery — see AgentOperationController.
+    Route::get('/operation-jobs/next', [AgentOperationController::class, 'next'])->name('agent.operation-jobs.next');
+    Route::post('/operation-jobs/{id}/report', [AgentOperationController::class, 'report'])->name('agent.operation-jobs.report');
 });

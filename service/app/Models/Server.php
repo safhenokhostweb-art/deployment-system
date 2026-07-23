@@ -11,10 +11,17 @@ class Server extends Model
 {
     use HasFactory;
 
+    /** Informational only (Phase 4-D onboarding wizard) — nothing in the deploy/execution path reads this. */
+    public const TYPE_VPS = 'vps';
+    public const TYPE_CPANEL = 'cpanel';
+    public const TYPE_SHARED_HOSTING = 'shared_hosting';
+    public const TYPE_DOCKER = 'docker';
+
     protected $fillable = [
         'public_id',
         'name',
         'description',
+        'type',
         'agent_token_hash',
         'signing_secret',
         'is_active',
@@ -61,6 +68,34 @@ class Server extends Model
     public function deploymentTargets(): HasMany
     {
         return $this->hasMany(DeploymentTarget::class);
+    }
+
+    public function operationJobs(): HasMany
+    {
+        return $this->hasMany(OperationJob::class);
+    }
+
+    /**
+     * Phase 4-K: Laravel-group operations (cache_clear, etc.) need a
+     * project's working_directory/php_binary — resolvable only when this
+     * server hosts exactly one Project, whether reached via the legacy
+     * direct link or the new-domain Environment/DeploymentTarget path.
+     * Mirrors ProjectController::soleApprovedAgentFor()'s existing
+     * "only offer this when it's unambiguous" convention. Returns null
+     * (not an error) for zero or multiple candidates — the Command
+     * Center UI simply doesn't offer Laravel-group actions in that case.
+     */
+    public function soleProject(): ?Project
+    {
+        $legacyProjectIds = $this->projects()->pluck('id');
+        $newDomainProjectIds = Project::whereHas(
+            'environments.deploymentTargets',
+            fn ($query) => $query->where('server_id', $this->id)
+        )->pluck('id');
+
+        $candidateIds = $legacyProjectIds->merge($newDomainProjectIds)->unique();
+
+        return $candidateIds->count() === 1 ? Project::find($candidateIds->first()) : null;
     }
 
     /**
