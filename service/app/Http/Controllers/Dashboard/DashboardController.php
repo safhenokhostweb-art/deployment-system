@@ -3,20 +3,23 @@
 namespace App\Http\Controllers\Dashboard;
 
 use App\Http\Controllers\Controller;
-use App\Models\Deployment;
-use App\Models\Server;
+use App\Services\Dashboard\DashboardService;
 
 class DashboardController extends Controller
 {
+    public function __construct(private readonly DashboardService $dashboard)
+    {
+    }
+
     public function index()
     {
-        $recentDeployments = Deployment::with(['project', 'server'])
-            ->latest('id')
-            ->take(25)
-            ->get();
+        $summary = $this->dashboard->summaryCards();
+        $health = $this->dashboard->healthOverview();
+        $recentDeployments = $this->dashboard->recentDeployments();
+        $recentReleases = $this->dashboard->recentReleases();
+        $agents = $this->dashboard->agentStatusWidget();
+        $serverOverview = $this->dashboard->serverOverviewWidget();
 
-        $servers = Server::withCount('projects')->get();
-
-        return view('dashboard.index', compact('recentDeployments', 'servers'));
+        return view('dashboard.index', compact('summary', 'health', 'recentDeployments', 'recentReleases', 'agents', 'serverOverview'));
     }
 }
