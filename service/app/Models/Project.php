@@ -15,11 +15,13 @@ class Project extends Model
     protected $fillable = [
         'public_id',
         'name',
+        'description',
         'project_key',
         'repository',
         'branch',
         'environment',
         'server_id',
+        'github_account_id',
         'pipeline',
         'auto_deploy',
         'github_webhook_secret',
@@ -52,6 +54,22 @@ class Project extends Model
         return $this->belongsTo(Server::class);
     }
 
+    /**
+     * Phase 4-L: which connected GitHubAccount (if any) this project's
+     * webhook was configured through — null for every Project created
+     * before this column existed, or one whose webhook was only ever
+     * set up manually in GitHub's own UI.
+     */
+    public function githubAccount(): BelongsTo
+    {
+        return $this->belongsTo(GitHubAccount::class);
+    }
+
+    public function hasGithubWebhookConfigured(): bool
+    {
+        return $this->github_account_id !== null;
+    }
+
     public function deployments(): HasMany
     {
         return $this->hasMany(Deployment::class);
@@ -73,5 +91,21 @@ class Project extends Model
             ->where('status', Deployment::STATUS_SUCCEEDED)
             ->latest('finished_at')
             ->first();
+    }
+
+    /**
+     * Phase 4-G resource-level authorization — empty for every Project
+     * that exists before this phase (and any never explicitly granted a
+     * member). See ProjectPolicy for how this combines with a User's
+     * global role/permission; Admin bypasses this relation entirely.
+     */
+    public function members(): HasMany
+    {
+        return $this->hasMany(ProjectMember::class);
+    }
+
+    public function isMember(User $user): bool
+    {
+        return $this->members()->where('user_id', $user->id)->exists();
     }
 }

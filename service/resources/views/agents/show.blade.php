@@ -3,90 +3,116 @@
 @section('title', $agent->name ?? $agent->public_id)
 
 @section('content')
-<h1>{{ $agent->name ?? 'Unregistered agent' }}</h1>
-<p class="muted">Server: <a href="{{ route('servers.show', $agent->server) }}">{{ $agent->server->name }}</a></p>
+<h1>{{ $agent->name ?? __('ui.agents.unregistered') }}</h1>
+<p class="muted">{{ __('ui.agents.server_label') }}: <a href="{{ route('servers.show', $agent->server) }}">{{ $agent->server->name }}</a></p>
 
 @if (session('generated_registration_token'))
-<div class="card" style="border-color:#a41e1e;">
-    <h3>Save these now — shown only once</h3>
-    <p class="muted">Hand these to whoever is provisioning the agent (out-of-band). The installer's <code>POST /api/agent/register</code> call needs both, signed with the registration token as the HMAC key. Expires in {{ config('deployment.agent_registration_token_ttl_minutes') }} minutes.</p>
+<x-card style="border-color:#a41e1e;" :title="__('ui.agents.registration_once_title')">
+    <p class="muted">{{ __('ui.agents.registration_once_intro', ['minutes' => config('deployment.agent_registration_token_ttl_minutes')]) }}</p>
     <label>registration_id</label>
     <div class="secret-box">{{ session('generated_registration_id') }}</div>
     <label>registration_token</label>
     <div class="secret-box">{{ session('generated_registration_token') }}</div>
-</div>
+</x-card>
 @endif
 
 @if (session('generated_token'))
-<div class="card" style="border-color:#a41e1e;">
-    <h3>Save these now — shown only once</h3>
-    <p class="muted">Paste these into <code>config.php</code> on the agent's server (<code>server_id</code> = this agent's <code>public_id</code> below).</p>
-    <label>agent public_id (use as server_id in config.php)</label>
+<x-card style="border-color:#a41e1e;" :title="__('ui.agents.registration_once_title')">
+    <p class="muted">{{ __('ui.agents.credentials_once_intro') }}</p>
+    <label>agent public_id (server_id)</label>
     <div class="secret-box">{{ $agent->public_id }}</div>
     <label>agent_token</label>
     <div class="secret-box">{{ session('generated_token') }}</div>
     <label>signing_secret</label>
     <div class="secret-box">{{ session('generated_secret') }}</div>
-</div>
+</x-card>
 @endif
 
-<div class="card">
+<x-card>
     <table>
-        <tr><th>public_id</th><td><code>{{ $agent->public_id }}</code></td></tr>
-        <tr><th>Status</th><td>
-            @if ($agent->status === 'approved')
-                <span class="badge badge-succeeded">approved</span>
-            @elseif ($agent->status === 'disabled')
-                <span class="badge badge-failed">disabled</span>
-            @else
-                <span class="badge badge-pending_approval">{{ $agent->status }}</span>
-            @endif
+        <tr><th>public_id</th><td><x-ltr><code>{{ $agent->public_id }}</code></x-ltr></td></tr>
+        <tr><th>{{ __('ui.common.status') }}</th><td>
+            <x-badge :status="$agent->status" />
             &mdash;
             @if ($agent->isOnline())
-                <span class="badge badge-succeeded">online</span>
+                <x-badge status="online" />
             @else
-                <span class="badge badge-cancelled">offline</span>
+                <x-badge status="offline" />
             @endif
         </td></tr>
-        <tr><th>Version</th><td>{{ $agent->agent_version ?? 'not reported yet' }}</td></tr>
-        <tr><th>OS</th><td>{{ $agent->os ?? '—' }}</td></tr>
-        <tr><th>Architecture</th><td>{{ $agent->architecture ?? '—' }}</td></tr>
-        <tr><th>IP (last seen from)</th><td>{{ $agent->ip_address ?? '—' }}</td></tr>
-        <tr><th>Capabilities</th><td>
+        <tr><th>{{ __('ui.common.version') }}</th><td>{{ $agent->agent_version ?? __('ui.servers.not_reported_yet') }}</td></tr>
+        <tr><th>{{ __('ui.agents.os') }}</th><td>{{ $agent->os ?? '—' }}</td></tr>
+        <tr><th>{{ __('ui.agents.architecture') }}</th><td>{{ $agent->architecture ?? '—' }}</td></tr>
+        <tr><th>{{ __('ui.agents.ip_address') }}</th><td><x-ltr>{{ $agent->ip_address ?? '—' }}</x-ltr></td></tr>
+        <tr><th>{{ __('ui.agents.capabilities') }}</th><td>
             @if ($agent->capabilities)
                 <pre>{{ json_encode($agent->capabilities, JSON_PRETTY_PRINT) }}</pre>
             @else
-                <span class="muted">not reported yet</span>
+                <span class="muted">{{ __('ui.servers.not_reported_yet') }}</span>
             @endif
         </td></tr>
-        <tr><th>Last heartbeat</th><td>{{ $agent->last_seen_at?->diffForHumans() ?? 'never' }}</td></tr>
-        <tr><th>Registered</th><td>{{ $agent->created_at->diffForHumans() }}</td></tr>
+        <tr><th>{{ __('ui.common.last_heartbeat') }}</th><td>{{ $agent->last_seen_at?->diffForHumans() ?? __('status.never') }}</td></tr>
+        <tr><th>{{ __('ui.common.registered') }}</th><td>{{ $agent->created_at->diffForHumans() }}</td></tr>
         @if ($agent->approved_by)
-        <tr><th>Approved by</th><td>{{ $agent->approved_by }} &mdash; {{ $agent->approved_at?->diffForHumans() }}</td></tr>
+        <tr><th>{{ __('ui.agents.approved_by') }}</th><td>{{ $agent->approved_by }} &mdash; {{ $agent->approved_at?->diffForHumans() }}</td></tr>
         @endif
     </table>
 
     <div style="margin-top:1rem;display:flex;gap:0.6rem;">
         @if ($agent->status === 'pending_approval')
+            @can('agents.approve')
             <form method="POST" action="{{ route('agents.approve', $agent) }}">
                 @csrf
-                <button type="submit" class="btn btn-primary" @if(!$agent->name) disabled title="Waiting for the agent's registration call" @endif>Approve</button>
+                <button type="submit" class="btn btn-primary" @if(!$agent->name) disabled title="{{ __('ui.agents.approve_disabled_title') }}" @endif>{{ __('ui.agents.approve_button') }}</button>
             </form>
-            <form method="POST" action="{{ route('agents.reject', $agent) }}" onsubmit="return confirm('Reject this pending agent?');">
+            <form method="POST" action="{{ route('agents.reject', $agent) }}" id="reject-agent-form" style="display:inline">
                 @csrf
-                <button type="submit" class="btn btn-danger">Reject</button>
             </form>
+            <button type="button" class="btn btn-danger" onclick="document.getElementById('reject-agent-dialog').showModal()">{{ __('ui.agents.reject_button') }}</button>
+            <x-confirm-dialog
+                id="reject-agent-dialog"
+                form-id="reject-agent-form"
+                :title="__('ui.agents.reject_button')"
+                :body="__('ui.agents.reject_confirm_pending')"
+                :confirm-label="__('ui.agents.reject_button')"
+            />
+            @endcan
         @elseif ($agent->status === 'approved')
-            <form method="POST" action="{{ route('agents.disable', $agent) }}" onsubmit="return confirm('Disable this agent? It will be unable to authenticate immediately.');">
+            @can('agents.disable')
+            <form method="POST" action="{{ route('agents.disable', $agent) }}" id="disable-agent-form" style="display:inline">
                 @csrf
-                <button type="submit" class="btn btn-danger">Disable</button>
             </form>
+            <button type="button" class="btn btn-danger" onclick="document.getElementById('disable-agent-dialog').showModal()">{{ __('ui.agents.disable_button') }}</button>
+            <x-confirm-dialog
+                id="disable-agent-dialog"
+                form-id="disable-agent-form"
+                :title="__('ui.agents.disable_button')"
+                :body="__('ui.agents.disable_confirm')"
+                :confirm-label="__('ui.agents.disable_button')"
+            />
+            @endcan
         @elseif ($agent->status === 'disabled')
+            @can('agents.disable')
             <form method="POST" action="{{ route('agents.reenable', $agent) }}">
                 @csrf
-                <button type="submit" class="btn">Re-enable</button>
+                <button type="submit" class="btn">{{ __('ui.agents.reenable_button') }}</button>
             </form>
+            @endcan
+            @can('agents.delete')
+            <form method="POST" action="{{ route('agents.destroy', $agent) }}" id="delete-agent-form" style="display:inline">
+                @csrf
+                @method('DELETE')
+            </form>
+            <button type="button" class="btn btn-danger" onclick="document.getElementById('delete-agent-dialog').showModal()">{{ __('ui.agents.delete_button') }}</button>
+            <x-confirm-dialog
+                id="delete-agent-dialog"
+                form-id="delete-agent-form"
+                :title="__('ui.agents.delete_button')"
+                :body="__('ui.agents.delete_confirm')"
+                :confirm-label="__('ui.agents.delete_button')"
+            />
+            @endcan
         @endif
     </div>
-</div>
+</x-card>
 @endsection
