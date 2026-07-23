@@ -1,36 +1,45 @@
 @extends('layouts.app')
 
-@section('title', 'Servers')
+@section('title', __('ui.servers.title'))
 
 @section('content')
 <div style="display:flex;justify-content:space-between;align-items:center;">
-    <h1>Servers</h1>
-    <a href="{{ route('servers.create') }}" class="btn btn-primary">Register server</a>
+    <h1>{{ __('ui.servers.title') }}</h1>
+    @can('servers.create')
+    <a href="{{ route('servers.create') }}" class="btn btn-primary">{{ __('ui.servers.register_button') }}</a>
+    @endcan
 </div>
 
-<div class="card">
+<x-card>
     <table>
-        <thead><tr><th>Name</th><th>Status</th><th>Agent version</th><th>Description</th><th>Projects</th><th>Last seen</th></tr></thead>
+        <thead><tr>
+            <th>{{ __('ui.common.name') }}</th>
+            <th>{{ __('ui.common.status') }}</th>
+            <th>{{ __('ui.servers.agent_version') }}</th>
+            <th>{{ __('ui.common.description') }}</th>
+            <th>{{ __('ui.common.projects') }}</th>
+            <th>{{ __('ui.common.last_seen') }}</th>
+        </tr></thead>
         <tbody>
         @forelse ($servers as $server)
             <tr>
                 <td><a href="{{ route('servers.show', $server) }}">{{ $server->name }}</a></td>
                 <td>
                     @if ($server->isOnline())
-                        <span class="badge badge-succeeded">online</span>
+                        <x-badge status="online" />
                     @else
-                        <span class="badge badge-cancelled">offline</span>
+                        <x-badge status="offline" />
                     @endif
                 </td>
                 <td>{{ $server->agent_version ?? '—' }}</td>
                 <td>{{ $server->description }}</td>
                 <td>{{ $server->projects_count }}</td>
-                <td>{{ $server->last_seen_at?->diffForHumans() ?? 'never' }}</td>
+                <td>{{ $server->last_seen_at?->diffForHumans() ?? __('status.never') }}</td>
             </tr>
         @empty
-            <tr><td colspan="6" class="muted">No servers registered yet.</td></tr>
+            <tr><td colspan="6"><x-empty-state>{{ __('ui.servers.no_servers') }}</x-empty-state></td></tr>
         @endforelse
         </tbody>
     </table>
-</div>
+</x-card>
 @endsection
