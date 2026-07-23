@@ -1,0 +1,78 @@
+<?php
+
+return [
+
+    // Mirrors the exact English strings hardcoded in app/Services and
+    // app/Http/Controllers (abort() guards). Kept here only so the English
+    // locale renders identically to the untouched Service/Controller code;
+    // the Persian file in lang/fa/messages.php is the one that actually
+    // changes what's displayed.
+    'errors' => [
+        'deployment_approve_guard' => 'Only pending_approval deployments can be approved.',
+        'deployment_cancel_guard' => 'Only pending_approval or queued deployments can be cancelled.',
+        'deployment_no_targets' => "Project ':name' has an Environment configured but no active deployment targets.",
+        'rollback_not_succeeded' => 'Can only roll back to a previously successful deployment.',
+        'rollback_no_earlier' => 'No earlier successful deployment to roll back to.',
+        'rollback_target_not_succeeded' => 'Can only roll back a target to a previously successful task.',
+        'rollback_target_no_earlier' => 'No earlier successful deployment for this target to roll back to.',
+        'health_check_unknown_type' => "Unknown health check type ':type'.",
+        'agent_approve_guard' => 'Only a pending agent can be approved.',
+        'agent_approve_not_registered' => 'This agent has not completed its registration call yet — approving now would issue credentials it has no way to receive.',
+        'agent_reject_guard' => 'Only a pending agent can be rejected.',
+        'agent_disable_guard' => 'Only an approved agent can be disabled.',
+        'agent_reenable_guard' => 'Only a disabled agent can be re-enabled.',
+        'pipeline_invalid_json' => 'Pipeline must be a non-empty JSON array of {name, command} steps.',
+        'pipeline_step_incomplete' => 'Every pipeline step needs a name and a command.',
+        'invalid_credentials' => 'Invalid credentials.',
+        'target_has_deployment_history' => 'This target has deployment history and cannot be deleted. Disable it instead.',
+        'server_has_dependents' => 'This server still has projects, deployments, agents, or deployment targets attached to it and cannot be deleted. Remove those first.',
+        'project_has_dependents' => 'This project still has deployment history or an Environment and cannot be deleted.',
+        'agent_delete_requires_disabled' => 'Only a disabled agent can be deleted. Disable it first.',
+        'agent_has_job_history' => 'This agent has job history and cannot be deleted.',
+        'github_app_not_configured' => 'GitHub App is not configured yet — an administrator needs to set GITHUB_APP_ID/GITHUB_APP_SLUG first.',
+        'github_installation_id_missing' => 'GitHub did not send an installation id back — the connection could not be completed.',
+        'github_connection_failed' => 'Could not reach GitHub with this installation. It may have been removed on GitHub\'s side — try reconnecting.',
+    ],
+
+    'flash' => [
+        'agent_registration_issued' => 'Registration token issued. Copy both values now — shown only once, expires in :minutes minutes.',
+        'agent_approved' => 'Agent approved. Copy the credentials below now — shown only once.',
+        'agent_rejected' => 'Pending agent rejected and removed.',
+        'agent_disabled' => 'Agent disabled — it can no longer authenticate.',
+        'agent_reenabled' => 'Agent re-enabled.',
+        'deployment_approved' => 'Deployment approved and queued.',
+        'deployment_cancelled' => 'Deployment cancelled.',
+        'rollback_queued' => 'Rollback queued.',
+        'rollback_target_queued' => 'Rollback queued for this target.',
+        'health_check_completed' => 'Health check completed.',
+        'project_created' => 'Project created. Configure the GitHub webhook URL and secret shown below — the secret is shown in full only once.',
+        'webhook_rotated' => 'Webhook secret rotated. Update it in GitHub now — the old secret stops working immediately.',
+        'project_updated' => 'Project updated.',
+        'deployment_queued' => 'Deployment queued.',
+        'server_registered' => 'Server registered. Copy the credentials below now — the token and secret are shown only once.',
+        'server_credentials_rotated' => 'Credentials rotated. Update config.php on that server now — the old credentials stop working immediately.',
+        'server_deleted' => 'Server ":name" deleted.',
+        'project_deleted' => 'Project ":name" deleted.',
+        'agent_deleted' => 'Agent deleted.',
+        'github_account_deleted' => 'GitHub account ":login" deleted.',
+        'environment_created' => 'Environment ":name" created.',
+        'environment_enabled' => 'Environment ":name" enabled.',
+        'environment_disabled' => 'Environment ":name" disabled — it will no longer be used for deployments.',
+        'targets_created' => ':count deployment target(s) added.',
+        'target_enabled' => 'Target ":name" enabled.',
+        'target_disabled' => 'Target ":name" disabled — it will no longer be used for deployments.',
+        'target_deleted' => 'Target ":name" deleted.',
+        'github_account_connected' => 'GitHub account ":login" connected.',
+        'github_account_disconnected' => 'GitHub account ":login" disconnected.',
+        'github_connection_ok' => 'Connection to ":login" is working.',
+        'user_role_changed' => ':name\'s role changed to :role.',
+        'project_member_added' => ':name added to this project.',
+        'project_member_removed' => ':name removed from this project.',
+        'discovery_scan_queued' => 'Workspace scan queued — the Agent will pick it up on its next poll.',
+        'notifications_marked_read' => 'All notifications marked as read.',
+        'notification_preferences_saved' => 'Notification preferences saved.',
+        'operation_queued' => 'Operation queued — the Agent will pick it up on its next poll.',
+        'github_webhook_connected' => 'GitHub webhook connected for ":name".',
+    ],
+
+];

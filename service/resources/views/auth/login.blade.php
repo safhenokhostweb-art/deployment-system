@@ -1,19 +1,19 @@
 @extends('layouts.app')
 
-@section('title', 'Sign in')
+@section('title', __('ui.auth.title'))
 
 @section('content')
-<div class="card" style="max-width: 380px; margin: 3rem auto;">
-    <h2>Deployment Service</h2>
+<x-card>
+    <h2>{{ __('nav.brand') }}</h2>
     <form method="POST" action="{{ route('login') }}">
         @csrf
-        <label for="email">Email</label>
+        <label for="email">{{ __('ui.common.email') }}</label>
         <input type="email" id="email" name="email" value="{{ old('email') }}" required autofocus>
 
-        <label for="password">Password</label>
+        <label for="password">{{ __('ui.common.password') }}</label>
         <input type="password" id="password" name="password" required>
 
-        <button type="submit" class="btn btn-primary" style="margin-top: 1.2rem; width: 100%;">Sign in</button>
+        <button type="submit" class="btn btn-primary" style="margin-top: 1.2rem; width: 100%;">{{ __('ui.auth.submit') }}</button>
     </form>
-</div>
+</x-card>
 @endsection
