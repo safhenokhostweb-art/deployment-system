@@ -83,6 +83,8 @@ sudo ./install-agent.sh</pre></x-ltr>
         </ol>
         <p class="muted" style="margin-top:0.6rem;">{{ __('ui.servers.one_click_note') }}</p>
     </x-card>
+    @elseif ($oneClickInstallerBlockedReason)
+    <x-alert type="error">{{ $oneClickInstallerBlockedReason }}</x-alert>
     @endif
     @endcan
 @elseif ($server->last_seen_at === null)

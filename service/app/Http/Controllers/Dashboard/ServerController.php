@@ -17,6 +17,16 @@ use Illuminate\Support\Facades\Gate;
 
 class ServerController extends Controller
 {
+    /**
+     * Bumped whenever buildOneClickInstallerContent()'s actual output
+     * changes in a way worth being able to tell apart on a real server —
+     * embedded in every generated install-agent.sh (see §16 of
+     * docs/ONE_CLICK_AGENT_INSTALLER_REPORT.md) so "which version is
+     * actually running on this box" is answerable by reading the
+     * installer's own log instead of guessing.
+     */
+    private const INSTALLER_VERSION = 'devops-hub-v1-ready-4';
+
     public function __construct(
         private readonly AgentCredentialService $credentials,
     ) {
@@ -92,6 +102,7 @@ class ServerController extends Controller
         // requested outside this exact session/request scope.
         $agentConfigContent = null;
         $oneClickInstallerContent = null;
+        $oneClickInstallerBlockedReason = null;
         if (session()->has('generated_token') && session()->has('generated_secret')) {
             $agentConfigContent = $this->buildAgentConfigContent(
                 $server,
@@ -104,11 +115,24 @@ class ServerController extends Controller
             // plaintext token/secret, so it can only ever exist on this
             // same one page load. Rotate credentials to get a fresh one
             // if this one is lost before it's used.
-            $oneClickInstallerContent = $this->buildOneClickInstallerContent(
-                $server,
-                (string) session('generated_token'),
-                (string) session('generated_secret'),
-            );
+            //
+            // Generation itself refuses to run for a Hub whose own
+            // configured URL is not production-safe (loopback/HTTP)
+            // UNLESS this Hub is genuinely running in a local/dev
+            // environment — a real server's install-agent.sh must never
+            // silently embed a broken HUB_URL it can never actually
+            // reach; that failure belongs here, at generation time on
+            // the panel, not discovered later on the target server.
+            $hubUrl = url('/');
+            if ($this->installerHubUrlIsSafe($hubUrl)) {
+                $oneClickInstallerContent = $this->buildOneClickInstallerContent(
+                    $server,
+                    (string) session('generated_token'),
+                    (string) session('generated_secret'),
+                );
+            } else {
+                $oneClickInstallerBlockedReason = __('messages.errors.installer_hub_url_not_safe', ['url' => $hubUrl]);
+            }
         }
 
         // Phase 4-L Task 3: Server Setup Wizard. Contains no secret of any
@@ -145,7 +169,7 @@ class ServerController extends Controller
         $recentOperations = $server->operationJobs()->latest()->take(10)->get();
 
         return view('servers.show', compact(
-            'server', 'agentConfigContent', 'agentServiceFileContent', 'oneClickInstallerContent', 'setupStep', 'discoveryAgent', 'latestDiscoveryJob',
+            'server', 'agentConfigContent', 'agentServiceFileContent', 'oneClickInstallerContent', 'oneClickInstallerBlockedReason', 'setupStep', 'discoveryAgent', 'latestDiscoveryJob',
             'operationsAgent', 'operationsProject', 'laravelOperationTypes', 'serverOperationTypes', 'recentOperations',
         ));
     }
@@ -287,6 +311,35 @@ class ServerController extends Controller
     }
 
     /**
+     * A real server's install-agent.sh embeds HUB_URL verbatim and the
+     * Agent will try to reach it forever — a loopback/HTTP address is
+     * only ever meaningful on the machine that's actually running the
+     * Hub itself (this app's own local development), never on a real
+     * target server. `app.env` (not app()->environment(), which is
+     * cached on the container at boot and won't reflect a test
+     * overriding config() at runtime) is this app's own signal for
+     * "this really is a local/dev Hub" — in every other environment, a
+     * loopback or non-HTTPS URL means the operator's real APP_URL isn't
+     * configured yet, and generating a broken installer for it would
+     * just move the failure from here (with a clear reason) to the
+     * target server (as a mysterious unreachable-Hub timeout).
+     */
+    private function installerHubUrlIsSafe(string $hubUrl): bool
+    {
+        if (in_array(config('app.env'), ['local', 'development', 'testing'], true)) {
+            return true;
+        }
+
+        $isHttps = str_starts_with($hubUrl, 'https://');
+        $isLoopbackHost = (bool) preg_match(
+            '#^https?://(localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1\])(:\d+)?/?$#i',
+            $hubUrl
+        );
+
+        return $isHttps && !$isLoopbackHost;
+    }
+
+    /**
      * One-Click Agent Installer. Everything below is generation of a
      * plain bash script string — no new Hub route, no new Agent Protocol,
      * no change to how an Agent authenticates. The script embeds:
@@ -382,6 +435,7 @@ class ServerController extends Controller
 # One-Click Agent Installer — generated by the Deployment Service for
 # "__SERVER_NAME__" (server_id: __SERVER_PUBLIC_ID__)
 # Generated: __GENERATED_AT__
+# Installer version: __INSTALLER_VERSION__
 #
 # This file embeds one-time credentials for this one server. It is only
 # ever shown once on the panel and cannot be re-downloaded with the same
@@ -395,6 +449,7 @@ class ServerController extends Controller
 
 set -euo pipefail
 
+INSTALLER_VERSION="__INSTALLER_VERSION__"
 INSTALL_DIR="/opt/deployment-agent"
 SERVICE_NAME="deployment-agent"
 SERVICE_USER="deployment-agent"
@@ -420,7 +475,7 @@ if ! command -v systemctl >/dev/null 2>&1; then
 fi
 
 PHP_BIN=""
-for candidate in php8.4 php8.3 php8.2 php8.1 php; do
+for candidate in php php8.3 php8.4 php8.2 php8.1; do
     if command -v "$candidate" >/dev/null 2>&1; then
         PHP_BIN="$(command -v "$candidate")"
         break
@@ -430,7 +485,15 @@ if [ -z "$PHP_BIN" ]; then
     echo "PHP CLI پیدا نشد. لطفاً ابتدا PHP 8.1 یا بالاتر را نصب کنید (مثال روی Debian/Ubuntu: apt install php-cli php-curl) و دوباره ./install-agent.sh را اجرا کنید."
     exit 1
 fi
-if ! "$PHP_BIN" -m 2>/dev/null | grep -qi '^curl$'; then
+# Captured into a variable first, not piped directly into `| grep -q`:
+# under set -o pipefail, grep -q exits the instant it finds a match and
+# closes its end of the pipe — if php -m is still writing later module
+# names at that moment, it can get SIGPIPE (exit 141), which pipefail
+# then reports as the pipeline's own failure even though grep DID find
+# curl. Capturing to a variable runs php -m to completion with no
+# reader at all, so there is nothing to race.
+PHP_MODULES="$("$PHP_BIN" -m 2>/dev/null)"
+if ! printf '%s\n' "$PHP_MODULES" | grep -qi '^curl$'; then
     echo "افزونه php-curl روی این سیستم فعال نیست. آن را نصب کنید (مثال: apt install php-curl) و دوباره اجرا کنید."
     exit 1
 fi
@@ -447,7 +510,8 @@ esac
 # --- Phase B: from here on state gets created, so failures roll back ---
 
 FRESH_INSTALL=1
-if systemctl list-unit-files 2>/dev/null | grep -q "^${SERVICE_NAME}\.service"; then
+EXISTING_UNIT_FILES="$(systemctl list-unit-files 2>/dev/null)"
+if printf '%s\n' "$EXISTING_UNIT_FILES" | grep -q "^${SERVICE_NAME}\.service"; then
     FRESH_INSTALL=0
 fi
 
@@ -489,6 +553,7 @@ trap 'fail "خطای غیرمنتظره در خط ${LINENO}"' ERR
 
 : > "$INSTALLER_LOG"
 say "=== شروع نصب Agent — $(date '+%Y-%m-%d %H:%M:%S') ==="
+say "نسخه Installer: $INSTALLER_VERSION"
 say "PHP یافت شد: $PHP_BIN"
 STARTED_NEW_INSTALL=1
 
@@ -529,7 +594,7 @@ chmod 750 "$INSTALL_DIR"
 say "در حال اجرای یک poll آزمایشی برای تایید اتصال به Hub..."
 VERIFY_OUTPUT="$(sudo -u "$SERVICE_USER" "$PHP_BIN" "$INSTALL_DIR/agent.php" --once 2>&1 || true)"
 echo "$VERIFY_OUTPUT" >> "$INSTALLER_LOG"
-if echo "$VERIFY_OUTPUT" | grep -qE '\] (ERROR|WARN) '; then
+if printf '%s\n' "$VERIFY_OUTPUT" | grep -qE '\] (ERROR|WARN) '; then
     say "خروجی آزمایشی:"
     say "$VERIFY_OUTPUT"
     fail "اتصال آزمایشی به Hub ناموفق بود — آدرس Hub یا اعتبارنامه‌ها را بررسی کنید."
@@ -585,6 +650,7 @@ BASH;
             '__SAFE_SERVER_NAME__' => $safeServerName,
             '__SERVER_PUBLIC_ID__' => $server->public_id,
             '__GENERATED_AT__' => now()->toDateTimeString(),
+            '__INSTALLER_VERSION__' => self::INSTALLER_VERSION,
             '__SERVICE_BASE_URL__' => url('/'),
             '__AGENT_SOURCE_FILE_BLOCKS__' => rtrim($fileBlocks),
             '__AGENT_CONFIG_PHP__' => rtrim($configPhp),

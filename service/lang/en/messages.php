@@ -32,6 +32,7 @@ return [
         'github_app_not_configured' => 'GitHub App is not configured yet — an administrator needs to set GITHUB_APP_ID/GITHUB_APP_SLUG first.',
         'github_installation_id_missing' => 'GitHub did not send an installation id back — the connection could not be completed.',
         'github_connection_failed' => 'Could not reach GitHub with this installation. It may have been removed on GitHub\'s side — try reconnecting.',
+        'installer_hub_url_not_safe' => 'The one-click installer was not generated because this Hub\'s own URL (:url) is not production-safe — it must be a real HTTPS address, not localhost/127.0.0.1. Set APP_URL in this Hub\'s .env to its real public URL, then come back to this page.',
     ],
 
     'flash' => [

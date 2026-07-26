@@ -37,6 +37,13 @@ Hub instance's own log has no record of the incident request at all)
 JSON error body for any genuinely uncaught exception on an agent
 route, `bootstrap/app.php`).
 
+**Round 3 (found by code review, not a live install):** the php-curl
+check could false-negative under this script's own `set -o pipefail`
+due to a classic `grep -q` + `SIGPIPE` race. §15 documents the fix
+(capture-then-check, applied consistently everywhere the script pipes
+into `grep -q`) and a regression test that reproduces the exact race
+with real bash.
+
 ## 2. What The User Actually Runs
 
 Exactly this, and nothing else — no prompts, no manual file edits:
@@ -61,7 +68,8 @@ sudo ./install-agent.sh
   `oneClickInstallerContent` to the view (built only alongside the
   existing `agentConfigContent`, i.e. only on the one-time page load
   right after registration or credential rotation). Round 2 (§6.1) fixed
-  a heredoc-reconstruction bug in the same method.
+  a heredoc-reconstruction bug in the same method; Round 3 (§15) fixed
+  a `pipefail`/`SIGPIPE` false-negative in its php-curl/systemd checks.
 - `service/resources/views/servers/show.blade.php` — a new card (inside
   the existing one-time credentials block) with the download button,
   the three-step Persian instructions, and the client-side Blob-download
@@ -557,3 +565,255 @@ dedicated regression test
 
 **338/338 passing** (333 from Round 1 + 5 new:
 `OneClickInstallerPollIntegrationTest`'s five tests).
+
+## 15. Round 3: php-curl Detection False Negative Under `pipefail`
+
+**Reported bug (found by inspection, not a live install this time):**
+```bash
+"$PHP_BIN" -m 2>/dev/null | grep -qi '^curl$'
+```
+run under this script's `set -euo pipefail` can incorrectly report
+"curl not found" even when it's installed. `grep -q` exits the instant
+it finds a match and closes its end of the pipe; if `php -m` is still
+writing later module names at that exact moment, the kernel can deliver
+it `SIGPIPE` (exit 141) on its next write. Under `pipefail`, that makes
+the *pipeline's* reported status non-zero even though `grep` itself
+matched successfully — so `if ! pipeline` took the wrong branch and the
+installer would wrongly abort with "php-curl not installed," on a
+server where it plainly is.
+
+**Root cause confirmed with real bash, not just theory.** A fake `php`
+that prints `curl` and then (after a short delay, to give `grep -q` a
+real window to close early) a few more module names reliably
+reproduces the false negative with the original pattern, and does not
+with the fix — proven directly, not assumed:
+```
+$ bash old_harness.sh   # original: "$PHP_BIN" -m | grep -qi '^curl$'
+NOT_FOUND        (exit 1 — wrong)
+$ bash new_harness.sh   # fixed: capture first, then check
+FOUND             (exit 0 — correct)
+```
+
+**The fix** — capture the slow, external, unpredictable-timing
+command's output into a variable first (no reader at all while it
+runs, so nothing can race it), then check the *already-captured*
+string:
+```bash
+PHP_MODULES="$("$PHP_BIN" -m 2>/dev/null)"
+if ! printf '%s\n' "$PHP_MODULES" | grep -qi '^curl$'; then
+```
+The same class of bug existed in two more places in the script and was
+fixed the same way:
+- `systemctl list-unit-files | grep -q "^${SERVICE_NAME}\.service"`
+  (the fresh-install detection) → captured into `$EXISTING_UNIT_FILES`
+  first.
+- `echo "$VERIFY_OUTPUT" | grep -qE '\] (ERROR|WARN) '` (the
+  verification-poll check) → `$VERIFY_OUTPUT` was already a captured
+  variable, just switched `echo` to `printf '%s\n'` for consistency.
+
+**Why `printf '%s\n' "$VAR" | grep -q` is safe where the original
+wasn't:** the race is fundamentally about *time*, not size — a real
+external process (`php`, `systemctl`) takes measurably longer to
+start/flush than a shell builtin, giving `grep -q` a real window to
+read, match, and close before the producer finishes. `printf` writing
+an already-in-memory string that's realistically only a couple KB
+(a module list, a unit-file list) completes fast enough, with no
+competing computation, that there's no meaningful window left for
+`grep` to win the race. (An early draft of the regression test tried
+to force the same race by making the fake output several megabytes
+instead of using a delay — that also broke the *fixed* pattern's own
+`printf | grep` step, which is exactly why size isn't the right lever
+here; a short `sleep` between a fake process's first line and the rest
+reproduces the real bug deterministically without that side effect.)
+
+**Regression test:** `test_php_curl_detection_does_not_false_negative_
+under_pipefail` (`OneClickAgentInstallerTest.php`) extracts the real,
+current detection block directly out of a freshly generated script (no
+re-typed copy to drift from the source), runs it — and, for
+comparison, the literal original buggy pattern — against the same fake
+`php` under `set -euo pipefail` via real `bash` (`exec()`, not
+simulated), and asserts: the old pattern reproduces the false negative
+(proving the harness is meaningful) and the current one does not.
+
+**Full test suite: 339/339 passing** (338 from Round 2 + this one new
+test).
+
+## 16. Round 4: Production HUB_URL Safety, PHP Order, Version Metadata
+
+**Reported:** a real deployed Hub's installer embedded
+`HUB_URL="http://127.0.0.1:8000"` instead of the operator's real
+`https://panel.safhenokhost.ir`, plus a request to guarantee the panel
+never generates a broken installer for production this way again, to
+reorder PHP candidate detection, to embed a version marker, and to
+explain why an old installer kept being downloaded.
+
+### 16.1 Root cause of the wrong HUB_URL — confirmed, not guessed
+
+`HUB_URL` was never hardcoded. It has always been built from Laravel's
+own `url('/')` helper, which reflects **this Hub's own `APP_URL`
+config** live, at generation time — verified directly:
+`service/.env` on this machine has `APP_URL=http://localhost`, and
+every generated sample script embeds exactly that. There is no second
+code path, no cached value, no static file — `buildOneClickInstallerContent()`
+is the only place `install-agent.sh` is ever produced (confirmed via a
+repo-wide search for every other mention of `install-agent.sh` /
+`oneClickInstaller`).
+
+**This means the real deployed Hub's own `.env` has `APP_URL=http://
+127.0.0.1:8000`** — almost certainly a leftover local/dev default that
+was never changed to the real public URL before that Hub went live.
+That is a configuration problem on the real server, not a code bug
+here — but the code should never let a misconfigured production Hub
+produce a broken installer silently, which is what Task 1 asks for and
+what's now enforced (§16.2).
+
+### 16.2 Fix — refuse to generate for a non-production-safe Hub URL
+
+New `ServerController::installerHubUrlIsSafe(string $hubUrl): bool`,
+checked in `show()` **before** calling `buildOneClickInstallerContent()`:
+
+```php
+private function installerHubUrlIsSafe(string $hubUrl): bool
+{
+    if (in_array(config('app.env'), ['local', 'development', 'testing'], true)) {
+        return true;
+    }
+
+    $isHttps = str_starts_with($hubUrl, 'https://');
+    $isLoopbackHost = (bool) preg_match(
+        '#^https?://(localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1\])(:\d+)?/?$#i',
+        $hubUrl
+    );
+
+    return $isHttps && !$isLoopbackHost;
+}
+```
+
+- **Local/dev/testing environment** (`config('app.env')`): unchanged
+  behavior — a loopback URL is expected there (it's this Hub's own
+  development machine), so generation proceeds and the *existing*
+  bash-level `case "$HUB_URL" in ...` warning (unchanged) is what
+  covers it, exactly matching Task 1's "the HTTP-local warning stays
+  only for Development."
+- **Any other environment**: generation is refused unless the URL is
+  both HTTPS and not a loopback host. Instead of the download card,
+  `servers/show.blade.php` now shows a clear, translated alert
+  (`messages.errors.installer_hub_url_not_safe`) telling the operator
+  exactly what's wrong and what to fix (`APP_URL` in that Hub's own
+  `.env`) — the failure now surfaces on the panel, immediately, instead
+  of silently shipping a script that can never reach its Hub.
+
+`config('app.env')` was used instead of `app()->environment()`
+deliberately — the latter is cached on the container at boot and
+doesn't reflect a test overriding config at runtime, which would have
+made this untestable without a full app reboot per case.
+
+### 16.3 PHP Detection Order
+
+```
+- for candidate in php8.4 php8.3 php8.2 php8.1 php; do
++ for candidate in php php8.3 php8.4 php8.2 php8.1; do
+```
+Applied exactly as requested. The pipefail-safe capture-then-check
+pattern around it (Round 3) is untouched and still verified by both the
+existing dedicated regression test and a new one
+(`test_installer_tries_php_candidates_in_the_correct_order`) that also
+pins the new order itself.
+
+### 16.4 Why An Old Installer Kept Being Downloaded — Audit
+
+Checked every one of the five things asked:
+
+1. **`buildOneClickInstallerContent()`** — computes the entire script
+   as a plain PHP string on every call, from the server's live data and
+   this Hub's live config. No memoization, no static property, nothing
+   persisted between requests.
+2. **Generate/Download path** — `ServerController::show()` calls it
+   fresh every request (only gated by the one-time session flash, never
+   skipped/reused across requests); the download itself is a
+   client-side `Blob` from that exact response body — no separate URL
+   that could serve something else.
+3. **Cache** — no `Cache::` call anywhere in `ServerController.php` or
+   near the installer. Ruled out directly, not assumed.
+4. **Session/versioning** — the session only ever holds the one-time
+   plaintext `generated_token`/`generated_secret` (present ⇒ build;
+   absent ⇒ don't) — it holds no cached *content*, so there is nothing
+   in session that could go stale.
+5. **Anywhere else `install-agent.sh` is built** — a full-repo search
+   found exactly one producer: `buildOneClickInstallerContent()`. No
+   static file under `public/` or `storage/` matches
+   `*install-agent*` either.
+
+**Conclusion: there is no caching bug in this code.** Combined with
+§14.1's earlier finding (this dev Hub's own log has zero record of the
+real Ubuntu box's incident requests — the real Hub is a *separate*
+deployment of this codebase), the far more likely explanation is
+simply that **the real Hub is running an older deployed copy of this
+code** that predates these fixes, and/or (if it *is* current source)
+`opcache.validate_timestamps=0` is serving a stale compiled copy of
+`ServerController.php` until PHP-FPM/the web server process is
+restarted or `opcache_reset()` is called. Neither of those is
+something this session can confirm or fix remotely — but §16.5's
+version metadata turns "is this actually the latest build?" from a
+guess into a one-line answer on the real server itself.
+
+### 16.5 INSTALLER_VERSION Metadata
+
+`ServerController::INSTALLER_VERSION` (currently
+`'devops-hub-v1-ready-4'`) is embedded twice in every generated script
+— a header comment (`# Installer version: ...`) and a shell variable
+(`INSTALLER_VERSION="..."`) printed to the install log as the very
+first `say()` line. Bump this constant whenever
+`buildOneClickInstallerContent()`'s actual output changes in a way
+worth telling apart. `test_installer_version_metadata_matches_the_
+current_source_constant` reads the constant via reflection and asserts
+the generated script contains it in both places — proving "the
+installer you downloaded" and "what this exact codebase would build
+right now" can never silently diverge without the test catching it.
+
+### 16.6 Tests
+
+Five new tests in `OneClickAgentInstallerTest.php` (19 total in that
+file now), covering exactly what was asked:
+- `test_installer_hub_url_matches_the_hubs_own_configured_root_url` —
+  HUB_URL tracks a forced root URL (`https://panel.safhenokhost.ir`)
+  exactly.
+- `test_installer_is_not_generated_when_hub_url_is_loopback_in_production`
+  — a loopback URL under `app.env=production` blocks generation and
+  shows the translated reason instead.
+- `test_installer_is_generated_when_hub_url_is_https_in_production` —
+  a real HTTPS URL under `app.env=production` still generates normally
+  (the guard doesn't over-fire).
+- `test_installer_still_generates_with_loopback_url_in_local_environment`
+  — today's local-dev behavior is unchanged.
+- `test_installer_tries_php_candidates_in_the_correct_order` — pins the
+  new order and re-confirms the pipefail-safe pattern around it.
+- `test_installer_version_metadata_matches_the_current_source_constant`
+  — §16.5.
+
+**Full suite: `php artisan test` — 345/345 passing** (339 from Round 3
++ 6 new).
+
+### 16.7 Final File
+
+A sample `install-agent.sh` was generated against this fix (placeholder
+credentials — see §16.8) and confirmed to contain every fix from all
+four rounds: correct checksums (§6.1), the safe JSON error path (§14.3,
+Hub-side, not in the script itself), the pipefail-safe checks (§15),
+the new PHP order and HTTPS `HUB_URL` (§16.2–16.3), and the
+`INSTALLER_VERSION` header (§16.5). Syntax-checked with real `bash -n`.
+
+### 16.8 Important — What This Session Could Not Do
+
+This script was generated with **placeholder** credentials
+(`agt_SAMPLE_TOKEN_NOT_REAL` / `sec_SAMPLE_SECRET_NOT_REAL`) against a
+`Server` object that only exists in memory for this generation call —
+not a real row, and not the operator's real `parsvds`/production
+server. It is for reviewing the fix, not for running against a real
+server. The **real** `install-agent.sh`, with real one-time
+credentials, can only ever come from clicking "دانلود نصب‌کننده
+یک‌مرحله‌ای" on the real panel itself (after that Hub is redeployed
+with this fix and its `.env`'s `APP_URL` is corrected) — that is a
+structural property of how credentials are issued in this system
+(§5), not something this session can generate on the operator's
+behalf.

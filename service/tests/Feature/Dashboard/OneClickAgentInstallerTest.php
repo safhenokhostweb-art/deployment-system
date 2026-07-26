@@ -6,6 +6,8 @@ use App\Http\Controllers\Dashboard\ServerController;
 use App\Models\Server;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\URL;
+use ReflectionClass;
 use ReflectionMethod;
 use Tests\TestCase;
 
@@ -104,6 +106,131 @@ class OneClickAgentInstallerTest extends TestCase
         $method->setAccessible(true);
 
         return $method->invoke(app(ServerController::class), $server, $token, $secret);
+    }
+
+    /**
+     * Real bug reported after deploying to a real server: the panel's
+     * OWN configured URL, not the operator's real production domain,
+     * ends up embedded in install-agent.sh as HUB_URL — because that IS
+     * correct, url('/') always reflects whatever this Hub's APP_URL
+     * actually is. The real fault was the deployed Hub's own .env never
+     * being pointed at its real public URL. This proves the embedded
+     * value tracks the Hub's actual configured root, live, not a stale
+     * or hardcoded string.
+     */
+    public function test_installer_hub_url_matches_the_hubs_own_configured_root_url(): void
+    {
+        // forceRootUrl() alone doesn't pin the scheme — url()/to() still
+        // derive https vs http from the current request unless the
+        // scheme is forced too, so a plain-HTTP test client would
+        // otherwise silently downgrade this to http://.
+        URL::forceScheme('https');
+        URL::forceRootUrl('https://panel.safhenokhost.ir');
+
+        $server = Server::factory()->create();
+        $script = $this->generateInstallerScript($server, 'agt_x', 'sec_x');
+
+        $this->assertStringContainsString('HUB_URL="https://panel.safhenokhost.ir"', $script);
+    }
+
+    /**
+     * The installer must never be generated with a loopback/HTTP URL for
+     * anything that isn't this Hub's own local/dev environment — that
+     * failure belongs here, with a clear reason, not discovered later on
+     * a real target server as an unreachable-Hub timeout.
+     */
+    public function test_installer_is_not_generated_when_hub_url_is_loopback_in_production(): void
+    {
+        config(['app.env' => 'production']);
+        URL::forceRootUrl('http://127.0.0.1:8000');
+
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $store = $this->actingAs($admin)->post(route('servers.store'), ['name' => 'Prod Loopback Server']);
+        $landing = $this->actingAs($admin)->get($store->headers->get('Location'));
+
+        $landing->assertOk();
+        $landing->assertDontSee(__('ui.servers.one_click_title'));
+        $landing->assertDontSee('one-click-installer-content', false);
+        $landing->assertSee(__('messages.errors.installer_hub_url_not_safe', ['url' => 'http://127.0.0.1:8000']));
+    }
+
+    /**
+     * A real HTTPS production URL must still generate normally — the
+     * guard only reacts to loopback/HTTP, never to HTTPS regardless of
+     * environment.
+     */
+    public function test_installer_is_generated_when_hub_url_is_https_in_production(): void
+    {
+        config(['app.env' => 'production']);
+        URL::forceScheme('https');
+        URL::forceRootUrl('https://panel.safhenokhost.ir');
+
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $store = $this->actingAs($admin)->post(route('servers.store'), ['name' => 'Prod Https Server']);
+        $landing = $this->actingAs($admin)->get($store->headers->get('Location'));
+
+        $landing->assertOk();
+        $landing->assertSee(__('ui.servers.one_click_title'));
+    }
+
+    /**
+     * This Hub's own local development use (APP_ENV=local/testing) must
+     * keep working exactly as it always has — a loopback URL here is
+     * not a misconfiguration, it's what running the Hub locally looks
+     * like. The bash-level warning (case "$HUB_URL" in ...) is what
+     * covers this case, not a generation-time block.
+     */
+    public function test_installer_still_generates_with_loopback_url_in_local_environment(): void
+    {
+        config(['app.env' => 'local']);
+        URL::forceRootUrl('http://127.0.0.1:8000');
+
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $store = $this->actingAs($admin)->post(route('servers.store'), ['name' => 'Local Loopback Server']);
+        $landing = $this->actingAs($admin)->get($store->headers->get('Location'));
+
+        $landing->assertOk();
+        $landing->assertSee(__('ui.servers.one_click_title'));
+    }
+
+    /**
+     * Real bug reported: "php" candidates were tried newest-first
+     * (php8.4 → php8.1 → php); the fix reorders to try the plain "php"
+     * binary first, then the versioned ones. Also re-confirms the
+     * pipefail-safe capture-then-check pattern (Round 3) survived this
+     * change untouched.
+     */
+    public function test_installer_tries_php_candidates_in_the_correct_order(): void
+    {
+        $server = Server::factory()->create();
+        $script = $this->generateInstallerScript($server, 'agt_x', 'sec_x');
+
+        $this->assertStringContainsString('for candidate in php php8.3 php8.4 php8.2 php8.1; do', $script);
+        $this->assertStringContainsString('PHP_MODULES="$("$PHP_BIN" -m 2>/dev/null)"', $script);
+        $this->assertStringContainsString('printf \'%s\n\' "$PHP_MODULES" | grep -qi \'^curl$\'', $script);
+    }
+
+    /**
+     * "Same version as what was built" — the embedded INSTALLER_VERSION
+     * must always equal the actual source constant, so a downloaded
+     * install-agent.sh's own header/log line is proof of exactly which
+     * build produced it (see docs/ONE_CLICK_AGENT_INSTALLER_REPORT.md
+     * §16 — this is what makes "is the panel still serving an old
+     * installer" a one-line check instead of a guess).
+     */
+    public function test_installer_version_metadata_matches_the_current_source_constant(): void
+    {
+        $reflection = new ReflectionClass(ServerController::class);
+        $expectedVersion = $reflection->getConstant('INSTALLER_VERSION');
+        $this->assertNotFalse($expectedVersion);
+        $this->assertIsString($expectedVersion);
+
+        $server = Server::factory()->create();
+        $script = $this->generateInstallerScript($server, 'agt_x', 'sec_x');
+
+        $this->assertStringContainsString("Installer version: {$expectedVersion}", $script);
+        $this->assertStringContainsString("INSTALLER_VERSION=\"{$expectedVersion}\"", $script);
+        $this->assertSame(2, substr_count($script, $expectedVersion), 'Expected the version string exactly twice: the header comment and the INSTALLER_VERSION= assignment.');
     }
 
     public function test_installer_script_contains_the_agents_real_source_with_matching_checksums(): void
@@ -206,6 +333,114 @@ class OneClickAgentInstallerTest extends TestCase
         unlink($path);
 
         $this->assertSame(0, $exitCode, "bash -n reported a syntax error:\n" . implode("\n", $output));
+    }
+
+    /**
+     * Regression test for a real bug found via testing on a real Ubuntu
+     * 24.04 box: the php-curl check ("$PHP_BIN" -m | grep -qi '^curl$')
+     * could false-negative under `set -o pipefail`. grep -q exits the
+     * instant it finds "curl" and closes its end of the pipe; if php -m
+     * is still writing later module names at that moment it can get
+     * SIGPIPE (exit 141), which pipefail then reports as the pipeline's
+     * own failure — even though grep DID find curl — so the installer
+     * would wrongly claim php-curl isn't installed and abort.
+     *
+     * The race is about TIMING (a real external php process takes
+     * measurably longer to start/flush than a shell builtin), not about
+     * output SIZE — a fake "php" that sleeps between its first line and
+     * the rest reproduces it deterministically with a small, realistic
+     * payload. (An earlier version of this test tried to force the race
+     * with a multi-megabyte payload instead; that also made the FIXED
+     * pattern's own printf | grep step racy, since real php -m output is
+     * only ever a couple KB — the fix relies on that, so the test's fake
+     * output has to respect it too, not just be "big enough".) Runs both
+     * the OLD unfixed pattern and the real, extracted, CURRENT detection
+     * block from the generated script through this exact same fake php
+     * under set -euo pipefail, via real bash (exec()), and asserts:
+     * old = false negative (proves the bug is real), current = correct
+     * detection (proves the fix works).
+     */
+    public function test_php_curl_detection_does_not_false_negative_under_pipefail(): void
+    {
+        $server = Server::factory()->create();
+        $script = $this->generateInstallerScript($server, 'agt_x', 'sec_x');
+
+        $start = strpos($script, 'PHP_MODULES="$("$PHP_BIN" -m 2>/dev/null)"');
+        $this->assertNotFalse($start, 'Expected to find the PHP_MODULES capture line in the generated script.');
+        $end = strpos($script, "\nfi\n", $start);
+        $this->assertNotFalse($end, 'Expected to find the closing fi of the php-curl check.');
+        $currentDetectionBlock = substr($script, $start, $end - $start + 4);
+        $this->assertStringContainsString('grep -qi', $currentDetectionBlock);
+
+        // Windows' AppData\Local\Temp is slow enough under real-time
+        // antivirus scanning to make repeated small file writes here a
+        // real bottleneck (see docs/ONE_CLICK_AGENT_INSTALLER_REPORT.md
+        // §12) — use a fast path on the same disk as the repo instead.
+        $fastTmpDir = storage_path('framework/testing/pipefail-regression');
+        if (!is_dir($fastTmpDir)) {
+            mkdir($fastTmpDir, 0777, true);
+        }
+
+        $fakePhpPath = tempnam($fastTmpDir, 'fake-php-') . '.sh';
+        file_put_contents($fakePhpPath, <<<'SH'
+#!/bin/sh
+echo curl
+sleep 0.3
+echo mbstring
+echo openssl
+echo pdo_sqlite
+echo json
+echo session
+SH
+        );
+        chmod($fakePhpPath, 0755);
+
+        $oldBuggyPattern = <<<'BASH'
+if ! "$PHP_BIN" -m 2>/dev/null | grep -qi '^curl$'; then
+    echo "NOT_FOUND"
+    exit 1
+fi
+echo "FOUND"
+BASH;
+
+        $harnessTemplate = <<<'BASH'
+set -euo pipefail
+PHP_BIN="__FAKE_PHP__"
+__DETECTION__
+BASH;
+
+        $oldHarness = str_replace(['__FAKE_PHP__', '__DETECTION__'], [$fakePhpPath, $oldBuggyPattern], $harnessTemplate);
+        $newHarness = str_replace(
+            ['__FAKE_PHP__', '__DETECTION__'],
+            [$fakePhpPath, $currentDetectionBlock . "\necho \"FOUND\""],
+            $harnessTemplate
+        );
+
+        [$oldExit, $oldOutput] = $this->runBash($oldHarness, $fastTmpDir);
+        [$newExit, $newOutput] = $this->runBash($newHarness, $fastTmpDir);
+
+        unlink($fakePhpPath);
+
+        $this->assertStringContainsString('NOT_FOUND', $oldOutput, 'Expected the OLD pattern to reproduce the false-negative bug under this harness — if it did not, the harness stopped proving anything.');
+        $this->assertNotSame(0, $oldExit);
+
+        $this->assertStringContainsString('FOUND', $newOutput, "Fixed detection block must report curl as found.\nOutput: {$newOutput}");
+        $this->assertStringNotContainsString('افزونه php-curl', $newOutput);
+        $this->assertSame(0, $newExit, "Fixed detection block must exit 0.\nOutput: {$newOutput}");
+    }
+
+    /**
+     * @return array{0: int, 1: string}
+     */
+    private function runBash(string $script, ?string $dir = null): array
+    {
+        $path = tempnam($dir ?? sys_get_temp_dir(), 'pipefail-harness-') . '.sh';
+        file_put_contents($path, $script);
+
+        exec('bash ' . escapeshellarg($path) . ' 2>&1', $output, $exitCode);
+        unlink($path);
+
+        return [$exitCode, implode("\n", $output)];
     }
 
     public function test_installer_is_hidden_from_a_non_admin_even_if_the_session_flash_is_present(): void
