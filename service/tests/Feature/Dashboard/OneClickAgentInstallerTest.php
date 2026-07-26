@@ -329,10 +329,55 @@ class OneClickAgentInstallerTest extends TestCase
         $path = tempnam(sys_get_temp_dir(), 'install-agent-') . '.sh';
         file_put_contents($path, $script);
 
-        exec('bash -n ' . escapeshellarg($path) . ' 2>&1', $output, $exitCode);
+        exec('bash -n ' . escapeshellarg($this->toBashPath($path)) . ' 2>&1', $output, $exitCode);
         unlink($path);
 
         $this->assertSame(0, $exitCode, "bash -n reported a syntax error:\n" . implode("\n", $output));
+    }
+
+    /**
+     * PHP's own file I/O (file_put_contents/chmod/unlink) always keeps
+     * using the native path tempnam() returns — only the string actually
+     * handed TO bash (a CLI argument, or substituted into script content
+     * bash itself will run, e.g. PHP_BIN=...) needs translating, and
+     * only on Windows.
+     *
+     * Which translation is correct depends on which `bash` actually
+     * answers on PATH, which varies by machine/session — not just
+     * Git Bash (MSYS2) anymore. WSL's own Linux userspace only ever
+     * sees Windows drives under /mnt/<drive>/..., it has no concept of
+     * `C:\...` at all; Git Bash's MSYS2 runtime auto-translates a
+     * leading /<drive>/... segment back to the real Windows path (and
+     * separately already tolerates a raw C:\... argument directly, via
+     * its own path-detection heuristics). `bash --version` reliably
+     * reports "...-pc-msys" for Git Bash and "...-pc-linux-gnu" for
+     * WSL — the one signal used here to pick the right form, so this
+     * keeps working whichever of the two happens to be on PATH.
+     */
+    private function toBashPath(string $windowsPath): string
+    {
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            // Native Linux/macOS (e.g. real CI) — tempnam() already
+            // returned a plain POSIX path, nothing to translate.
+            return $windowsPath;
+        }
+
+        $normalized = str_replace('\\', '/', $windowsPath);
+
+        if (!preg_match('#^([A-Za-z]):/(.*)$#', $normalized, $matches)) {
+            return $normalized;
+        }
+
+        $drive = strtolower($matches[1]);
+        $rest = $matches[2];
+
+        static $isWsl = null;
+        if ($isWsl === null) {
+            $version = strtolower((string) shell_exec('bash --version 2>&1'));
+            $isWsl = !str_contains($version, 'msys');
+        }
+
+        return $isWsl ? "/mnt/{$drive}/{$rest}" : "/{$drive}/{$rest}";
     }
 
     /**
@@ -409,10 +454,15 @@ PHP_BIN="__FAKE_PHP__"
 __DETECTION__
 BASH;
 
-        $oldHarness = str_replace(['__FAKE_PHP__', '__DETECTION__'], [$fakePhpPath, $oldBuggyPattern], $harnessTemplate);
+        // Embedded as PHP_BIN="..." inside script content bash will run
+        // itself ("$PHP_BIN" -m) — this needs the bash-native form, not
+        // PHP's own (Windows) view of the same file.
+        $fakePhpBashPath = $this->toBashPath($fakePhpPath);
+
+        $oldHarness = str_replace(['__FAKE_PHP__', '__DETECTION__'], [$fakePhpBashPath, $oldBuggyPattern], $harnessTemplate);
         $newHarness = str_replace(
             ['__FAKE_PHP__', '__DETECTION__'],
-            [$fakePhpPath, $currentDetectionBlock . "\necho \"FOUND\""],
+            [$fakePhpBashPath, $currentDetectionBlock . "\necho \"FOUND\""],
             $harnessTemplate
         );
 
@@ -437,7 +487,7 @@ BASH;
         $path = tempnam($dir ?? sys_get_temp_dir(), 'pipefail-harness-') . '.sh';
         file_put_contents($path, $script);
 
-        exec('bash ' . escapeshellarg($path) . ' 2>&1', $output, $exitCode);
+        exec('bash ' . escapeshellarg($this->toBashPath($path)) . ' 2>&1', $output, $exitCode);
         unlink($path);
 
         return [$exitCode, implode("\n", $output)];
