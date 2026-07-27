@@ -2,6 +2,7 @@
 
 use App\Http\Middleware\SetDashboardLocale;
 use App\Http\Middleware\VerifyAgentRequestSignature;
+use App\Http\Middleware\VerifyLocalAgentRequestSignature;
 use App\Support\DashboardMessageTranslator;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -20,6 +21,7 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'agent.signed' => VerifyAgentRequestSignature::class,
+            'local-agent.signed' => VerifyLocalAgentRequestSignature::class,
         ]);
         // Presentation-only: sets the dashboard's display locale to Persian
         // and translates the fixed set of hardcoded Service/Controller
@@ -71,7 +73,11 @@ return Application::configure(basePath: dirname(__DIR__))
         // logged via Laravel's normal report() path — this only changes
         // what's rendered back, never what's recorded.
         $exceptions->render(function (\Throwable $e, Request $request) {
-            if (!$request->is('api/agent/*') || $e instanceof HttpExceptionInterface || $e instanceof ValidationException) {
+            if (!$request->is('api/agent/*') && !$request->is('api/local-agent/*')) {
+                return null;
+            }
+
+            if ($e instanceof HttpExceptionInterface || $e instanceof ValidationException) {
                 return null;
             }
 

@@ -10,11 +10,18 @@ return [
     'cancelled' => 'لغو شده',
     'partial_success' => 'موفقیت جزئی',
     'skipped' => 'رد شده',
+    'awaiting_approval' => 'منتظر تایید',
 
     // Agent::STATUS_*
     'approved' => 'تایید شده',
     'rejected' => 'رد شده',
     'disabled' => 'غیرفعال',
+
+    // LocalChangeDetectionJob::STATUS_*
+    'detected' => 'تشخیص داده شده',
+    'waiting_approval' => 'منتظر تایید',
+    'published' => 'منتشر شده',
+    'ignored' => 'نادیده گرفته شده',
 
     // Health check status
     'pending' => 'در انتظار',

@@ -13,11 +13,18 @@ return [
     // the run stopped short of reaching, distinct from "pending" (which
     // still might run).
     'skipped' => 'Skipped',
+    'awaiting_approval' => 'Awaiting approval',
 
     // Agent::STATUS_*
     'approved' => 'Approved',
     'rejected' => 'Rejected',
     'disabled' => 'Disabled',
+
+    // LocalChangeDetectionJob::STATUS_*
+    'detected' => 'Detected',
+    'waiting_approval' => 'Waiting for approval',
+    'published' => 'Published',
+    'ignored' => 'Ignored',
 
     // Health check status
     'pending' => 'Pending',

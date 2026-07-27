@@ -294,6 +294,70 @@
 </x-card>
 @endcan
 
+@can('local_agents.publish')
+<x-card :title="__('ui.publish.button')">
+    @if ($openChangeDetection)
+        <p>
+            {{ __('ui.local_agents.watching_status', ['time' => $openChangeDetection->detected_at->diffForHumans(), 'count' => $openChangeDetection->files_changed_count]) }}
+        </p>
+        <a href="{{ route('projects.changes.show', [$project, $openChangeDetection]) }}" class="btn btn-primary btn-small">{{ __('ui.local_agents.view_changes_button') }}</a>
+    @endif
+
+    @if ($project->localProjectMappings->isEmpty())
+        <p class="muted" style="margin-top:1rem;">{{ __('ui.publish.no_mapping') }}</p>
+    @else
+        <ul style="margin:0.6rem 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:0.2rem;">
+            @foreach ($project->localProjectMappings as $mapping)
+                <li>
+                    <a href="{{ route('local-agents.show', $mapping->localAgent) }}">{{ $mapping->localAgent->name ?? $mapping->localAgent->public_id }}</a>
+                    @if ($mapping->localAgent->isOnline())
+                        <x-badge status="online" />
+                    @else
+                        <x-badge status="offline" />
+                        <span class="muted">{{ __('ui.publish.agent_last_heartbeat', ['time' => $mapping->localAgent->last_seen_at?->diffForHumans() ?? __('status.never')]) }}</span>
+                    @endif
+                </li>
+            @endforeach
+        </ul>
+        @if ($project->localProjectMappings->every(fn ($mapping) => !$mapping->localAgent->isOnline()))
+            <p class="muted" style="margin-top:0.4rem;">{{ __('ui.publish.agent_offline_warning') }}</p>
+        @endif
+
+        <form method="POST" action="{{ route('projects.publish', $project) }}" style="display:flex;gap:0.6rem;align-items:flex-end;flex-wrap:wrap;margin-top:0.6rem;">
+            @csrf
+            @if ($project->localProjectMappings->count() > 1)
+                <div>
+                    <label>{{ __('ui.publish.select_local_agent') }}</label>
+                    <select name="local_project_mapping_id" required>
+                        @foreach ($project->localProjectMappings as $mapping)
+                            <option value="{{ $mapping->id }}">{{ $mapping->localAgent->name ?? $mapping->localAgent->public_id }}</option>
+                        @endforeach
+                    </select>
+                </div>
+            @else
+                <input type="hidden" name="local_project_mapping_id" value="{{ $project->localProjectMappings->first()->id }}">
+            @endif
+            <button type="submit" class="btn btn-primary">{{ __('ui.publish.button') }}</button>
+        </form>
+
+        <form method="POST" action="{{ route('projects.publish.rollback', $project) }}" id="rollback-publish-form" style="display:inline;margin-top:0.6rem;">
+            @csrf
+            @if ($project->localProjectMappings->count() === 1)
+                <input type="hidden" name="local_project_mapping_id" value="{{ $project->localProjectMappings->first()->id }}">
+            @endif
+        </form>
+        <button type="button" class="btn btn-danger btn-small" style="margin-top:0.6rem;" onclick="document.getElementById('rollback-publish-dialog').showModal()">{{ __('ui.publish.rollback_button') }}</button>
+        <x-confirm-dialog
+            id="rollback-publish-dialog"
+            form-id="rollback-publish-form"
+            :title="__('ui.publish.rollback_button')"
+            :body="__('ui.publish.rollback_confirm')"
+            :confirm-label="__('ui.publish.rollback_button')"
+        />
+    @endif
+</x-card>
+@endcan
+
 <x-card :title="__('ui.projects.history_title')">
     <table>
         <thead><tr>

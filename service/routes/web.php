@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Dashboard\AgentController;
 use App\Http\Controllers\Dashboard\AuthController;
+use App\Http\Controllers\Dashboard\ChangeDetectionController;
 use App\Http\Controllers\Dashboard\DashboardController;
 use App\Http\Controllers\Dashboard\DeploymentController;
 use App\Http\Controllers\Dashboard\DeploymentTargetController;
@@ -9,10 +10,13 @@ use App\Http\Controllers\Dashboard\DeploymentTaskController;
 use App\Http\Controllers\Dashboard\DiscoveryController;
 use App\Http\Controllers\Dashboard\EnvironmentController;
 use App\Http\Controllers\Dashboard\GitHubAccountController;
+use App\Http\Controllers\Dashboard\LocalAgentController;
+use App\Http\Controllers\Dashboard\LocalProjectMappingController;
 use App\Http\Controllers\Dashboard\NotificationController;
 use App\Http\Controllers\Dashboard\OperationController;
 use App\Http\Controllers\Dashboard\ProjectController;
 use App\Http\Controllers\Dashboard\ProjectMemberController;
+use App\Http\Controllers\Dashboard\PublishController;
 use App\Http\Controllers\Dashboard\ReadinessController;
 use App\Http\Controllers\Dashboard\ServerController;
 use App\Http\Controllers\Dashboard\UserController;
@@ -43,6 +47,22 @@ Route::middleware('auth')->group(function () {
     Route::post('/agents/{agent:public_id}/reenable', [AgentController::class, 'reenable'])->name('agents.reenable');
     Route::delete('/agents/{agent:public_id}', [AgentController::class, 'destroy'])->name('agents.destroy');
 
+    Route::get('/local-agents', [LocalAgentController::class, 'index'])->name('local-agents.index');
+    Route::get('/local-agents/setup', [LocalAgentController::class, 'setup'])->name('local-agents.setup');
+    Route::get('/local-agents/pending', [LocalAgentController::class, 'pending'])->name('local-agents.pending');
+    Route::post('/local-agents', [LocalAgentController::class, 'createRegistration'])->name('local-agents.create-registration');
+    Route::get('/local-agents/{localAgent:public_id}', [LocalAgentController::class, 'show'])->name('local-agents.show');
+    Route::post('/local-agents/{localAgent:public_id}/approve', [LocalAgentController::class, 'approve'])->name('local-agents.approve');
+    Route::post('/local-agents/{localAgent:public_id}/reject', [LocalAgentController::class, 'reject'])->name('local-agents.reject');
+    Route::post('/local-agents/{localAgent:public_id}/disable', [LocalAgentController::class, 'disable'])->name('local-agents.disable');
+    Route::post('/local-agents/{localAgent:public_id}/reenable', [LocalAgentController::class, 'reenable'])->name('local-agents.reenable');
+    Route::post('/local-agents/{localAgent:public_id}/restart', [LocalAgentController::class, 'restart'])->name('local-agents.restart');
+    Route::post('/local-agents/{localAgent:public_id}/fetch-logs', [LocalAgentController::class, 'fetchLogs'])->name('local-agents.fetch-logs');
+    Route::post('/local-agents/{localAgent:public_id}/rotate-token', [LocalAgentController::class, 'rotateToken'])->name('local-agents.rotate-token');
+    Route::post('/local-agents/{localAgent:public_id}/project-mappings', [LocalProjectMappingController::class, 'store'])->name('local-agents.mappings.store');
+    Route::delete('/local-agents/{localAgent:public_id}/project-mappings/{mapping}', [LocalProjectMappingController::class, 'destroy'])->name('local-agents.mappings.destroy');
+    Route::post('/local-agents/{localAgent:public_id}/project-mappings/{mapping}/deployment-mode', [LocalProjectMappingController::class, 'updateDeploymentMode'])->name('local-agents.mappings.deployment-mode');
+
     Route::get('/github/accounts', [GitHubAccountController::class, 'index'])->name('github.accounts.index');
     Route::get('/github/connect', [GitHubAccountController::class, 'connect'])->name('github.connect');
     Route::get('/github/callback', [GitHubAccountController::class, 'callback'])->name('github.callback');
@@ -62,6 +82,17 @@ Route::middleware('auth')->group(function () {
     Route::post('/projects/{project}/rotate-webhook-secret', [ProjectController::class, 'rotateWebhookSecret'])->name('projects.rotate-webhook-secret');
     Route::post('/projects/{project}/deploy', [ProjectController::class, 'deployManual'])->name('projects.deploy');
     Route::post('/projects/{project}/connect-github', [ProjectController::class, 'connectGithub'])->name('projects.connect-github');
+
+    Route::get('/publish-history', [PublishController::class, 'history'])->name('publish.history');
+    Route::post('/projects/{project}/publish', [PublishController::class, 'store'])->name('projects.publish');
+    Route::post('/projects/{project}/publish/{publishJob}/approve', [PublishController::class, 'approve'])->name('projects.publish.approve');
+    Route::post('/projects/{project}/publish/{publishJob}/retry', [PublishController::class, 'retry'])->name('projects.publish.retry');
+    Route::post('/projects/{project}/rollback', [PublishController::class, 'rollback'])->name('projects.publish.rollback');
+    Route::get('/projects/{project}/publish/{publishJob}', [PublishController::class, 'show'])->name('projects.publish.show');
+
+    Route::get('/projects/{project}/changes/{changeDetection}', [ChangeDetectionController::class, 'show'])->name('projects.changes.show');
+    Route::post('/projects/{project}/changes/{changeDetection}/approve', [ChangeDetectionController::class, 'approve'])->name('projects.changes.approve');
+    Route::post('/projects/{project}/changes/{changeDetection}/ignore', [ChangeDetectionController::class, 'ignore'])->name('projects.changes.ignore');
 
     Route::post('/projects/{project}/members', [ProjectMemberController::class, 'store'])->name('projects.members.store');
     Route::delete('/projects/{project}/members/{member}', [ProjectMemberController::class, 'destroy'])->name('projects.members.destroy');

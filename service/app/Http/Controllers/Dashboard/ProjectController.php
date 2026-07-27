@@ -7,6 +7,7 @@ use App\Models\Agent;
 use App\Models\AuditLogEntry;
 use App\Models\Environment;
 use App\Models\GitHubAccount;
+use App\Models\LocalChangeDetectionJob;
 use App\Models\Project;
 use App\Models\Server;
 use App\Models\User;
@@ -172,6 +173,9 @@ class ProjectController extends Controller
             'environments.deploymentTargets.server' => fn ($query) => $query->select(['id', 'name', 'last_seen_at']),
             'environments.deploymentTargets.agent' => fn ($query) => $query->select(['id', 'name', 'public_id', 'status', 'agent_version', 'last_seen_at']),
             'members.user' => fn ($query) => $query->select(['id', 'name', 'email']),
+            // Phase 5: One-Click Publish — only approved local agents are
+            // ever offered as a publish target from this page.
+            'localProjectMappings.localAgent' => fn ($query) => $query->where('status', 'approved'),
         ]);
         // Phase 4-L Task 2: candidates for the "connect GitHub" action
         // shown when this project has no github_account_id yet — never
@@ -205,7 +209,17 @@ class ProjectController extends Controller
                 ->select(['id', 'server_id', 'name', 'public_id', 'last_seen_at'])])
             ->get(['id', 'name', 'last_seen_at']);
 
-        return view('projects.show', compact('project', 'deployments', 'webhookUrl', 'maskedWebhookSecret', 'availableServers', 'availableUsers', 'connectableGithubAccounts'));
+        // Phase 5.2: the Watch Status card shows at most one open
+        // detection — if two agents are somehow both mapped and both
+        // have open detections, the most recently changed one wins;
+        // there's no need to show more than a single "pending changes"
+        // signal on this page.
+        $openChangeDetection = $project->changeDetectionJobs()
+            ->whereIn('status', [LocalChangeDetectionJob::STATUS_DETECTED, LocalChangeDetectionJob::STATUS_WAITING_APPROVAL])
+            ->latest('detected_at')
+            ->first();
+
+        return view('projects.show', compact('project', 'deployments', 'webhookUrl', 'maskedWebhookSecret', 'availableServers', 'availableUsers', 'connectableGithubAccounts', 'openChangeDetection'));
     }
 
     public function rotateWebhookSecret(Request $request, Project $project): RedirectResponse

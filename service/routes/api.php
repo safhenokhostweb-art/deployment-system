@@ -5,6 +5,10 @@ use App\Http\Controllers\Api\AgentJobController;
 use App\Http\Controllers\Api\AgentOperationController;
 use App\Http\Controllers\Api\AgentRegistrationController;
 use App\Http\Controllers\Api\GitHubWebhookController;
+use App\Http\Controllers\Api\LocalAgentChangeDetectionController;
+use App\Http\Controllers\Api\LocalAgentControlJobController;
+use App\Http\Controllers\Api\LocalAgentJobController;
+use App\Http\Controllers\Api\LocalAgentRegistrationController;
 use Illuminate\Support\Facades\Route;
 
 // GitHub -> Deployment Service. Authenticated by per-project HMAC signature
@@ -40,4 +44,27 @@ Route::middleware('agent.signed')->prefix('agent')->group(function () {
     // Agent-identity-only rule as Discovery — see AgentOperationController.
     Route::get('/operation-jobs/next', [AgentOperationController::class, 'next'])->name('agent.operation-jobs.next');
     Route::post('/operation-jobs/{id}/report', [AgentOperationController::class, 'report'])->name('agent.operation-jobs.report');
+});
+
+// Phase 5: Local Development Publisher Agent. A pending local agent has
+// no signing_secret yet, so registration cannot sit behind
+// 'local-agent.signed' — see LocalAgentRegistrationController. Its own
+// scheme, own headers, own replay table — fully independent of the
+// Server Agent protocol above.
+Route::post('/local-agent/register', [LocalAgentRegistrationController::class, 'register'])
+    ->name('local-agent.register');
+
+Route::middleware('local-agent.signed')->prefix('local-agent')->group(function () {
+    Route::post('/heartbeat', [LocalAgentJobController::class, 'heartbeat'])->name('local-agent.heartbeat');
+    Route::get('/publish-jobs/next', [LocalAgentJobController::class, 'next'])->name('local-agent.publish-jobs.next');
+    Route::post('/publish-jobs/{id}/report', [LocalAgentJobController::class, 'report'])->name('local-agent.publish-jobs.report');
+
+    // Phase 5.2: the file watcher's own report — see agent.php's
+    // pollAndDetectChanges() and LocalAgentChangeDetectionController.
+    Route::post('/change-detections', [LocalAgentChangeDetectionController::class, 'report'])->name('local-agent.change-detections.report');
+
+    // Phase 5.3: the Hub's only channel to remotely restart an agent or
+    // pull its recent log output — see agent.php's pollAndHandleControl().
+    Route::get('/control-jobs/next', [LocalAgentControlJobController::class, 'next'])->name('local-agent.control-jobs.next');
+    Route::post('/control-jobs/{id}/report', [LocalAgentControlJobController::class, 'report'])->name('local-agent.control-jobs.report');
 });

@@ -86,4 +86,34 @@ return [
     'task_max_attempts' => (int) env('DEPLOYMENT_TASK_MAX_ATTEMPTS', 1),
     'task_retry_backoff_seconds' => array_map('intval', explode(',', (string) env('DEPLOYMENT_TASK_RETRY_BACKOFF_SECONDS', '30,120,300'))),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Auto Mode publish stability window (Phase 5.2)
+    |--------------------------------------------------------------------------
+    |
+    | A LocalChangeDetectionJob on an 'auto' mode mapping is only turned into
+    | an auto-approved PublishJob once it has gone this many minutes with no
+    | newer report — i.e. the developer appears to have stopped editing.
+    | Checked by the publish:auto-publish-stable-changes scheduled command,
+    | matching the spec's own "wait ~5 minutes" example.
+    |
+    */
+    'auto_publish_stability_minutes' => (int) env('DEPLOYMENT_AUTO_PUBLISH_STABILITY_MINUTES', 5),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Local Agent version check (Phase 5.3)
+    |--------------------------------------------------------------------------
+    |
+    | Check-and-notify only, never auto-download/replace code (a compromised
+    | or MITM'd Hub could otherwise push arbitrary code to every developer
+    | machine, and there is no code-signing infrastructure in this project to
+    | guard against that). Bump this whenever a new local-agent/ release is
+    | cut; an out-of-date agent just logs it and the developer runs the
+    | shipped upgrade.ps1 themselves. Must match LOCAL_AGENT_VERSION in
+    | local-agent/agent.php at release time.
+    |
+    */
+    'latest_local_agent_version' => env('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION', '1.1.0'),
+
 ];

@@ -104,6 +104,25 @@ class Project extends Model
         return $this->hasMany(ProjectMember::class);
     }
 
+    /**
+     * Phase 5: which Local Agents (developer machines) are set up to
+     * publish into this project — see LocalProjectMapping.
+     */
+    public function localProjectMappings(): HasMany
+    {
+        return $this->hasMany(LocalProjectMapping::class);
+    }
+
+    public function publishJobs(): HasMany
+    {
+        return $this->hasMany(PublishJob::class);
+    }
+
+    public function changeDetectionJobs(): HasMany
+    {
+        return $this->hasMany(LocalChangeDetectionJob::class);
+    }
+
     public function isMember(User $user): bool
     {
         return $this->members()->where('user_id', $user->id)->exists();

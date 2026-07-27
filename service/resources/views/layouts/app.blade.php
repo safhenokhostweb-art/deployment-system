@@ -290,6 +290,13 @@
         @can('agents.view')
         <a href="{{ route('agents.index') }}">{{ __('nav.agents') }}</a>
         @endcan
+        @can('local_agents.view')
+        <a href="{{ route('local-agents.index') }}">{{ __('nav.local_agents') }}</a>
+        <a href="{{ route('publish.history') }}">{{ __('nav.publish_history') }}</a>
+        @endcan
+        @can('local_agents.manage')
+        <a href="{{ route('local-agents.setup') }}">{{ __('nav.local_agent_setup') }}</a>
+        @endcan
         @can('github.view')
         <a href="{{ route('github.accounts.index') }}">{{ __('nav.github') }}</a>
         @endcan

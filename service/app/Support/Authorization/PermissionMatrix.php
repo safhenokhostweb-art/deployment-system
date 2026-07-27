@@ -37,6 +37,12 @@ class PermissionMatrix
                 // operation, not just see the Command Center.
                 'operations.view',
                 'operations.execute',
+                // Phase 5: One-Click Publish is exactly the kind of
+                // "run a deploy-adjacent action without managing
+                // credentials/GitHub connections" capability Operator
+                // already has for deployments/operations.
+                'local_agents.view',
+                'local_agents.publish',
             ],
 
             // Task 3: "مشاهده Project، مشاهده Deployment، Trigger Deploy...
@@ -52,6 +58,11 @@ class PermissionMatrix
                 'deployments.view',
                 'deployments.create',
                 'operations.view',
+                // Phase 5: this is the primary persona One-Click Publish
+                // exists for — a developer publishing their own changes,
+                // still without touching Server/GitHub management.
+                'local_agents.view',
+                'local_agents.publish',
             ],
 
             // Task 3: "فقط مشاهده: Dashboard، Project، Deployment Status".
@@ -63,6 +74,9 @@ class PermissionMatrix
                 'github.view',
                 'deployments.view',
                 'operations.view',
+                // Phase 5: view only, matching every other capability here
+                // — never .publish, never .manage.
+                'local_agents.view',
             ],
         ];
     }

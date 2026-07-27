@@ -43,6 +43,15 @@ class Notification extends Model
     public const TYPE_OPERATION_SUCCESS = 'operation.success';
     public const TYPE_OPERATION_FAILED = 'operation.failed';
 
+    // Phase 5: Local Development Publisher Agent
+    public const TYPE_LOCAL_AGENT_APPROVAL_REQUIRED = 'local_agent.approval_required';
+    public const TYPE_PUBLISH_AWAITING_APPROVAL = 'publish.awaiting_approval';
+    public const TYPE_PUBLISH_SUCCESS = 'publish.success';
+    public const TYPE_PUBLISH_FAILED = 'publish.failed';
+
+    // Phase 5.2: Auto File Watch + Smart Publish Queue
+    public const TYPE_CHANGE_DETECTION_AWAITING_APPROVAL = 'change_detection.awaiting_approval';
+
     /**
      * Task 9: severity is a pure data concept — every consumer (badge
      * color, filter dropdown, future email subject prefix) reads this

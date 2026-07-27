@@ -36,3 +36,14 @@ Schedule::command('deployment-system:prune-logs')
     ->dailyAt('03:00')
     ->withoutOverlapping()
     ->onOneServer();
+
+// Phase 5.2: checks for LocalChangeDetectionJob rows stable long enough
+// to auto-publish. Every five minutes is coarser than the stability
+// window's own math needs to be exact for (unlike DetectOfflineAgents'
+// transition-detection, this command mutates status the moment it acts,
+// so it can never reprocess the same row twice) — just frequent enough
+// that Auto Mode doesn't feel sluggish.
+Schedule::command('publish:auto-publish-stable-changes')
+    ->everyFiveMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();

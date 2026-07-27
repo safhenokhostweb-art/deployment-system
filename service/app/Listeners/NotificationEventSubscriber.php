@@ -11,15 +11,21 @@ use App\Events\DeploymentStarted;
 use App\Events\DeploymentSucceeded;
 use App\Events\GitHubConnected;
 use App\Events\GitHubConnectionFailed;
+use App\Events\LocalAgentApprovalRequired;
+use App\Events\LocalChangeDetectionAwaitingApproval;
 use App\Events\OperationFailed;
 use App\Events\OperationStarted;
 use App\Events\OperationSucceeded;
 use App\Events\PermissionChanged;
+use App\Events\PublishJobAwaitingApproval;
+use App\Events\PublishJobFailed;
+use App\Events\PublishJobSucceeded;
 use App\Events\RollbackCompleted;
 use App\Events\RollbackStarted;
 use App\Models\Deployment;
 use App\Models\Notification;
 use App\Models\OperationJob;
+use App\Models\PublishJob;
 use App\Models\User;
 use App\Services\Notification\NotificationService;
 use Illuminate\Events\Dispatcher;
@@ -57,6 +63,11 @@ class NotificationEventSubscriber
         $events->listen(OperationStarted::class, [self::class, 'onOperationStarted']);
         $events->listen(OperationSucceeded::class, [self::class, 'onOperationSucceeded']);
         $events->listen(OperationFailed::class, [self::class, 'onOperationFailed']);
+        $events->listen(LocalAgentApprovalRequired::class, [self::class, 'onLocalAgentApprovalRequired']);
+        $events->listen(PublishJobAwaitingApproval::class, [self::class, 'onPublishJobAwaitingApproval']);
+        $events->listen(PublishJobSucceeded::class, [self::class, 'onPublishJobSucceeded']);
+        $events->listen(PublishJobFailed::class, [self::class, 'onPublishJobFailed']);
+        $events->listen(LocalChangeDetectionAwaitingApproval::class, [self::class, 'onLocalChangeDetectionAwaitingApproval']);
     }
 
     public function onDeploymentStarted(DeploymentStarted $event): void
@@ -284,6 +295,99 @@ class NotificationEventSubscriber
         );
     }
 
+    public function onLocalAgentApprovalRequired(LocalAgentApprovalRequired $event): void
+    {
+        $localAgent = $event->localAgent;
+
+        $this->notifications->notifyAdmins(
+            type: Notification::TYPE_LOCAL_AGENT_APPROVAL_REQUIRED,
+            title: __('notifications.local_agent_approval_required_title', [], 'fa'),
+            message: __('notifications.local_agent_approval_required_message', [
+                'name' => $localAgent->name ?? $localAgent->public_id,
+            ], 'fa'),
+            severity: Notification::SEVERITY_WARNING,
+            related: $localAgent,
+            actorType: 'agent',
+            actorIdentifier: $localAgent->public_id,
+        );
+    }
+
+    public function onPublishJobAwaitingApproval(PublishJobAwaitingApproval $event): void
+    {
+        $job = $event->publishJob;
+
+        $this->notifyPublishAudience(
+            $job,
+            type: Notification::TYPE_PUBLISH_AWAITING_APPROVAL,
+            title: __('notifications.publish_awaiting_approval_title', [], 'fa'),
+            message: __('notifications.publish_awaiting_approval_message', [
+                'project' => $job->project->name,
+                'count' => (string) $job->files_changed_count,
+            ], 'fa'),
+            severity: Notification::SEVERITY_INFO,
+        );
+    }
+
+    public function onPublishJobSucceeded(PublishJobSucceeded $event): void
+    {
+        $job = $event->publishJob;
+
+        $this->notifyPublishAudience(
+            $job,
+            type: Notification::TYPE_PUBLISH_SUCCESS,
+            title: __('notifications.publish_success_title', [], 'fa'),
+            message: __('notifications.publish_success_message', [
+                'action' => $this->publishActionLabel($job),
+                'project' => $job->project->name,
+            ], 'fa'),
+            severity: Notification::SEVERITY_SUCCESS,
+        );
+    }
+
+    public function onPublishJobFailed(PublishJobFailed $event): void
+    {
+        $job = $event->publishJob;
+
+        $this->notifyPublishAudience(
+            $job,
+            type: Notification::TYPE_PUBLISH_FAILED,
+            title: __('notifications.publish_failed_title', [], 'fa'),
+            message: __('notifications.publish_failed_message', [
+                'action' => $this->publishActionLabel($job),
+                'project' => $job->project->name,
+            ], 'fa'),
+            severity: Notification::SEVERITY_CRITICAL,
+        );
+    }
+
+    private function publishActionLabel(PublishJob $job): string
+    {
+        return $job->action === PublishJob::ACTION_ROLLBACK ? 'Rollback' : 'Publish';
+    }
+
+    /**
+     * Phase 5.2: unlike a PublishJob, a detected change has no
+     * "requesting user" (the agent's watcher found it, no one asked for
+     * it yet) — so this notifies Admins only, same shape as
+     * onLocalAgentApprovalRequired().
+     */
+    public function onLocalChangeDetectionAwaitingApproval(LocalChangeDetectionAwaitingApproval $event): void
+    {
+        $job = $event->changeDetectionJob;
+
+        $this->notifications->notifyAdmins(
+            type: Notification::TYPE_CHANGE_DETECTION_AWAITING_APPROVAL,
+            title: __('notifications.change_detection_awaiting_approval_title', [], 'fa'),
+            message: __('notifications.change_detection_awaiting_approval_message', [
+                'project' => $job->project->name,
+                'count' => (string) $job->files_changed_count,
+            ], 'fa'),
+            severity: Notification::SEVERITY_INFO,
+            related: $job,
+            actorType: 'agent',
+        );
+    }
+
     /**
      * Same "Admins + the requesting user" audience as a Deployment event —
      * operations.view/execute are already role-gated (Task 9), so this
@@ -295,6 +399,40 @@ class NotificationEventSubscriber
         $title = __($titleKey, [], 'fa');
         $message = __($messageKey, ['operation' => $operationLabel, 'server' => $job->server->name], 'fa');
 
+        $this->notifications->notifyAdmins(
+            type: $type,
+            title: $title,
+            message: $message,
+            severity: $severity,
+            related: $job,
+            actorType: 'system',
+        );
+
+        $requestingUser = $job->requested_by
+            ? User::where('email', $job->requested_by)->where('role', '!=', User::ROLE_ADMIN)->first()
+            : null;
+
+        if ($requestingUser !== null) {
+            $this->notifications->notify(
+                $requestingUser,
+                type: $type,
+                title: $title,
+                message: $message,
+                severity: $severity,
+                related: $job,
+                actorType: 'system',
+            );
+        }
+    }
+
+    /**
+     * Same "Admins + the requesting user" audience as
+     * notifyOperationAudience() — local_agents.view/publish are already
+     * role-gated, so this doesn't widen who could plausibly have
+     * requested a publish/rollback.
+     */
+    private function notifyPublishAudience(PublishJob $job, string $type, string $title, string $message, string $severity): void
+    {
         $this->notifications->notifyAdmins(
             type: $type,
             title: $title,

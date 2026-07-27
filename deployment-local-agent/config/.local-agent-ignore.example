@@ -1,0 +1,16 @@
+# Copy this file to `.local-agent-ignore` in the ROOT of the project you
+# are publishing (the same folder as its .git directory) — NOT inside
+# local-agent/ itself. One pattern per line, same shape as .gitignore:
+#   trailing /   -> a directory prefix, any depth under it
+#   leading *    -> a suffix glob
+#   anything else -> an exact relative path
+#
+# Enforced by the Local Agent itself (see lib/IgnoreRules.php), not by
+# git's own ignore mechanism — so a path here is never staged/committed
+# even if it was already tracked once by mistake in the past.
+
+node_modules/
+vendor/
+storage/logs/
+.env
+*.log

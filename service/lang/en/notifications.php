@@ -44,4 +44,16 @@ return [
     'operation_success_message' => 'Operation :operation on server :server succeeded.',
     'operation_failed_title' => 'Operation failed',
     'operation_failed_message' => 'Operation :operation on server :server failed.',
+
+    'local_agent_approval_required_title' => 'Local agent needs approval',
+    'local_agent_approval_required_message' => 'New local agent ":name" needs approval.',
+    'publish_awaiting_approval_title' => 'Publish awaiting approval',
+    'publish_awaiting_approval_message' => 'Publishing :project with :count changed files is awaiting your approval.',
+    'publish_success_title' => 'Publish succeeded',
+    'publish_success_message' => ':action of :project completed successfully.',
+    'publish_failed_title' => 'Publish failed',
+    'publish_failed_message' => ':action of :project failed.',
+
+    'change_detection_awaiting_approval_title' => 'Local change awaiting approval',
+    'change_detection_awaiting_approval_message' => ':count file(s) changed in :project and are ready to publish.',
 ];

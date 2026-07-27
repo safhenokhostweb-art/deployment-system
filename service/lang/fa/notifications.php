@@ -51,4 +51,16 @@ return [
     'operation_success_message' => 'عملیات :operation روی سرور :server با موفقیت انجام شد.',
     'operation_failed_title' => 'عملیات ناموفق',
     'operation_failed_message' => 'عملیات :operation روی سرور :server ناموفق بود.',
+
+    'local_agent_approval_required_title' => 'کارگزار محلی نیازمند تایید',
+    'local_agent_approval_required_message' => 'کارگزار محلی جدید «:name» نیازمند تایید است.',
+    'publish_awaiting_approval_title' => 'انتشار منتظر تایید',
+    'publish_awaiting_approval_message' => 'انتشار پروژه :project با :count فایل تغییریافته منتظر تایید شماست.',
+    'publish_success_title' => 'انتشار موفق',
+    'publish_success_message' => ':action پروژه :project با موفقیت انجام شد.',
+    'publish_failed_title' => 'انتشار ناموفق',
+    'publish_failed_message' => ':action پروژه :project ناموفق بود.',
+
+    'change_detection_awaiting_approval_title' => 'تغییر محلی منتظر تایید',
+    'change_detection_awaiting_approval_message' => ':count فایل در پروژه :project تغییر کرده و آماده انتشار است.',
 ];
