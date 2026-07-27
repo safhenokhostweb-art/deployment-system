@@ -148,6 +148,25 @@ class GitHubAppClient
         }
     }
 
+    /**
+     * @return array<int, array{id: int, url: string}>
+     */
+    public function listWebhooks(string $token, string $owner, string $repo): array
+    {
+        $response = Http::withToken($token)
+            ->withHeaders(['Accept' => 'application/vnd.github+json', 'X-GitHub-Api-Version' => '2022-11-28'])
+            ->get(self::API_BASE . "/repos/{$owner}/{$repo}/hooks", ['per_page' => 100]);
+
+        if ($response->failed()) {
+            throw new GitHubApiException('Failed to list webhooks: ' . $this->summarizeError($response));
+        }
+
+        return array_map(
+            static fn (array $hook) => ['id' => (int) $hook['id'], 'url' => (string) ($hook['config']['url'] ?? '')],
+            $response->json() ?? [],
+        );
+    }
+
     private function assertConfigured(): void
     {
         if (!$this->isConfigured()) {

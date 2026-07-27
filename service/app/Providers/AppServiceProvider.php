@@ -9,6 +9,7 @@ use App\Policies\ProjectPolicy;
 use App\Support\Authorization\PermissionMatrix;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\URL;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -26,6 +27,17 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        // Already live on the real production Hub (deployment.safhenokhost.ir,
+        // behind a reverse proxy) — mirrored here so the next deployment's
+        // git reset --hard doesn't revert it. Laravel's own scheme/host
+        // detection can be wrong behind a proxy that terminates TLS itself;
+        // this forces every generated URL (asset(), route(), the GitHub
+        // webhook URL bootstrap prints, etc.) to https in production
+        // specifically, leaving local/dev environments unaffected.
+        if (app()->environment('production')) {
+            URL::forceScheme('https');
+        }
+
         // Phase 4-F: every dot-notation ability (e.g. "deployments.rollback")
         // is resolved from the role->permission matrix — this is the one
         // place $user->can('x.y') / @can('x.y') actually gets answered, so

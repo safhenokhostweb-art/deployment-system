@@ -1,0 +1,22 @@
+[Unit]
+Description=Deployment Agent (polls Deployment Service, no inbound access required)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# CHANGE_ME: unprivileged user that owns the project working directories
+User=CHANGE_ME_DEPLOY_USER
+# CHANGE_ME: absolute path to this agent directory on the target server
+WorkingDirectory=/CHANGE_ME/path/to/deployment-system/agent
+ExecStart=/usr/bin/php /CHANGE_ME/path/to/deployment-system/agent/agent.php
+Restart=always
+RestartSec=5
+
+# Hardening: the agent only needs outbound HTTPS and local filesystem
+# access to the configured project directories.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

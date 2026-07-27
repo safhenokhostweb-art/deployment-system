@@ -1,0 +1,6 @@
+# Single entry drives every scheduled task defined in
+# service/routes/console.php (agent-nonces:prune, deployments:detect-stalled,
+# deployment-system:prune-logs). Do not add separate cron lines per command —
+# Schedule::command()->onOneServer()/withoutOverlapping() only work correctly
+# when schedule:run itself is invoked on this single cadence.
+* * * * * cd /CHANGE_ME/path/to/deployment-system/service && /usr/bin/php artisan schedule:run >> /dev/null 2>&1
