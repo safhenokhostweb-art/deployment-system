@@ -175,7 +175,7 @@ class ProjectController extends Controller
             'members.user' => fn ($query) => $query->select(['id', 'name', 'email']),
             // Phase 5: One-Click Publish — only approved local agents are
             // ever offered as a publish target from this page.
-            'localProjectMappings.localAgent' => fn ($query) => $query->where('status', 'approved'),
+            'localProjectMappings.localAgent',
         ]);
         // Phase 4-L Task 2: candidates for the "connect GitHub" action
         // shown when this project has no github_account_id yet — never
