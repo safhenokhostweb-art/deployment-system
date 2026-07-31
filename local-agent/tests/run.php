@@ -18,11 +18,19 @@ require __DIR__ . '/../lib/SafetyChecker.php';
 require __DIR__ . '/../lib/Logger.php';
 require __DIR__ . '/../lib/LogTail.php';
 require __DIR__ . '/../lib/ShutdownSignal.php';
+require __DIR__ . '/../lib/InvalidProjectCacheException.php';
+require __DIR__ . '/../lib/ProjectConfigCache.php';
+require __DIR__ . '/../lib/ProjectConfigResolver.php';
+require __DIR__ . '/../lib/ProjectConfigSyncScheduler.php';
 
 use LocalAgent\GitManager;
 use LocalAgent\IgnoreRules;
+use LocalAgent\InvalidProjectCacheException;
 use LocalAgent\Logger;
 use LocalAgent\LogTail;
+use LocalAgent\ProjectConfigCache;
+use LocalAgent\ProjectConfigResolver;
+use LocalAgent\ProjectConfigSyncScheduler;
 use LocalAgent\SafetyChecker;
 use LocalAgent\ShutdownSignal;
 
@@ -277,6 +285,201 @@ $shuttingDown = false;
 ShutdownSignal::handle($shutdownLogger, $shuttingDown, 'event', 0);
 check('ShutdownSignal::handle() flips the by-reference flag to true', $shuttingDown === true, $failures, $passCount);
 rrmdir($logDirForShutdown);
+
+// --- ProjectConfigCache::fromApiResponse() — validates and reshapes the
+// Hub's GET /api/local-agent/projects response into the project_key-keyed
+// map the rest of the agent uses (matches
+// LocalAgentProjectSyncController's response shape on the Hub side). ---
+
+$validApiResponse = [
+    ['project_key' => 'saas-platform', 'local_path' => 'C:\\laragon\\www\\saas-platform', 'remote_name' => 'origin', 'branch' => 'main'],
+    ['project_key' => 'customer-site', 'local_path' => 'C:\\laragon\\www\\customer-site', 'remote_name' => 'origin', 'branch' => 'main'],
+];
+$normalized = ProjectConfigCache::fromApiResponse($validApiResponse);
+check('fromApiResponse() keys the map by project_key', array_keys($normalized) === ['saas-platform', 'customer-site'], $failures, $passCount);
+check('fromApiResponse() preserves local_path', $normalized['saas-platform']['local_path'] === 'C:\\laragon\\www\\saas-platform', $failures, $passCount);
+check('fromApiResponse() preserves branch', $normalized['customer-site']['branch'] === 'main', $failures, $passCount);
+check('fromApiResponse() on an empty list is valid (zero assigned projects)', ProjectConfigCache::fromApiResponse([]) === [], $failures, $passCount);
+
+$threw = false;
+try {
+    ProjectConfigCache::fromApiResponse([['local_path' => 'C:\\x', 'remote_name' => 'origin', 'branch' => 'main']]);
+} catch (\InvalidArgumentException $e) {
+    $threw = str_contains($e->getMessage(), 'project_key');
+}
+check('fromApiResponse() throws when project_key is missing', $threw, $failures, $passCount);
+
+$threw = false;
+try {
+    ProjectConfigCache::fromApiResponse([['project_key' => 'saas-platform', 'local_path' => '', 'remote_name' => 'origin', 'branch' => 'main']]);
+} catch (\InvalidArgumentException $e) {
+    $threw = str_contains($e->getMessage(), 'saas-platform');
+}
+check('fromApiResponse() throws when local_path is empty', $threw, $failures, $passCount);
+
+$threw = false;
+try {
+    ProjectConfigCache::fromApiResponse([['project_key' => 'saas-platform', 'local_path' => 'C:\\x', 'remote_name' => 'origin']]);
+} catch (\InvalidArgumentException $e) {
+    $threw = true;
+}
+check('fromApiResponse() throws when branch is missing', $threw, $failures, $passCount);
+
+// --- ProjectConfigCache::save()/load() — round trip, atomic replacement,
+// and the "never contains secrets" guarantee (Phase 5 constraint). ---
+
+$cacheDir = makeRepo(); // just needs to be an empty temp dir
+$cachePath = $cacheDir . '/projects.json';
+$cache = new ProjectConfigCache($cachePath);
+
+check('load() on a cache that has never been written returns null (not an error)', $cache->load() === null, $failures, $passCount);
+
+$projectsV1 = ['saas-platform' => ['local_path' => 'C:\\laragon\\www\\saas-platform', 'remote_name' => 'origin', 'branch' => 'main']];
+$cache->save($projectsV1);
+check('save() creates the cache file', is_file($cachePath), $failures, $passCount);
+check('load() round-trips exactly what was saved', $cache->load() === $projectsV1, $failures, $passCount);
+
+$rawSaved = file_get_contents($cachePath);
+check('cache file never contains an agent_token key', !str_contains($rawSaved, 'agent_token'), $failures, $passCount);
+check('cache file never contains a signing_secret key', !str_contains($rawSaved, 'signing_secret'), $failures, $passCount);
+check('cache file never contains the word CHANGE_ME (a placeholder secret value)', !str_contains($rawSaved, 'CHANGE_ME'), $failures, $passCount);
+
+// Atomic replacement: a second save() fully replaces the first, and never
+// leaves a stray .tmp-* file behind in the cache directory (rename()
+// either fully lands or the temp file is cleaned up on failure).
+$projectsV2 = ['customer-site' => ['local_path' => 'C:\\laragon\\www\\customer-site', 'remote_name' => 'origin', 'branch' => 'develop']];
+$cache->save($projectsV2);
+check('save() atomically replaces the previous cache content', $cache->load() === $projectsV2, $failures, $passCount);
+
+$leftoverTmpFiles = array_values(array_filter(scandir($cacheDir), fn ($entry) => str_contains($entry, '.tmp-')));
+check('no leftover .tmp-* files remain in the cache directory after save()', $leftoverTmpFiles === [], $failures, $passCount);
+
+// Corrupt cache: exists but is not valid JSON — must be reported as an
+// explicit "invalid cache" condition (an exception), never conflated
+// with "no cache file yet" (which load() reports as null).
+file_put_contents($cachePath, '{not valid json');
+$threw = false;
+try {
+    $cache->load();
+} catch (InvalidProjectCacheException $e) {
+    $threw = true;
+}
+check('load() throws InvalidProjectCacheException on corrupt JSON rather than returning null', $threw, $failures, $passCount);
+
+// Corrupt cache: valid JSON, but missing the required "projects" key.
+file_put_contents($cachePath, json_encode(['version' => 1]));
+$threw = false;
+try {
+    $cache->load();
+} catch (InvalidProjectCacheException $e) {
+    $threw = true;
+}
+check('load() throws InvalidProjectCacheException when "projects" is missing', $threw, $failures, $passCount);
+
+// Corrupt cache: a project entry with an empty local_path.
+file_put_contents($cachePath, json_encode(['version' => 1, 'projects' => ['x' => ['local_path' => '', 'remote_name' => 'origin', 'branch' => 'main']]]));
+$threw = false;
+try {
+    $cache->load();
+} catch (InvalidProjectCacheException $e) {
+    $threw = true;
+}
+check('load() throws InvalidProjectCacheException on a structurally invalid cached project', $threw, $failures, $passCount);
+
+rrmdir($cacheDir);
+
+// --- ProjectConfigResolver::resolve() — the Client-independent fallback
+// half of sync: priority is (2) last good cache, then (3) legacy
+// config.php `projects` array. Exercised without any network dependency,
+// matching this test harness's zero-dependency convention. ---
+
+$resolverCacheDir = makeRepo();
+$resolverLogDir = makeRepo();
+$resolverCache = new ProjectConfigCache($resolverCacheDir . '/projects.json');
+$resolverLogger = new Logger($resolverLogDir);
+$resolver = new ProjectConfigResolver($resolverCache, $resolverLogger);
+
+$legacy = ['deployment-system' => ['local_path' => 'C:\\laragon\\www\\deployment-system', 'remote_name' => 'origin', 'branch' => 'main']];
+
+// No cache yet, no legacy projects: nothing to fall back to.
+check('resolve() returns [] when neither cache nor legacy config exist', $resolver->resolve([]) === [], $failures, $passCount);
+
+// No cache yet, but legacy projects configured: falls back to legacy.
+check('resolve() falls back to the legacy config.php projects array when no cache exists', $resolver->resolve($legacy) === $legacy, $failures, $passCount);
+
+// A good cache exists: cache wins over legacy, even when both are present.
+$cachedProjects = ['saas-platform' => ['local_path' => 'C:\\laragon\\www\\saas-platform', 'remote_name' => 'origin', 'branch' => 'main']];
+$resolverCache->save($cachedProjects);
+check('resolve() prefers the cache over the legacy config.php array when both exist', $resolver->resolve($legacy) === $cachedProjects, $failures, $passCount);
+
+// A corrupt cache falls through to legacy, exactly like no cache at all.
+file_put_contents($resolverCacheDir . '/projects.json', '{not valid json');
+check('resolve() falls back past a corrupt cache to the legacy config.php array', $resolver->resolve($legacy) === $legacy, $failures, $passCount);
+
+rrmdir($resolverCacheDir);
+rrmdir($resolverLogDir);
+
+// --- ProjectConfigSyncScheduler::shouldSync() — the TTL/version/reload
+// gate that replaced "download and validate the full project list on
+// every single poll cycle." Pure logic, no Client/network dependency. ---
+
+$scheduler = new ProjectConfigSyncScheduler(300); // 5-minute TTL
+
+check(
+    'shouldSync() is true on the very first cycle (lastSyncedAt is null — startup always syncs)',
+    $scheduler->shouldSync(null, null, null, false, 1000) === true,
+    $failures,
+    $passCount,
+);
+
+check(
+    'shouldSync() is false when nothing has changed and the TTL has not elapsed',
+    $scheduler->shouldSync(1000, 'v1', 'v1', false, 1100) === false, // 100s < 300s TTL
+    $failures,
+    $passCount,
+);
+
+check(
+    'shouldSync() is true once the TTL has fully elapsed',
+    $scheduler->shouldSync(1000, 'v1', 'v1', false, 1301) === true, // 301s >= 300s TTL
+    $failures,
+    $passCount,
+);
+
+check(
+    'shouldSync() is false right at the boundary just under the TTL',
+    $scheduler->shouldSync(1000, 'v1', 'v1', false, 1299) === false,
+    $failures,
+    $passCount,
+);
+
+check(
+    'shouldSync() is true when the heartbeat reports a config_version different from the last known one, even with TTL untouched',
+    $scheduler->shouldSync(1000, 'v1', 'v2', false, 1010) === true,
+    $failures,
+    $passCount,
+);
+
+check(
+    'shouldSync() is false when the heartbeat omits config_version (null) — never treated as a change',
+    $scheduler->shouldSync(1000, 'v1', null, false, 1010) === false,
+    $failures,
+    $passCount,
+);
+
+check(
+    'shouldSync() is false before ever having synchronized successfully (knownConfigVersion null) even if the heartbeat reports one',
+    $scheduler->shouldSync(1000, null, 'v2', false, 1010) === false,
+    $failures,
+    $passCount,
+);
+
+check(
+    'shouldSync() is true when an explicit reload was requested, overriding everything else',
+    $scheduler->shouldSync(1000, 'v1', 'v1', true, 1010) === true,
+    $failures,
+    $passCount,
+);
 
 echo "\n";
 foreach ($failures as $failure) {

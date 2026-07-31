@@ -46,6 +46,37 @@ class LocalAgentControlTest extends TestCase
         ]);
     }
 
+    public function test_admin_can_force_a_config_reload(): void
+    {
+        $admin = User::factory()->create();
+        $agent = LocalAgent::factory()->approved()->create();
+
+        $this->actingAs($admin)->post(route('local-agents.reload-config', $agent))
+            ->assertRedirect(route('local-agents.show', $agent));
+
+        $this->assertDatabaseHas('local_agent_control_jobs', [
+            'local_agent_id' => $agent->id,
+            'action' => LocalAgentControlJob::ACTION_RELOAD_CONFIG,
+            'status' => LocalAgentControlJob::STATUS_QUEUED,
+        ]);
+    }
+
+    public function test_cannot_force_a_config_reload_on_a_non_approved_agent(): void
+    {
+        $admin = User::factory()->create();
+        $agent = LocalAgent::factory()->pendingRegistration()->create();
+
+        $this->actingAs($admin)->post(route('local-agents.reload-config', $agent))->assertStatus(409);
+    }
+
+    public function test_developer_cannot_force_a_config_reload(): void
+    {
+        $developer = User::factory()->create(['role' => User::ROLE_DEVELOPER]);
+        $agent = LocalAgent::factory()->approved()->create();
+
+        $this->actingAs($developer)->post(route('local-agents.reload-config', $agent))->assertStatus(403);
+    }
+
     public function test_cannot_restart_a_non_approved_agent(): void
     {
         $admin = User::factory()->create();

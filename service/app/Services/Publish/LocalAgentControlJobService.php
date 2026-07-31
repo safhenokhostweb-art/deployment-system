@@ -23,7 +23,11 @@ class LocalAgentControlJobService
     public function queue(LocalAgent $localAgent, string $action, ?string $requestedBy): LocalAgentControlJob
     {
         abort_unless(
-            in_array($action, [LocalAgentControlJob::ACTION_RESTART, LocalAgentControlJob::ACTION_FETCH_LOGS], true),
+            in_array($action, [
+                LocalAgentControlJob::ACTION_RESTART,
+                LocalAgentControlJob::ACTION_FETCH_LOGS,
+                LocalAgentControlJob::ACTION_RELOAD_CONFIG,
+            ], true),
             422,
             "Unknown local agent control action '{$action}'."
         );
@@ -38,7 +42,7 @@ class LocalAgentControlJobService
         AuditLogEntry::record(
             actorType: AuditLogEntry::ACTOR_USER,
             actorIdentifier: $requestedBy,
-            action: $action === LocalAgentControlJob::ACTION_RESTART ? 'local_agent.restart_requested' : 'local_agent.logs_requested',
+            action: self::requestedAuditAction($action),
             subjectType: LocalAgentControlJob::class,
             subjectId: $job->id,
             metadata: ['local_agent_id' => $localAgent->id],
@@ -75,7 +79,7 @@ class LocalAgentControlJobService
         AuditLogEntry::record(
             actorType: AuditLogEntry::ACTOR_AGENT,
             actorIdentifier: $job->localAgent->public_id,
-            action: $job->action === LocalAgentControlJob::ACTION_RESTART ? 'local_agent.restarted' : 'local_agent.logs_fetched',
+            action: self::completedAuditAction($job->action),
             subjectType: LocalAgentControlJob::class,
             subjectId: $job->id,
         );
@@ -100,5 +104,23 @@ class LocalAgentControlJobService
         );
 
         return $job;
+    }
+
+    private static function requestedAuditAction(string $action): string
+    {
+        return match ($action) {
+            LocalAgentControlJob::ACTION_RESTART => 'local_agent.restart_requested',
+            LocalAgentControlJob::ACTION_RELOAD_CONFIG => 'local_agent.reload_config_requested',
+            default => 'local_agent.logs_requested',
+        };
+    }
+
+    private static function completedAuditAction(string $action): string
+    {
+        return match ($action) {
+            LocalAgentControlJob::ACTION_RESTART => 'local_agent.restarted',
+            LocalAgentControlJob::ACTION_RELOAD_CONFIG => 'local_agent.reload_config_completed',
+            default => 'local_agent.logs_fetched',
+        };
     }
 }

@@ -37,6 +37,16 @@ class LocalAgentControlJobServiceTest extends TestCase
         $this->assertSame('admin@example.test', $job->requested_by);
     }
 
+    public function test_queue_accepts_the_reload_config_action(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create();
+
+        $job = app(LocalAgentControlJobService::class)->queue($agent, LocalAgentControlJob::ACTION_RELOAD_CONFIG, 'admin@example.test');
+
+        $this->assertSame(LocalAgentControlJob::ACTION_RELOAD_CONFIG, $job->action);
+        $this->assertSame(LocalAgentControlJob::STATUS_QUEUED, $job->status);
+    }
+
     public function test_claim_next_returns_the_oldest_queued_job_for_that_agent_only(): void
     {
         $agent = LocalAgent::factory()->approved()->create();

@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\GitHubWebhookController;
 use App\Http\Controllers\Api\LocalAgentChangeDetectionController;
 use App\Http\Controllers\Api\LocalAgentControlJobController;
 use App\Http\Controllers\Api\LocalAgentJobController;
+use App\Http\Controllers\Api\LocalAgentProjectSyncController;
 use App\Http\Controllers\Api\LocalAgentRegistrationController;
 use Illuminate\Support\Facades\Route;
 
@@ -56,6 +57,12 @@ Route::post('/local-agent/register', [LocalAgentRegistrationController::class, '
 
 Route::middleware('local-agent.signed')->prefix('local-agent')->group(function () {
     Route::post('/heartbeat', [LocalAgentJobController::class, 'heartbeat'])->name('local-agent.heartbeat');
+
+    // Project-config sync: the agent downloads its assigned projects
+    // (project_key/local_path/remote_name/branch) here instead of them
+    // being hand-maintained in config.php — see LocalAgentProjectSyncController.
+    Route::get('/projects', [LocalAgentProjectSyncController::class, 'index'])->name('local-agent.projects.index');
+
     Route::get('/publish-jobs/next', [LocalAgentJobController::class, 'next'])->name('local-agent.publish-jobs.next');
     Route::post('/publish-jobs/{id}/report', [LocalAgentJobController::class, 'report'])->name('local-agent.publish-jobs.report');
 

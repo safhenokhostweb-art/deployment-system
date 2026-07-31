@@ -89,6 +89,37 @@ class LocalAgent extends Model
     }
 
     /**
+     * A cheap fingerprint of this agent's assigned project config (the
+     * exact fields LocalAgentProjectSyncController serves), computed from
+     * data that already exists — no new column, no extra table. Returned
+     * on both the heartbeat and the project-sync endpoints so the agent
+     * can tell "nothing changed since I last synced" from "the Hub has a
+     * newer mapping/branch/path for me" without re-downloading and
+     * re-diffing the full project list on every single poll cycle.
+     * Changes whenever a mapping is added/edited/removed, or the
+     * underlying Project's branch/active flag changes.
+     */
+    public function projectConfigVersion(): string
+    {
+        $fingerprint = $this->projectMappings()
+            ->with('project')
+            ->whereHas('project', fn ($query) => $query->where('is_active', true))
+            ->get()
+            ->map(fn (LocalProjectMapping $mapping) => implode('|', [
+                $mapping->project->project_key,
+                $mapping->local_path,
+                $mapping->remote_name,
+                $mapping->effectiveBranch(),
+                optional($mapping->updated_at)->timestamp,
+                optional($mapping->project->updated_at)->timestamp,
+            ]))
+            ->sort()
+            ->implode(',');
+
+        return hash('sha256', $fingerprint);
+    }
+
+    /**
      * Check-and-notify only (Phase 5.3 §5 — no auto-download/replace of
      * agent code, see config('deployment.latest_local_agent_version')'s
      * own docblock for why). False when this agent has never reported a

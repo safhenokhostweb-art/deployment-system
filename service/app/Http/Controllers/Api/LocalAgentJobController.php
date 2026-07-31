@@ -45,9 +45,14 @@ class LocalAgentJobController extends Controller
 
         // Phase 5.3: check-and-notify only — the agent decides for itself
         // whether to log this, nothing here ever triggers a download.
+        // project_config_version piggybacks on this already-every-cycle
+        // call so the agent can detect a changed project mapping without
+        // a dedicated poll of its own — see ProjectConfigSyncScheduler on
+        // the agent side.
         return response()->json([
             'status' => 'ok',
             'latest_version' => (string) config('deployment.latest_local_agent_version'),
+            'project_config_version' => $agent->projectConfigVersion(),
         ]);
     }
 

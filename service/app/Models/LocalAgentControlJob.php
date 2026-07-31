@@ -21,6 +21,15 @@ class LocalAgentControlJob extends Model
     public const ACTION_RESTART = 'restart';
     public const ACTION_FETCH_LOGS = 'fetch_logs';
 
+    /**
+     * Project-config sync: the only way an Admin can force an immediate
+     * re-sync on a running agent — there is no other inbound path to a
+     * developer's machine, so this reuses the exact same
+     * queue/poll/report channel as restart/fetch_logs rather than adding
+     * a new one. See agent.php's pollAndHandleControl().
+     */
+    public const ACTION_RELOAD_CONFIG = 'reload_config';
+
     public const STATUS_QUEUED = 'queued';
     public const STATUS_RUNNING = 'running';
     public const STATUS_SUCCEEDED = 'succeeded';

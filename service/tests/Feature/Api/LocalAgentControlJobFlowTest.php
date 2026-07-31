@@ -82,6 +82,22 @@ class LocalAgentControlJobFlowTest extends TestCase
         $this->postJson($path, $body, $headers)->assertStatus(403);
     }
 
+    public function test_agent_claims_and_reports_a_reload_config_job(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create();
+        $job = app(LocalAgentControlJobService::class)->queue($agent, LocalAgentControlJob::ACTION_RELOAD_CONFIG, 'admin@example.test');
+
+        $headers = $this->headersFor($agent, 'GET', '/api/local-agent/control-jobs/next');
+        $response = $this->get('/api/local-agent/control-jobs/next', $headers)->assertOk();
+        $response->assertJsonPath('job.action', LocalAgentControlJob::ACTION_RELOAD_CONFIG);
+
+        $body = ['status' => 'succeeded', 'output' => 'Project configuration will be resynchronized now.'];
+        $path = "/api/local-agent/control-jobs/{$job->public_id}/report";
+        $reportHeaders = $this->headersFor($agent, 'POST', $path, json_encode($body));
+
+        $this->postJson($path, $body, $reportHeaders)->assertOk()->assertJson(['status' => LocalAgentControlJob::STATUS_SUCCEEDED]);
+    }
+
     public function test_next_returns_null_job_when_nothing_queued(): void
     {
         $agent = LocalAgent::factory()->approved()->create();
@@ -99,8 +115,20 @@ class LocalAgentControlJobFlowTest extends TestCase
         $headers = $this->headersFor($agent, 'POST', '/api/local-agent/heartbeat', json_encode($body));
 
         $response = $this->postJson('/api/local-agent/heartbeat', $body, $headers)->assertOk();
-        $response->assertJsonStructure(['status', 'latest_version']);
+        $response->assertJsonStructure(['status', 'latest_version', 'project_config_version']);
 
         $this->assertSame('1.0.0', $agent->fresh()->agent_version);
+    }
+
+    public function test_heartbeat_reports_a_project_config_version_agents_use_to_detect_changed_mappings(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create();
+
+        $body = ['agent_version' => '1.0.0'];
+        $headers = $this->headersFor($agent, 'POST', '/api/local-agent/heartbeat', json_encode($body));
+
+        $response = $this->postJson('/api/local-agent/heartbeat', $body, $headers)->assertOk();
+
+        $this->assertSame($agent->projectConfigVersion(), $response->json('project_config_version'));
     }
 }

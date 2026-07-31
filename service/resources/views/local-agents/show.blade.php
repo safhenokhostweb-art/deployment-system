@@ -107,6 +107,11 @@
                 <button type="submit" class="btn">{{ __('ui.local_agents.fetch_logs_button') }}</button>
             </form>
 
+            <form method="POST" action="{{ route('local-agents.reload-config', $localAgent) }}" style="display:inline" title="{{ __('ui.local_agents.reload_config_hint') }}">
+                @csrf
+                <button type="submit" class="btn">{{ __('ui.local_agents.reload_config_button') }}</button>
+            </form>
+
             <form method="POST" action="{{ route('local-agents.rotate-token', $localAgent) }}" id="rotate-token-local-agent-form" style="display:inline">
                 @csrf
             </form>
@@ -156,9 +161,22 @@
         @forelse ($localAgent->projectMappings as $mapping)
             <tr>
                 <td><a href="{{ route('projects.show', $mapping->project) }}">{{ $mapping->project->name }}</a></td>
+                @can('local_agents.manage')
+                <td colspan="3">
+                    <form method="POST" action="{{ route('local-agents.mappings.update', [$localAgent, $mapping]) }}" style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap;">
+                        @csrf
+                        @method('PUT')
+                        <x-ltr><input type="text" name="local_path" value="{{ $mapping->local_path }}" required placeholder="C:\laragon\www\..." style="min-width:16rem;"></x-ltr>
+                        <input type="text" name="git_branch" value="{{ $mapping->git_branch }}" placeholder="{{ $mapping->project->branch }}" style="max-width:8rem;">
+                        <input type="text" name="remote_name" value="{{ $mapping->remote_name }}" placeholder="origin" style="max-width:8rem;">
+                        <button type="submit" class="btn btn-small">{{ __('ui.local_agents.mapping_update_button') }}</button>
+                    </form>
+                </td>
+                @else
                 <td><x-ltr><code>{{ $mapping->local_path }}</code></x-ltr></td>
                 <td>{{ $mapping->git_branch ?? $mapping->project->branch }}</td>
                 <td>{{ $mapping->remote_name }}</td>
+                @endcan
                 <td>
                     @can('local_agents.manage')
                     <form method="POST" action="{{ route('local-agents.mappings.deployment-mode', [$localAgent, $mapping]) }}" style="display:flex;gap:0.4rem;align-items:center;">
@@ -223,6 +241,37 @@
         </div>
         <button type="submit" class="btn btn-primary">{{ __('ui.local_agents.add_mapping_button') }}</button>
     </form>
+
+    @if ($availableProjects->count() > 1)
+    <details style="margin-top:1rem;">
+        <summary>{{ __('ui.local_agents.bulk_add_summary', ['count' => $availableProjects->count()]) }}</summary>
+        <p class="muted">{{ __('ui.local_agents.bulk_add_hint') }}</p>
+        <form method="POST" action="{{ route('local-agents.mappings.bulk-store', $localAgent) }}">
+            @csrf
+            <table>
+                <thead><tr>
+                    <th></th>
+                    <th>{{ __('ui.common.project') }}</th>
+                    <th>{{ __('ui.local_agents.mapping_local_path') }}</th>
+                    <th>{{ __('ui.local_agents.mapping_branch') }}</th>
+                    <th>{{ __('ui.local_agents.mapping_remote') }}</th>
+                </tr></thead>
+                <tbody>
+                @foreach ($availableProjects as $project)
+                    <tr>
+                        <td><input type="checkbox" name="enabled[{{ $project->id }}]" value="1"></td>
+                        <td>{{ $project->name }}</td>
+                        <td><x-ltr><input type="text" name="local_path[{{ $project->id }}]" value="C:\laragon\www\{{ $project->project_key }}"></x-ltr></td>
+                        <td><input type="text" name="git_branch[{{ $project->id }}]" placeholder="{{ $project->branch }}"></td>
+                        <td><input type="text" name="remote_name[{{ $project->id }}]" value="origin"></td>
+                    </tr>
+                @endforeach
+                </tbody>
+            </table>
+            <button type="submit" class="btn btn-primary" style="margin-top:0.6rem;">{{ __('ui.local_agents.bulk_add_button') }}</button>
+        </form>
+    </details>
+    @endif
     @endif
     @endcan
 </x-card>

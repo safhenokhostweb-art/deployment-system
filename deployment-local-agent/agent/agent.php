@@ -40,6 +40,10 @@ require __DIR__ . '/lib/IgnoreRules.php';
 require __DIR__ . '/lib/SafetyChecker.php';
 require __DIR__ . '/lib/LogTail.php';
 require __DIR__ . '/lib/ShutdownSignal.php';
+require __DIR__ . '/lib/InvalidProjectCacheException.php';
+require __DIR__ . '/lib/ProjectConfigCache.php';
+require __DIR__ . '/lib/ProjectConfigResolver.php';
+require __DIR__ . '/lib/ProjectConfigSyncScheduler.php';
 
 use LocalAgent\Client;
 use LocalAgent\CommitManager;
@@ -47,6 +51,9 @@ use LocalAgent\GitManager;
 use LocalAgent\IgnoreRules;
 use LocalAgent\Logger;
 use LocalAgent\LogTail;
+use LocalAgent\ProjectConfigCache;
+use LocalAgent\ProjectConfigResolver;
+use LocalAgent\ProjectConfigSyncScheduler;
 use LocalAgent\ShutdownSignal;
 use LocalAgent\PushManager;
 use LocalAgent\SafetyChecker;
@@ -94,6 +101,30 @@ $commits = new CommitManager($git);
 $pushes = new PushManager($git);
 $safety = new SafetyChecker();
 
+// Project config is downloaded from the Hub (single source of truth) and
+// cached locally so the agent keeps working while the Hub is temporarily
+// unreachable. The manually-authored `projects` array in config.php is
+// kept only as a last-resort compatibility fallback — see
+// syncProjectConfig() below and ProjectConfigResolver::resolve().
+$cachePath = $config['cache_path'] ?? (dirname($config['log_dir']) . '/cache/projects.json');
+$cache = new ProjectConfigCache($cachePath);
+$projectConfigResolver = new ProjectConfigResolver($cache, $logger);
+$legacyProjects = is_array($config['projects'] ?? null) ? $config['projects'] : [];
+
+// Re-syncing on every single poll cycle downloaded and re-validated the
+// full project list every 15s for no reason most of the time — this
+// scheduler gates a real Hub round trip behind a TTL (default 5 minutes),
+// a change in the Hub-reported config_version (piggybacked on the
+// heartbeat this agent already sends every cycle), or an explicit
+// `reload_config` Control Job. Startup (the first cycle) always syncs
+// regardless. See ProjectConfigSyncScheduler.
+$projectConfigTtlSeconds = (int) ($config['project_config_ttl_seconds'] ?? 300);
+$syncScheduler = new ProjectConfigSyncScheduler($projectConfigTtlSeconds);
+$lastSyncedAt = null;
+$knownConfigVersion = null;
+$reloadRequested = false;
+$projects = [];
+
 $runOnce = in_array('--once', $argv, true);
 
 $logger->info('Local Publisher Agent starting' . ($runOnce ? ' (single poll)' : ' (continuous)') . ' (v' . LOCAL_AGENT_VERSION . ')');
@@ -105,21 +136,44 @@ $shuttingDown = false;
 registerGracefulShutdown($logger, $shuttingDown);
 
 do {
+    // Heartbeat first (not after sync, as before) so this cycle's
+    // config_version is known before deciding whether to sync — see
+    // ProjectConfigSyncScheduler::shouldSync().
+    $heartbeat = sendHeartbeat($client, $logger);
+
+    if ($syncScheduler->shouldSync($lastSyncedAt, $knownConfigVersion, $heartbeat['project_config_version'], $reloadRequested, time())) {
+        $syncResult = syncProjectConfig($client, $cache, $projectConfigResolver, $logger, $legacyProjects);
+        $projects = $syncResult['projects'];
+        $lastSyncedAt = time();
+        if ($syncResult['synced']) {
+            $knownConfigVersion = $syncResult['config_version'];
+        }
+    }
+    // Consumed regardless of what triggered shouldSync() above — a
+    // Control Job's reload request only ever needs to force exactly one
+    // sync attempt, not every cycle from here on.
+    $reloadRequested = false;
+
     try {
-        sendHeartbeat($client, $logger);
-        pollAndExecutePublish($client, $git, $commits, $pushes, $safety, $config, $logger);
+        pollAndExecutePublish($client, $git, $commits, $pushes, $safety, $projects, $logger);
     } catch (\Throwable $e) {
         $logger->error('Unhandled error during poll cycle: ' . $e->getMessage());
     }
 
     try {
-        pollAndDetectChanges($client, $git, $config, $logger, $lastReportedChanges);
+        pollAndDetectChanges($client, $git, $projects, $logger, $lastReportedChanges);
     } catch (\Throwable $e) {
         $logger->error('Unhandled error during change-detection cycle: ' . $e->getMessage());
     }
 
     try {
-        pollAndHandleControl($client, $config, $logger);
+        // A reload_config job claimed this cycle only takes effect
+        // starting next cycle's shouldSync() check — same deferred
+        // timing as every other control action here (e.g. `restart`
+        // itself doesn't exit until this same call returns).
+        if (pollAndHandleControl($client, $config, $logger)) {
+            $reloadRequested = true;
+        }
     } catch (\Throwable $e) {
         $logger->error('Unhandled error during control-job poll cycle: ' . $e->getMessage());
     }
@@ -138,7 +192,7 @@ do {
     }
 } while (!$runOnce);
 
-function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $commits, PushManager $pushes, SafetyChecker $safety, array $config, Logger $logger): void
+function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $commits, PushManager $pushes, SafetyChecker $safety, array $projects, Logger $logger): void
 {
     $response = $client->request('GET', '/api/local-agent/publish-jobs/next');
 
@@ -154,11 +208,11 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
     }
 
     $projectKey = $job['project_key'];
-    $projectConfig = $config['projects'][$projectKey] ?? null;
+    $projectConfig = $projects[$projectKey] ?? null;
     $reportPath = "/api/local-agent/publish-jobs/{$job['id']}/report";
 
     if ($projectConfig === null) {
-        $logger->error("Job {$job['id']} references unknown project_key '{$projectKey}' — no local mapping for it in config.php.");
+        $logger->error("Unknown project: job {$job['id']} references project_key '{$projectKey}', which is not present in the synchronized, cached, or legacy project configuration on this agent.");
         $client->request('POST', $reportPath, [
             'status' => 'failed',
             'error_message' => "Unknown project_key '{$projectKey}' on this agent",
@@ -170,6 +224,16 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
     $repositoryPath = $projectConfig['local_path'];
     $remoteName = $projectConfig['remote_name'] ?? 'origin';
     $branch = $projectConfig['branch'] ?? 'main';
+
+    if (!is_dir($repositoryPath)) {
+        $logger->error("Invalid local path: project '{$projectKey}' is configured with local_path '{$repositoryPath}', which does not exist on this machine.");
+        $client->request('POST', $reportPath, [
+            'status' => 'failed',
+            'error_message' => "Invalid local path '{$repositoryPath}' for project '{$projectKey}'",
+        ]);
+
+        return;
+    }
 
     try {
         if ($job['action'] === 'status_check') {
@@ -239,10 +303,16 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
  *
  * @param array<string, array<int, string>> $lastReportedChanges
  */
-function pollAndDetectChanges(Client $client, GitManager $git, array $config, Logger $logger, array &$lastReportedChanges): void
+function pollAndDetectChanges(Client $client, GitManager $git, array $projects, Logger $logger, array &$lastReportedChanges): void
 {
-    foreach ($config['projects'] as $projectKey => $projectConfig) {
+    foreach ($projects as $projectKey => $projectConfig) {
         $repositoryPath = $projectConfig['local_path'];
+
+        if (!is_dir($repositoryPath)) {
+            $logger->warn("Invalid local path: project '{$projectKey}' is configured with local_path '{$repositoryPath}', which does not exist on this machine — skipping change detection for it.");
+
+            continue;
+        }
 
         try {
             $changedFiles = IgnoreRules::filter($git->changedFiles($repositoryPath), IgnoreRules::loadPatterns($repositoryPath));
@@ -278,20 +348,27 @@ function pollAndDetectChanges(Client $client, GitManager $git, array $config, Lo
  * Phase 5.3: the Hub's only channel to remotely act on this running
  * process — polled every cycle like publish jobs and change detection,
  * since there is deliberately no inbound path to a developer's machine.
+ *
+ * @return bool true when a `reload_config` job was claimed this cycle —
+ *     the caller forces a project-config sync attempt starting next
+ *     cycle (see ProjectConfigSyncScheduler's $reloadRequested param).
+ *     This is also the "manual reload command": an Admin has no other
+ *     way to reach this process, so clicking "Force Config Reload" in
+ *     the Hub (which queues exactly this job) *is* the manual command.
  */
-function pollAndHandleControl(Client $client, array $config, Logger $logger): void
+function pollAndHandleControl(Client $client, array $config, Logger $logger): bool
 {
     $response = $client->request('GET', '/api/local-agent/control-jobs/next');
 
     if ($response['status'] !== 200) {
         $logger->warn("Control-job poll returned HTTP {$response['status']}");
 
-        return;
+        return false;
     }
 
     $job = $response['body']['job'] ?? null;
     if ($job === null) {
-        return; // nothing queued
+        return false; // nothing queued
     }
 
     $reportPath = "/api/local-agent/control-jobs/{$job['id']}/report";
@@ -302,7 +379,7 @@ function pollAndHandleControl(Client $client, array $config, Logger $logger): vo
             $output = LogTail::tail($config['log_dir'], 200);
             $client->request('POST', $reportPath, ['status' => 'succeeded', 'output' => $output]);
 
-            return;
+            return false;
         }
 
         if ($job['action'] === 'restart') {
@@ -314,11 +391,22 @@ function pollAndHandleControl(Client $client, array $config, Logger $logger): vo
             exit(1);
         }
 
+        if ($job['action'] === 'reload_config') {
+            $logger->info("Control job {$job['id']}: configuration reload requested — resynchronizing on the next cycle");
+            $client->request('POST', $reportPath, ['status' => 'succeeded', 'output' => 'Project configuration will be resynchronized now.']);
+
+            return true;
+        }
+
         $logger->error("Control job {$job['id']}: unknown action '{$job['action']}'");
         $client->request('POST', $reportPath, ['status' => 'failed', 'error_message' => "Unknown action '{$job['action']}'"]);
+
+        return false;
     } catch (\Throwable $e) {
         $logger->error("Control job {$job['id']} failed: " . $e->getMessage());
         $client->request('POST', $reportPath, ['status' => 'failed', 'error_message' => $e->getMessage()]);
+
+        return false;
     }
 }
 
@@ -353,7 +441,82 @@ function registerGracefulShutdown(Logger $logger, bool &$shuttingDown): void
     }
 }
 
-function sendHeartbeat(Client $client, Logger $logger): void
+/**
+ * Project configuration source of truth: the Hub, via
+ * GET /api/local-agent/projects. Downloads and validates this agent's
+ * assigned projects, caches them locally, and returns them for this
+ * cycle's use. Falls back — in order — to the last good local cache, then
+ * to the manually-authored `projects` array in config.php (compatibility
+ * only), whenever the Hub can't be reached or its response is malformed.
+ * Never throws: every failure path is caught and logged, returning
+ * whatever configuration source is still usable (or [] if none is).
+ *
+ * Only called when ProjectConfigSyncScheduler::shouldSync() says so —
+ * not on every cycle — so `synced: false` here always means a *real*
+ * sync attempt failed this cycle, not that one was merely skipped.
+ *
+ * @param array<string, array{local_path: string, remote_name: string, branch: string}> $legacyProjects
+ * @return array{projects: array<string, array{local_path: string, remote_name: string, branch: string}>, config_version: string|null, synced: bool}
+ */
+function syncProjectConfig(Client $client, ProjectConfigCache $cache, ProjectConfigResolver $resolver, Logger $logger, array $legacyProjects): array
+{
+    try {
+        $response = $client->request('GET', '/api/local-agent/projects');
+    } catch (\Throwable $e) {
+        $logger->warn('Hub unavailable for project sync: ' . $e->getMessage());
+
+        return ['projects' => $resolver->resolve($legacyProjects), 'config_version' => null, 'synced' => false];
+    }
+
+    if ($response['status'] !== 200) {
+        $logger->error("Synchronization failure: Hub returned HTTP {$response['status']} for /api/local-agent/projects.");
+
+        return ['projects' => $resolver->resolve($legacyProjects), 'config_version' => null, 'synced' => false];
+    }
+
+    $rawProjects = $response['body']['projects'] ?? null;
+    if (!is_array($rawProjects)) {
+        $logger->error('Synchronization failure: malformed response from Hub (missing "projects" array).');
+
+        return ['projects' => $resolver->resolve($legacyProjects), 'config_version' => null, 'synced' => false];
+    }
+
+    try {
+        $projects = ProjectConfigCache::fromApiResponse($rawProjects);
+    } catch (\InvalidArgumentException $e) {
+        $logger->error('Synchronization failure: invalid project configuration received from Hub — ' . $e->getMessage());
+
+        return ['projects' => $resolver->resolve($legacyProjects), 'config_version' => null, 'synced' => false];
+    }
+
+    try {
+        $cache->save($projects);
+        $logger->info("Cache updated at {$cache->path()}");
+    } catch (\Throwable $e) {
+        // A cache write failure doesn't invalidate this cycle's freshly
+        // synchronized config — only the *next* Hub-unavailable fallback
+        // loses this snapshot. Logged, not fatal.
+        $logger->warn('Could not update local project cache: ' . $e->getMessage());
+    }
+
+    // A successful sync that legitimately returns zero projects must
+    // never be confused with a Hub-unreachable failure — this is the
+    // Hub telling us, correctly, "you have no Local Project Mappings
+    // yet." Distinguished from every failure branch above, which never
+    // reach this line.
+    if ($projects === []) {
+        $logger->warn('Hub reachable and synchronized successfully, but this agent has zero assigned projects — no Local Project Mappings exist for it yet. Create one in the Hub (Local Agents -> Project mappings) if you expected projects to sync here.');
+    } else {
+        $logger->info('Configuration synchronized: ' . count($projects) . ' project(s) from Hub.');
+    }
+
+    return ['projects' => $projects, 'config_version' => $response['body']['config_version'] ?? null, 'synced' => true];
+}
+
+/**
+ * @return array{project_config_version: string|null}
+ */
+function sendHeartbeat(Client $client, Logger $logger): array
 {
     try {
         $response = $client->request('POST', '/api/local-agent/heartbeat', [
@@ -367,8 +530,12 @@ function sendHeartbeat(Client $client, Logger $logger): void
         if ($latestVersion !== null && version_compare(LOCAL_AGENT_VERSION, (string) $latestVersion, '<')) {
             $logger->warn("Update available: v{$latestVersion} (running v" . LOCAL_AGENT_VERSION . ") — run upgrade.ps1 from the deployment-local-agent package to update.");
         }
+
+        return ['project_config_version' => $response['body']['project_config_version'] ?? null];
     } catch (\Throwable $e) {
         $logger->warn('Heartbeat failed: ' . $e->getMessage());
+
+        return ['project_config_version' => null];
     }
 }
 

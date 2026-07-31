@@ -242,6 +242,25 @@ class LocalAgentController extends Controller
             ->with('status', 'درخواست دریافت Log ثبت شد — در بعدی Poll کارگزار پاسخ می‌دهد.');
     }
 
+    /**
+     * Project-config sync: forces an immediate re-sync on the agent's
+     * very next poll instead of waiting for the TTL to expire — the
+     * "manual reload" mechanism, since there is no other inbound path to
+     * a developer's machine. Same queue/poll/report channel as
+     * restart/fetchLogs above, just a different `action`.
+     */
+    public function reloadConfig(Request $request, LocalAgent $localAgent): RedirectResponse
+    {
+        Gate::authorize('local_agents.manage');
+
+        abort_unless($localAgent->status === LocalAgent::STATUS_APPROVED, 409, 'Only an approved local agent can be asked to reload its configuration.');
+
+        $this->controlJobs->queue($localAgent, LocalAgentControlJob::ACTION_RELOAD_CONFIG, $request->user()->email);
+
+        return redirect()->route('local-agents.show', $localAgent)
+            ->with('status', 'درخواست همگام‌سازی مجدد ثبت شد — در Poll بعدی کارگزار اجرا می‌شود.');
+    }
+
     public function rotateToken(Request $request, LocalAgent $localAgent): RedirectResponse
     {
         Gate::authorize('local_agents.manage');

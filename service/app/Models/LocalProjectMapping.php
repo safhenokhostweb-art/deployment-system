@@ -42,4 +42,16 @@ class LocalProjectMapping extends Model
     {
         return $this->belongsTo(Project::class);
     }
+
+    /**
+     * The branch a Local Agent should publish/rollback against for this
+     * mapping — an explicit override on the mapping itself, falling back
+     * to the Project's own branch when unset. Same fallback documented on
+     * the `git_branch` column since the table was created; centralized
+     * here so the Hub API and any other caller can't drift from it.
+     */
+    public function effectiveBranch(): string
+    {
+        return $this->git_branch ?? $this->project->branch;
+    }
 }
