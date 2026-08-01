@@ -17,6 +17,7 @@ use App\Events\OperationFailed;
 use App\Events\OperationStarted;
 use App\Events\OperationSucceeded;
 use App\Events\PermissionChanged;
+use App\Events\PublishJobAbandoned;
 use App\Events\PublishJobAwaitingApproval;
 use App\Events\PublishJobFailed;
 use App\Events\PublishJobSucceeded;
@@ -67,6 +68,7 @@ class NotificationEventSubscriber
         $events->listen(PublishJobAwaitingApproval::class, [self::class, 'onPublishJobAwaitingApproval']);
         $events->listen(PublishJobSucceeded::class, [self::class, 'onPublishJobSucceeded']);
         $events->listen(PublishJobFailed::class, [self::class, 'onPublishJobFailed']);
+        $events->listen(PublishJobAbandoned::class, [self::class, 'onPublishJobAbandoned']);
         $events->listen(LocalChangeDetectionAwaitingApproval::class, [self::class, 'onLocalChangeDetectionAwaitingApproval']);
     }
 
@@ -353,6 +355,28 @@ class NotificationEventSubscriber
             type: Notification::TYPE_PUBLISH_FAILED,
             title: __('notifications.publish_failed_title', [], 'fa'),
             message: __('notifications.publish_failed_message', [
+                'action' => $this->publishActionLabel($job),
+                'project' => $job->project->name,
+            ], 'fa'),
+            severity: Notification::SEVERITY_CRITICAL,
+        );
+    }
+
+    /**
+     * Root-cause fix: distinct from onPublishJobFailed — this is
+     * deployments:recover-stale finalizing a job whose claiming agent
+     * went silent (crashed/killed/lost connectivity), not the agent
+     * itself reporting a failure it observed.
+     */
+    public function onPublishJobAbandoned(PublishJobAbandoned $event): void
+    {
+        $job = $event->publishJob;
+
+        $this->notifyPublishAudience(
+            $job,
+            type: Notification::TYPE_PUBLISH_ABANDONED,
+            title: __('notifications.publish_abandoned_title', [], 'fa'),
+            message: __('notifications.publish_abandoned_message', [
                 'action' => $this->publishActionLabel($job),
                 'project' => $job->project->name,
             ], 'fa'),

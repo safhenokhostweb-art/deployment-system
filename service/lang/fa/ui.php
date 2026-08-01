@@ -272,6 +272,8 @@ return [
     'local_agents' => [
         'title' => 'کارگزارهای محلی',
         'pending_button' => 'تاییدهای در انتظار',
+        'recover_stale_button' => 'بازیابی انتشارهای معلق',
+        'recover_stale_confirm' => 'این کار هر PublishJob که عامل مسئول آن ساکت شده (lease منقضی) یا بیش از حد طول کشیده را، در همه کارگزارهای محلی، نهایی می‌کند — به هیچ انتشار سالم در حال اجرا دست نمی‌زند. ادامه می‌دهید؟',
         'no_local_agents' => 'هنوز کارگزار محلی تایید یا غیرفعال‌شده‌ای وجود ندارد.',
         'pending_title' => 'کارگزارهای محلی در انتظار تایید',
         'all_button' => 'همه کارگزارهای محلی',
@@ -361,6 +363,13 @@ return [
         'view_deployment_button' => 'مشاهده جزئیات استقرار',
         'watching_status' => 'در حال Watch — آخرین تغییر :time — :count فایل در انتظار',
         'view_changes_button' => 'مشاهده تغییرات',
+        'running_since' => ':seconds ثانیه است در حال اجراست',
+        'job_last_heartbeat' => 'آخرین heartbeat این Job: :time',
+        'executing_agent' => 'عامل در حال اجرا: :agent',
+        'lease_expires_at' => 'انقضای lease: :time',
+        'lease_expired_awaiting_recovery' => 'lease این Job منقضی شده اما هنوز توسط چرخه بازیابی جاروب نشده — ظرف یک دقیقه نهایی می‌شود.',
+        'lease_expired_at' => 'زمان انقضای lease: :time',
+        'abandoned_explanation' => 'Hub قبل از انقضای lease این Job هیچ پاسخی از عامل دریافت‌کننده نگرفت — احتمالاً عامل کرش کرده، کشته شده، یا اتصالش قطع شده است.',
     ],
 
     'publish_history' => [

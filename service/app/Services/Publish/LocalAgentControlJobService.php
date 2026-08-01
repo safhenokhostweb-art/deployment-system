@@ -51,11 +51,23 @@ class LocalAgentControlJobService
         return $job;
     }
 
-    public function claimNext(LocalAgent $localAgent): ?LocalAgentControlJob
+    /**
+     * @param array<int, string>|null $onlyActions restricts which action(s)
+     *     this call may claim — used by heartbeat-watchdog.php (via
+     *     ?only_action=restart on the API side) so it can poll the same
+     *     queue as the main agent without ever claiming a fetch_logs/
+     *     reload_config job it has no idea how to execute, which would
+     *     otherwise leave that job claimed-but-never-reported — exactly
+     *     the "stuck running forever" failure mode this whole effort
+     *     exists to eliminate. null (the main agent's own call) preserves
+     *     the original unfiltered FIFO behavior.
+     */
+    public function claimNext(LocalAgent $localAgent, ?array $onlyActions = null): ?LocalAgentControlJob
     {
         $job = LocalAgentControlJob::query()
             ->where('local_agent_id', $localAgent->id)
             ->where('status', LocalAgentControlJob::STATUS_QUEUED)
+            ->when($onlyActions !== null, fn ($query) => $query->whereIn('action', $onlyActions))
             ->oldest('created_at')
             ->first();
 

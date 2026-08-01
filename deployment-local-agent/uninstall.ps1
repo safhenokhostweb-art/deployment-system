@@ -22,6 +22,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $TaskName = 'DeploymentLocalAgent'
+$WatchdogTaskName = 'DeploymentLocalAgentWatchdog'
 
 Write-Host '=== حذف Local Development Publisher Agent ==='
 Write-Host ''
@@ -33,6 +34,15 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "Task «$TaskName» متوقف و حذف شد."
 } else {
     Write-Host "Task «$TaskName» پیدا نشد — احتمالاً قبلاً حذف شده."
+}
+
+$watchdogTask = schtasks /Query /TN $WatchdogTaskName 2>$null
+if ($LASTEXITCODE -eq 0) {
+    schtasks /End /TN $WatchdogTaskName 2>$null | Out-Null
+    schtasks /Delete /TN $WatchdogTaskName /F | Out-Null
+    Write-Host "Task «$WatchdogTaskName» متوقف و حذف شد."
+} else {
+    Write-Host "Task «$WatchdogTaskName» پیدا نشد — احتمالاً قبلاً حذف شده."
 }
 
 if ($RemoveFiles) {

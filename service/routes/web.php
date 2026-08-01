@@ -17,6 +17,7 @@ use App\Http\Controllers\Dashboard\OperationController;
 use App\Http\Controllers\Dashboard\ProjectController;
 use App\Http\Controllers\Dashboard\ProjectMemberController;
 use App\Http\Controllers\Dashboard\PublishController;
+use App\Http\Controllers\Dashboard\PublishRecoveryController;
 use App\Http\Controllers\Dashboard\ReadinessController;
 use App\Http\Controllers\Dashboard\ServerController;
 use App\Http\Controllers\Dashboard\UserController;
@@ -87,6 +88,16 @@ Route::middleware('auth')->group(function () {
     Route::post('/projects/{project}/connect-github', [ProjectController::class, 'connectGithub'])->name('projects.connect-github');
 
     Route::get('/publish-history', [PublishController::class, 'history'])->name('publish.history');
+    // Root-cause fix, section 7: "بازیابی انتشارهای معلق" — global (not
+    // per-agent), reuses StalePublishJobRecoveryService, same
+    // 'local_agents.manage' gate as every other Local Agent admin action.
+    // No global throttle middleware exists in this app's 'web' group (see
+    // bootstrap/app.php), so this specific route defines its own —
+    // idempotent or not, a human clicking it repeatedly shouldn't be able
+    // to hammer the recovery query in a tight loop.
+    Route::post('/publish-jobs/recover-stale', [PublishRecoveryController::class, 'recover'])
+        ->middleware('throttle:6,1')
+        ->name('publish-jobs.recover-stale');
     Route::post('/projects/{project}/publish', [PublishController::class, 'store'])->name('projects.publish');
     Route::post('/projects/{project}/publish/{publishJob}/approve', [PublishController::class, 'approve'])->name('projects.publish.approve');
     Route::post('/projects/{project}/publish/{publishJob}/retry', [PublishController::class, 'retry'])->name('projects.publish.retry');

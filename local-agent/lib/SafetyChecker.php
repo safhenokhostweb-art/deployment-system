@@ -38,7 +38,7 @@ final class SafetyChecker
 
     private function currentBranch(GitManager $git, string $repositoryPath): string
     {
-        $result = $git->run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], $repositoryPath);
+        $result = $git->run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], $repositoryPath, $git->timeoutFor('status'));
 
         if ($result['exitCode'] !== 0) {
             throw new \RuntimeException("Could not determine the current branch in {$repositoryPath}: " . trim($result['output']));
@@ -57,7 +57,7 @@ final class SafetyChecker
      */
     private function conflictedFiles(GitManager $git, string $repositoryPath): array
     {
-        $result = $git->run(['git', 'status', '--porcelain'], $repositoryPath);
+        $result = $git->run(['git', 'status', '--porcelain'], $repositoryPath, $git->timeoutFor('status'));
         $conflicted = [];
 
         foreach (preg_split('/\r?\n/', $result['output']) as $line) {

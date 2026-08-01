@@ -289,7 +289,7 @@
             <tr>
                 <td><a href="{{ route('projects.publish.show', [$job->project, $job]) }}">{{ $job->project->name }}</a></td>
                 <td>{{ __('ui.publish.action_' . $job->action) }}</td>
-                <td><x-badge :status="$job->status" /></td>
+                <td><x-badge :status="$job->isLeaseExpired() ? 'awaiting_recovery' : $job->status" /></td>
                 <td>{{ $job->created_at->diffForHumans() }}</td>
             </tr>
         @empty

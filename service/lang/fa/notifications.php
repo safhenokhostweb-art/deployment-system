@@ -60,6 +60,8 @@ return [
     'publish_success_message' => ':action پروژه :project با موفقیت انجام شد.',
     'publish_failed_title' => 'انتشار ناموفق',
     'publish_failed_message' => ':action پروژه :project ناموفق بود.',
+    'publish_abandoned_title' => 'انتشار رهاشده',
+    'publish_abandoned_message' => ':action پروژه :project رهاشده است — عامل محلی وسط اجرا پاسخ ندادن را متوقف کرد و هرگز نتیجه را گزارش نکرد.',
 
     'change_detection_awaiting_approval_title' => 'تغییر محلی منتظر تایید',
     'change_detection_awaiting_approval_message' => ':count فایل در پروژه :project تغییر کرده و آماده انتشار است.',

@@ -43,6 +43,16 @@
             </form>
             @endcan
         @endif
+    @elseif ($publishJob->status === 'running' && $publishJob->isLeaseExpired())
+        {{-- Root-cause fix, section 8: never shown as a plain "در حال
+             اجرا" once the lease has expired but deployments:recover-stale
+             hasn't swept it yet — a stuck job must never look identical to
+             a healthy one, even for the one-minute window before the next
+             scheduled sweep. --}}
+        <p><x-badge status="awaiting_recovery" /></p>
+        <p class="muted">{{ __('ui.publish.lease_expired_awaiting_recovery') }}</p>
+        <p class="muted">{{ __('ui.publish.job_last_heartbeat', ['time' => $publishJob->heartbeat_at?->diffForHumans() ?? __('status.never')]) }}</p>
+        <p class="muted">{{ __('ui.publish.lease_expired_at', ['time' => $publishJob->lease_expires_at?->diffForHumans() ?? __('status.never')]) }}</p>
     @elseif (in_array($publishJob->status, ['queued', 'approved', 'running']))
         @if (!$publishJob->localAgent->isOnline())
             <p class="muted">{{ __('ui.publish.agent_offline_waiting') }}</p>
@@ -52,6 +62,14 @@
             </p>
         @else
             <p class="muted">{{ __('ui.publish.waiting_for_agent') }}</p>
+        @endif
+        @if ($publishJob->status === 'running')
+            <p class="muted">{{ __('ui.publish.running_since', ['seconds' => $publishJob->durationSeconds()]) }}</p>
+            <p class="muted">{{ __('ui.publish.job_last_heartbeat', ['time' => $publishJob->heartbeat_at?->diffForHumans() ?? __('status.never')]) }}</p>
+            <p class="muted">{{ __('ui.publish.executing_agent', ['agent' => $publishJob->localAgent->name ?? $publishJob->localAgent->public_id]) }}</p>
+            @if ($publishJob->lease_expires_at)
+                <p class="muted">{{ __('ui.publish.lease_expires_at', ['time' => $publishJob->lease_expires_at->diffForHumans()]) }}</p>
+            @endif
         @endif
     @elseif ($publishJob->status === 'succeeded')
         @if ($publishJob->result_commit_hash)
@@ -71,9 +89,16 @@
         @else
             <p class="muted">{{ __('ui.publish.deployment_awaiting_webhook') }}</p>
         @endif
-    @elseif ($publishJob->status === 'failed')
+    @elseif (in_array($publishJob->status, ['failed', 'timed_out', 'abandoned']))
         <h3>{{ __('ui.publish.error_label') }}</h3>
         <p class="muted">{{ $publishJob->error_message }}</p>
+        @if ($publishJob->status === 'abandoned')
+            {{-- Root-cause fix, section 8: distinguishes "the agent told us
+                 it failed/timed out" from "the Hub never heard back at all
+                 and inferred this" — an operator reading only error_message
+                 could otherwise mistake one for the other. --}}
+            <p class="muted">{{ __('ui.publish.abandoned_explanation') }}</p>
+        @endif
         @if ($publishJob->output)
             <pre>{{ $publishJob->output }}</pre>
         @endif

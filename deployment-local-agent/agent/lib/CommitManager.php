@@ -26,7 +26,7 @@ final class CommitManager
      *     `.local-agent-ignore`d path can never be committed even if it
      *     was already tracked before the ignore rule existed.
      */
-    public function addAndCommit(string $repositoryPath, array $files, string $message): void
+    public function addAndCommit(string $repositoryPath, array $files, string $message, ?callable $onTick = null): void
     {
         if ($files === []) {
             throw new \RuntimeException("Nothing to commit in {$repositoryPath} — the file list was empty.");
@@ -48,29 +48,35 @@ final class CommitManager
 
         // -A (not plain `add`) so a deleted path in $files is staged as
         // a removal instead of being silently skipped.
-        $add = $this->git->run(array_merge(['git', 'add', '-A', '--'], $paths), $repositoryPath);
+        $add = $this->git->run(array_merge(['git', 'add', '-A', '--'], $paths), $repositoryPath, $this->git->timeoutFor('add'), $onTick);
         if ($add['exitCode'] !== 0) {
-            throw new \RuntimeException("git add failed in {$repositoryPath}: " . trim($add['output']));
+            $reason = $add['timedOut'] ? 'timed out' : 'failed';
+
+            throw new GitCommandException("git add {$reason} in {$repositoryPath}: " . trim($add['output']), $add['timedOut']);
         }
 
         // $message is passed as its own array element, never concatenated
         // into a shell string — proc_open's array form hands it to the
         // process as a single argument, so it cannot break out into a
         // second shell command no matter what characters it contains.
-        $commit = $this->git->run(['git', 'commit', '-m', $message], $repositoryPath);
+        $commit = $this->git->run(['git', 'commit', '-m', $message], $repositoryPath, $this->git->timeoutFor('commit'), $onTick);
         if ($commit['exitCode'] !== 0) {
-            throw new \RuntimeException("git commit failed in {$repositoryPath}: " . trim($commit['output']));
+            $reason = $commit['timedOut'] ? 'timed out' : 'failed';
+
+            throw new GitCommandException("git commit {$reason} in {$repositoryPath}: " . trim($commit['output']), $commit['timedOut']);
         }
     }
 
     /**
      * @return string the new commit hash created by the revert
      */
-    public function revert(string $repositoryPath, string $commitHash): string
+    public function revert(string $repositoryPath, string $commitHash, ?callable $onTick = null): string
     {
-        $revert = $this->git->run(['git', 'revert', '--no-edit', $commitHash], $repositoryPath);
+        $revert = $this->git->run(['git', 'revert', '--no-edit', $commitHash], $repositoryPath, $this->git->timeoutFor('revert'), $onTick);
         if ($revert['exitCode'] !== 0) {
-            throw new \RuntimeException("git revert failed in {$repositoryPath}: " . trim($revert['output']));
+            $reason = $revert['timedOut'] ? 'timed out' : 'failed';
+
+            throw new GitCommandException("git revert {$reason} in {$repositoryPath}: " . trim($revert['output']), $revert['timedOut']);
         }
 
         return $this->git->lastCommitHash($repositoryPath);

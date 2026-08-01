@@ -48,6 +48,7 @@ class Notification extends Model
     public const TYPE_PUBLISH_AWAITING_APPROVAL = 'publish.awaiting_approval';
     public const TYPE_PUBLISH_SUCCESS = 'publish.success';
     public const TYPE_PUBLISH_FAILED = 'publish.failed';
+    public const TYPE_PUBLISH_ABANDONED = 'publish.abandoned';
 
     // Phase 5.2: Auto File Watch + Smart Publish Queue
     public const TYPE_CHANGE_DETECTION_AWAITING_APPROVAL = 'change_detection.awaiting_approval';

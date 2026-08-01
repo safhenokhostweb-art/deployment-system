@@ -135,4 +135,29 @@ class LocalAgentControlTest extends TestCase
             ->assertOk()
             ->assertSee('9.9.9');
     }
+
+    /**
+     * Unlike the test above (which overrides config to prove the badge
+     * itself renders), this uses the REAL, un-overridden
+     * config('deployment.latest_local_agent_version') default — the exact
+     * mechanism that silently stopped working across two prior release
+     * phases because LOCAL_AGENT_VERSION was bumped without also bumping
+     * this default (see LocalAgentVersionSyncTest for the regression
+     * guard on that specific drift). A real agent still reporting the
+     * previous release's version must be flagged as outdated against
+     * today's actual default, with no config() override in this test.
+     */
+    public function test_an_agent_reporting_the_previous_release_version_is_flagged_outdated_against_the_real_default(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create(['agent_version' => '1.2.0']);
+
+        $this->assertTrue($agent->isUpdateAvailable());
+    }
+
+    public function test_an_agent_reporting_the_current_release_version_is_not_flagged_outdated(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create(['agent_version' => config('deployment.latest_local_agent_version')]);
+
+        $this->assertFalse($agent->isUpdateAvailable());
+    }
 }

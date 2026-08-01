@@ -33,6 +33,8 @@ declare(strict_types=1);
 require __DIR__ . '/lib/Security.php';
 require __DIR__ . '/lib/Logger.php';
 require __DIR__ . '/lib/Client.php';
+require __DIR__ . '/lib/GitCommandException.php';
+require __DIR__ . '/lib/JobMaxRuntimeExceededException.php';
 require __DIR__ . '/lib/GitManager.php';
 require __DIR__ . '/lib/CommitManager.php';
 require __DIR__ . '/lib/PushManager.php';
@@ -47,8 +49,10 @@ require __DIR__ . '/lib/ProjectConfigSyncScheduler.php';
 
 use LocalAgent\Client;
 use LocalAgent\CommitManager;
+use LocalAgent\GitCommandException;
 use LocalAgent\GitManager;
 use LocalAgent\IgnoreRules;
+use LocalAgent\JobMaxRuntimeExceededException;
 use LocalAgent\Logger;
 use LocalAgent\LogTail;
 use LocalAgent\ProjectConfigCache;
@@ -66,7 +70,7 @@ use LocalAgent\Security;
  * Hub side for why this never triggers an automatic download). Bump
  * when agent.php or lib/* changes in a way that matters operationally.
  */
-const LOCAL_AGENT_VERSION = '1.2.0';
+const LOCAL_AGENT_VERSION = '1.2.1';
 
 $configPath = __DIR__ . '/config.php';
 
@@ -96,10 +100,26 @@ $client = new Client(
     timeoutSeconds: $config['request_timeout_seconds'],
     logger: $logger,
 );
-$git = new GitManager();
+// Root-cause fix: per-purpose, configurable command timeouts (a hung
+// `git add -A` on a huge diff previously had only a flat, effectively
+// unenforced ceiling) plus process-tree termination on Windows — see
+// GitManager's own docblock. job_heartbeat_interval_seconds paces how
+// often a long-running command's $onTick callback (wired below, in
+// pollAndExecutePublish()) actually fires a PublishJob heartbeat.
+$git = new GitManager(
+    timeouts: [
+        'status' => (int) ($config['git_status_timeout_seconds'] ?? 30),
+        'add' => (int) ($config['git_add_timeout_seconds'] ?? 120),
+        'commit' => (int) ($config['git_commit_timeout_seconds'] ?? 60),
+        'push' => (int) ($config['git_push_timeout_seconds'] ?? 180),
+        'pull' => (int) ($config['git_pull_timeout_seconds'] ?? 180),
+    ],
+    jobHeartbeatIntervalSeconds: (int) ($config['job_heartbeat_interval_seconds'] ?? 25),
+);
 $commits = new CommitManager($git);
 $pushes = new PushManager($git);
 $safety = new SafetyChecker();
+$jobMaxRuntimeSeconds = (int) ($config['job_max_runtime_seconds'] ?? 600);
 
 // Project config is downloaded from the Hub (single source of truth) and
 // cached locally so the agent keeps working while the Hub is temporarily
@@ -126,6 +146,16 @@ $reloadRequested = false;
 $projects = [];
 
 $runOnce = in_array('--once', $argv, true);
+
+// Root-cause fix (Watchdog, section 9): lets the independent
+// heartbeat-watchdog.php process find and safely tree-kill THIS specific
+// process by PID if it ever hangs unresponsive — never by image name
+// (which could kill an unrelated php.exe). Best-effort only: a stale file
+// left behind by an unclean exit is harmless, since the watchdog always
+// re-validates the PID still belongs to a php.exe process before acting
+// on it.
+$pidFilePath = dirname($config['log_dir']) . '/agent.pid';
+@file_put_contents($pidFilePath, (string) getmypid());
 
 $logger->info('Local Publisher Agent starting' . ($runOnce ? ' (single poll)' : ' (continuous)') . ' (v' . LOCAL_AGENT_VERSION . ')');
 
@@ -155,7 +185,7 @@ do {
     $reloadRequested = false;
 
     try {
-        pollAndExecutePublish($client, $git, $commits, $pushes, $safety, $projects, $logger);
+        pollAndExecutePublish($client, $git, $commits, $pushes, $safety, $projects, $logger, $jobMaxRuntimeSeconds);
     } catch (\Throwable $e) {
         $logger->error('Unhandled error during poll cycle: ' . $e->getMessage());
     }
@@ -184,6 +214,7 @@ do {
     // and `git commit`.
     if ($shuttingDown) {
         $logger->info('Local Publisher Agent shutting down gracefully.');
+        @unlink($pidFilePath);
         exit(0);
     }
 
@@ -192,7 +223,7 @@ do {
     }
 } while (!$runOnce);
 
-function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $commits, PushManager $pushes, SafetyChecker $safety, array $projects, Logger $logger): void
+function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $commits, PushManager $pushes, SafetyChecker $safety, array $projects, Logger $logger, int $jobMaxRuntimeSeconds): void
 {
     $response = $client->request('GET', '/api/local-agent/publish-jobs/next');
 
@@ -210,6 +241,7 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
     $projectKey = $job['project_key'];
     $projectConfig = $projects[$projectKey] ?? null;
     $reportPath = "/api/local-agent/publish-jobs/{$job['id']}/report";
+    $heartbeatPath = "/api/local-agent/publish-jobs/{$job['id']}/heartbeat";
 
     if ($projectConfig === null) {
         $logger->error("Unknown project: job {$job['id']} references project_key '{$projectKey}', which is not present in the synchronized, cached, or legacy project configuration on this agent.");
@@ -234,6 +266,22 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
 
         return;
     }
+
+    // Root-cause fix: fired periodically by GitManager::run() while a
+    // long git command (add/commit/push/revert) is still in progress —
+    // renews this job's Hub-side lease (see PublishJobService::heartbeat())
+    // so a slow-but-alive command is never mistaken for an abandoned one
+    // by deployments:recover-stale. Deliberately a *different* HTTP call
+    // than the agent's own general heartbeat() — see agent.php's docblock
+    // on sendHeartbeat().
+    $onTick = static function () use ($client, $heartbeatPath, $logger, $job): void {
+        $response = $client->request('POST', $heartbeatPath);
+        if ($response['status'] !== 200) {
+            $logger->warn("Job {$job['id']}: heartbeat returned HTTP {$response['status']}");
+        }
+    };
+
+    $jobStartedAt = microtime(true);
 
     try {
         if ($job['action'] === 'status_check') {
@@ -260,9 +308,12 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
             // should just retry the push rather than fail again on
             // CommitManager's own "nothing to commit" guard.
             if ($changedFiles !== []) {
-                $commits->addAndCommit($repositoryPath, $changedFiles, (string) $job['commit_message']);
+                $commits->addAndCommit($repositoryPath, $changedFiles, (string) $job['commit_message'], $onTick);
             }
-            $output = $pushes->push($repositoryPath, $remoteName, $branch);
+
+            assertWithinMaxRuntime($jobStartedAt, $jobMaxRuntimeSeconds, (string) $job['id'], $logger);
+
+            $output = $pushes->push($repositoryPath, $remoteName, $branch, $onTick);
             $commitHash = $git->lastCommitHash($repositoryPath);
 
             $client->request('POST', $reportPath, ['status' => 'succeeded', 'commit_hash' => $commitHash, 'output' => $output]);
@@ -275,8 +326,11 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
             $logger->info("Job {$job['id']}: rolling back {$projectKey} ({$repositoryPath})");
             $safety->assertSafeToPublish($git, $repositoryPath, $branch);
             $lastCommit = $git->lastCommitHash($repositoryPath);
-            $revertCommit = $commits->revert($repositoryPath, $lastCommit);
-            $output = $pushes->push($repositoryPath, $remoteName, $branch);
+            $revertCommit = $commits->revert($repositoryPath, $lastCommit, $onTick);
+
+            assertWithinMaxRuntime($jobStartedAt, $jobMaxRuntimeSeconds, (string) $job['id'], $logger);
+
+            $output = $pushes->push($repositoryPath, $remoteName, $branch, $onTick);
 
             $client->request('POST', $reportPath, ['status' => 'succeeded', 'commit_hash' => $revertCommit, 'output' => $output]);
             $logger->info("Job {$job['id']}: reverted {$lastCommit} as {$revertCommit}");
@@ -286,9 +340,44 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
 
         $logger->error("Job {$job['id']}: unknown action '{$job['action']}'");
         $client->request('POST', $reportPath, ['status' => 'failed', 'error_message' => "Unknown action '{$job['action']}'"]);
+    } catch (GitCommandException $e) {
+        // Distinct failure_code so the Hub can tell "the agent's own
+        // command timed out" (this) apart from a plain git failure (a
+        // merge conflict, a rejected push, ...) and from a
+        // deployments:recover-stale-inferred `abandoned` (the agent never
+        // came back to report anything at all).
+        $logger->error("Job {$job['id']} " . ($e->timedOut ? 'timed out' : 'failed') . ': ' . $e->getMessage());
+        $client->request('POST', $reportPath, [
+            'status' => 'failed',
+            'error_message' => $e->getMessage(),
+            'failure_code' => $e->timedOut ? 'process_timeout' : null,
+        ]);
+    } catch (JobMaxRuntimeExceededException $e) {
+        $logger->error("Job {$job['id']}: " . $e->getMessage());
+        $client->request('POST', $reportPath, [
+            'status' => 'failed',
+            'error_message' => $e->getMessage(),
+            'failure_code' => 'process_timeout',
+        ]);
     } catch (\Throwable $e) {
         $logger->error("Job {$job['id']} failed: " . $e->getMessage());
         $client->request('POST', $reportPath, ['status' => 'failed', 'error_message' => $e->getMessage()]);
+    }
+}
+
+/**
+ * Root-cause fix (defense in depth): a hard, whole-job wall-clock ceiling
+ * on top of every individual git command's own timeout — catches a
+ * publish/rollback that's cumulatively run too long even though no single
+ * command exceeded its own limit. Checked between steps (add/commit,
+ * then push), never mid-command.
+ */
+function assertWithinMaxRuntime(float $jobStartedAt, int $jobMaxRuntimeSeconds, string $jobId, Logger $logger): void
+{
+    $elapsed = microtime(true) - $jobStartedAt;
+
+    if ($elapsed >= $jobMaxRuntimeSeconds) {
+        throw new JobMaxRuntimeExceededException("Job {$jobId} exceeded the maximum allowed runtime of {$jobMaxRuntimeSeconds}s (elapsed " . round($elapsed) . 's).');
     }
 }
 

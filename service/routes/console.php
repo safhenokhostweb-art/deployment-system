@@ -23,6 +23,15 @@ Schedule::command('deployments:detect-stalled')
     ->withoutOverlapping()
     ->onOneServer();
 
+// Root-cause fix: PublishJob's own lease-expiry sweep — deliberately on a
+// much tighter cadence than deployments:detect-stalled above since a
+// developer waiting on their own publish notices a stuck status within
+// a minute, not five. See RecoverStalePublishJobs/StalePublishJobRecoveryService.
+Schedule::command('deployments:recover-stale')
+    ->everyMinute()
+    ->withoutOverlapping()
+    ->onOneServer();
+
 // Phase 4-J: same 5-minute cadence DetectOfflineAgents' own sweep-window
 // math assumes (see its docblock) — changing this interval without
 // updating SWEEP_MINUTES there would open a gap where a transition is

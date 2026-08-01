@@ -66,6 +66,13 @@ Route::middleware('local-agent.signed')->prefix('local-agent')->group(function (
     Route::get('/publish-jobs/next', [LocalAgentJobController::class, 'next'])->name('local-agent.publish-jobs.next');
     Route::post('/publish-jobs/{id}/report', [LocalAgentJobController::class, 'report'])->name('local-agent.publish-jobs.report');
 
+    // Root-cause fix: a distinct, lightweight heartbeat for the ONE
+    // publish job currently running — renews its lease so
+    // deployments:recover-stale never mistakes a slow-but-alive command
+    // for an abandoned one. Never conflated with /heartbeat above (the
+    // agent's general online signal).
+    Route::post('/publish-jobs/{id}/heartbeat', [LocalAgentJobController::class, 'heartbeatJob'])->name('local-agent.publish-jobs.heartbeat');
+
     // Phase 5.2: the file watcher's own report — see agent.php's
     // pollAndDetectChanges() and LocalAgentChangeDetectionController.
     Route::post('/change-detections', [LocalAgentChangeDetectionController::class, 'report'])->name('local-agent.change-detections.report');
@@ -73,5 +80,7 @@ Route::middleware('local-agent.signed')->prefix('local-agent')->group(function (
     // Phase 5.3: the Hub's only channel to remotely restart an agent or
     // pull its recent log output — see agent.php's pollAndHandleControl().
     Route::get('/control-jobs/next', [LocalAgentControlJobController::class, 'next'])->name('local-agent.control-jobs.next');
+    // Watchdog-only, restart-scoped poll — see nextRestartOnly()'s own docblock.
+    Route::get('/control-jobs/next-restart', [LocalAgentControlJobController::class, 'nextRestartOnly'])->name('local-agent.control-jobs.next-restart');
     Route::post('/control-jobs/{id}/report', [LocalAgentControlJobController::class, 'report'])->name('local-agent.control-jobs.report');
 });

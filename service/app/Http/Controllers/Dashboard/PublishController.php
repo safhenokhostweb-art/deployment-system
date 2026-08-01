@@ -104,9 +104,13 @@ class PublishController extends Controller
 
         abort_unless($publishJob->project_id === $project->id, 404);
         abort_unless(
-            $publishJob->action === PublishJob::ACTION_PUBLISH && $publishJob->status === PublishJob::STATUS_FAILED,
+            $publishJob->action === PublishJob::ACTION_PUBLISH && in_array($publishJob->status, [
+                PublishJob::STATUS_FAILED,
+                PublishJob::STATUS_TIMED_OUT,
+                PublishJob::STATUS_ABANDONED,
+            ], true),
             409,
-            'Only a failed publish can be retried.'
+            'Only a failed, timed-out, or abandoned publish can be retried.'
         );
 
         $newJob = $this->publishJobs->queueApprovedPublish(

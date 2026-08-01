@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Local Agent Watchdog — independent heartbeat + restart recovery for DeploymentLocalAgent. Runs briefly every minute; never runs continuously, and never touches this machine's git repositories itself.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <!-- A past StartBoundary + indefinite Repetition simply means "start
+         repeating right away, forever" — no runtime substitution needed. -->
+    <TimeTrigger>
+      <Enabled>true</Enabled>
+      <StartBoundary>2020-01-01T00:00:00</StartBoundary>
+      <Repetition>
+        <Interval>PT1M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </TimeTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <!-- CHANGE_ME: same Windows account as the main DeploymentLocalAgent task -->
+      <UserId>CHANGE_ME_WINDOWS_USER</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <!-- Safety net for the safety net: this script only ever makes a
+         couple of short HTTP calls and fixed OS commands, so 2 minutes is
+         generous — if it somehow still hangs, Task Scheduler itself ends it. -->
+    <ExecutionTimeLimit>PT2M</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <!-- CHANGE_ME: absolute path to php.exe -->
+      <Command>CHANGE_ME_PHP_EXE</Command>
+      <!-- CHANGE_ME: absolute path to this package's heartbeat-watchdog.php -->
+      <Arguments>"CHANGE_ME_WATCHDOG_PHP"</Arguments>
+      <!-- CHANGE_ME: this local-agent/ directory -->
+      <WorkingDirectory>CHANGE_ME_LOCAL_AGENT_DIR</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

@@ -13,6 +13,25 @@
         </form>
         @endcan
         <a href="{{ route('local-agents.pending') }}" class="btn">{{ __('ui.local_agents.pending_button') }}</a>
+        @can('local_agents.manage')
+        {{-- Root-cause fix, section 7: "بازیابی انتشارهای معلق" — global
+             (every stale PublishJob across every agent), deliberately not
+             the same button as "Restart Agent" on an agent's own show
+             page — this cleans up Hub-side job/lock STATE, it never asks
+             any agent process to do anything. --}}
+        <form method="POST" action="{{ route('publish-jobs.recover-stale') }}" id="recover-stale-publishes-form" style="display:inline">
+            @csrf
+        </form>
+        <button type="button" class="btn" onclick="document.getElementById('recover-stale-publishes-dialog').showModal()">{{ __('ui.local_agents.recover_stale_button') }}</button>
+        <x-confirm-dialog
+            id="recover-stale-publishes-dialog"
+            form-id="recover-stale-publishes-form"
+            :title="__('ui.local_agents.recover_stale_button')"
+            :body="__('ui.local_agents.recover_stale_confirm')"
+            :confirm-label="__('ui.local_agents.recover_stale_button')"
+            :danger="false"
+        />
+        @endcan
     </div>
 </div>
 

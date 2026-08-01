@@ -32,7 +32,7 @@
                         <span class="muted">—</span>
                     @endif
                 </td>
-                <td><x-badge :status="$job->status" /></td>
+                <td><x-badge :status="$job->isLeaseExpired() ? 'awaiting_recovery' : $job->status" /></td>
                 <td>
                     @can('local_agents.publish')
                         @if ($job->action === 'publish' && $job->status === 'succeeded' && in_array($job->id, $latestSucceededPublishIds, true) && $job->project->localProjectMappings->count() === 1)

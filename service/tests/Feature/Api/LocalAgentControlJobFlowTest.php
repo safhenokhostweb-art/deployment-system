@@ -98,6 +98,38 @@ class LocalAgentControlJobFlowTest extends TestCase
         $this->postJson($path, $body, $reportHeaders)->assertOk()->assertJson(['status' => LocalAgentControlJob::STATUS_SUCCEEDED]);
     }
 
+    /**
+     * Root-cause fix (Watchdog, section 9): the watchdog polls this
+     * restart-scoped endpoint instead of next() so it can never claim a
+     * fetch_logs/reload_config job it has no idea how to execute — which
+     * would otherwise leave that job claimed-but-never-reported, the
+     * exact "stuck running forever" failure mode this effort exists to
+     * eliminate.
+     */
+    public function test_next_restart_only_claims_a_queued_restart_job(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create();
+        $job = app(LocalAgentControlJobService::class)->queue($agent, LocalAgentControlJob::ACTION_RESTART, 'admin@example.test');
+
+        $headers = $this->headersFor($agent, 'GET', '/api/local-agent/control-jobs/next-restart');
+        $response = $this->get('/api/local-agent/control-jobs/next-restart', $headers)->assertOk();
+
+        $response->assertJsonPath('job.id', $job->public_id);
+        $this->assertSame(LocalAgentControlJob::STATUS_RUNNING, $job->fresh()->status);
+    }
+
+    public function test_next_restart_only_ignores_a_queued_fetch_logs_job(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create();
+        $fetchLogsJob = app(LocalAgentControlJobService::class)->queue($agent, LocalAgentControlJob::ACTION_FETCH_LOGS, 'admin@example.test');
+
+        $headers = $this->headersFor($agent, 'GET', '/api/local-agent/control-jobs/next-restart');
+        $response = $this->get('/api/local-agent/control-jobs/next-restart', $headers)->assertOk();
+
+        $response->assertJson(['job' => null]);
+        $this->assertSame(LocalAgentControlJob::STATUS_QUEUED, $fetchLogsJob->fresh()->status);
+    }
+
     public function test_next_returns_null_job_when_nothing_queued(): void
     {
         $agent = LocalAgent::factory()->approved()->create();

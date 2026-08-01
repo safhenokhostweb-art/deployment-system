@@ -89,6 +89,14 @@
         .badge-pending { background: #fff3cd; color: #7a5b00; }
         .badge-skipped { background: #eee; color: #888; }
         .badge-not_connected, .badge-not_ready, .badge-not_configured, .badge-no_agent { background: #eee; color: #555; }
+        .badge-timed_out { background: #ffe9c7; color: #8a4b00; }
+        .badge-abandoned { background: #ffd7d7; color: #8a1f1f; }
+        {{-- Root-cause fix, section 8: view-only pseudo-status (never a
+             persisted PublishJob::status) for a running job whose lease
+             expired but deployments:recover-stale hasn't swept it yet —
+             deliberately its own distinct, attention-grabbing color, never
+             identical to a healthy "running" badge. --}}
+        .badge-awaiting_recovery { background: #ffe0b3; color: #7a3e00; border: 1px solid #cc8400; }
 
         /* Phase 4-J Task 9: severity is a pure data concept (Notification
            model constants) — this is its only UI expression, a colored dot

@@ -108,12 +108,47 @@ return [
     | Check-and-notify only, never auto-download/replace code (a compromised
     | or MITM'd Hub could otherwise push arbitrary code to every developer
     | machine, and there is no code-signing infrastructure in this project to
-    | guard against that). Bump this whenever a new local-agent/ release is
-    | cut; an out-of-date agent just logs it and the developer runs the
-    | shipped upgrade.ps1 themselves. Must match LOCAL_AGENT_VERSION in
-    | local-agent/agent.php at release time.
+    | guard against that). Bump this whenever a new agent release is cut; an
+    | out-of-date agent just logs it and the developer runs the shipped
+    | upgrade.ps1 themselves. Must match LOCAL_AGENT_VERSION in both
+    | local-agent/agent.php and deployment-local-agent/agent/agent.php
+    | (kept identical) at release time — see
+    | tests/Unit/LocalAgentVersionSyncTest.php for the regression guard
+    | that keeps these three from drifting apart again.
     |
     */
-    'latest_local_agent_version' => env('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION', '1.1.0'),
+    'latest_local_agent_version' => env('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION', '1.2.1'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | PublishJob lease (root-cause fix for stuck "running" publishes)
+    |--------------------------------------------------------------------------
+    |
+    | A claimed PublishJob's lease_expires_at is set this many seconds out
+    | on claim, then renewed by the agent's own Job heartbeat (a channel
+    | distinct from its general online heartbeat — see
+    | LocalAgentJobController::heartbeatJob()). Comfortably above the
+    | agent's own job_heartbeat_interval_seconds (config.php on the agent
+    | side) so one slow-but-alive cycle doesn't expire the lease.
+    | publish_lock_ttl_seconds mirrors this for the per-Project publish
+    | lock (see Project::isPublishLocked()) with a small safety margin.
+    |
+    */
+    'publish_job_lease_seconds' => (int) env('DEPLOYMENT_PUBLISH_JOB_LEASE_SECONDS', 120),
+    'publish_lock_ttl_seconds' => (int) env('DEPLOYMENT_PUBLISH_LOCK_TTL_SECONDS', 150),
+
+    /*
+    |--------------------------------------------------------------------------
+    | PublishJob hard runtime ceiling
+    |--------------------------------------------------------------------------
+    |
+    | A second, independent safety net on top of the lease above:
+    | deployments:recover-stale marks a running PublishJob `timed_out`
+    | (not `abandoned`) once it has run longer than this, even if the
+    | agent's heartbeats kept arriving on schedule — catching a runaway
+    | command the agent's own per-command timeout somehow didn't.
+    |
+    */
+    'publish_job_max_runtime_seconds' => (int) env('DEPLOYMENT_PUBLISH_JOB_MAX_RUNTIME_SECONDS', 1800),
 
 ];

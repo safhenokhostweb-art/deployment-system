@@ -23,6 +23,7 @@ require __DIR__ . '/lib/RemoteUrlSanitizer.php';
 require __DIR__ . '/lib/WorkspaceScanner.php';
 require __DIR__ . '/lib/OperationRegistry.php';
 require __DIR__ . '/lib/HealthCollector.php';
+require __DIR__ . '/lib/ShellPlaceholders.php';
 
 use DeploymentAgent\Client;
 use DeploymentAgent\Executor;
@@ -30,6 +31,7 @@ use DeploymentAgent\HealthCollector;
 use DeploymentAgent\JobVerifier;
 use DeploymentAgent\Logger;
 use DeploymentAgent\OperationRegistry;
+use DeploymentAgent\ShellPlaceholders;
 use DeploymentAgent\WorkspaceScanner;
 
 /**
@@ -153,13 +155,13 @@ function pollAndExecute(Client $client, Executor $executor, array $config, Logge
     $workingDirectory = $projectConfig['working_directory'];
     $stepTimeout = $projectConfig['step_timeout_seconds'] ?? $config['default_step_timeout_seconds'];
 
-    $replacements = [
+    $replacements = ShellPlaceholders::escape([
         '{branch}' => $job['branch'] ?? '',
         '{commit}' => $job['commit_hash'] ?? '',
         '{previous_commit}' => $job['previous_commit_hash'] ?? '',
         '{working_directory}' => $workingDirectory,
         '{php_binary}' => $projectConfig['php_binary'] ?? 'php',
-    ];
+    ]);
 
     $sequence = 0;
     $failed = false;
@@ -295,10 +297,10 @@ function pollAndExecuteOperation(Client $client, Executor $executor, array $conf
         $phpBinary = $projectConfig['php_binary'] ?? 'php';
     }
 
-    $command = strtr(OperationRegistry::commandFor($operationType), [
+    $command = strtr(OperationRegistry::commandFor($operationType), ShellPlaceholders::escape([
         '{working_directory}' => $workingDirectory,
         '{php_binary}' => $phpBinary,
-    ]);
+    ]));
 
     // Unlike the deployment job flow, there is no separate "status:
     // running" call here — claimNext() (server-side) already flipped the

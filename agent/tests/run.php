@@ -18,10 +18,14 @@ require __DIR__ . '/../lib/RemoteUrlSanitizer.php';
 require __DIR__ . '/../lib/WorkspaceScanner.php';
 require __DIR__ . '/../lib/OperationRegistry.php';
 require __DIR__ . '/../lib/HealthCollector.php';
+require __DIR__ . '/../lib/ShellPlaceholders.php';
+require __DIR__ . '/../lib/Executor.php';
 
+use DeploymentAgent\Executor;
 use DeploymentAgent\HealthCollector;
 use DeploymentAgent\OperationRegistry;
 use DeploymentAgent\RemoteUrlSanitizer;
+use DeploymentAgent\ShellPlaceholders;
 use DeploymentAgent\WorkspaceScanner;
 
 $failures = [];
@@ -202,6 +206,48 @@ function collect_is_null_or_numeric(array $health): bool
 
     return true;
 }
+
+// --- ShellPlaceholders::escape() — root-cause fix for the
+// "/bin/bash: -c: line 1: unexpected EOF while looking for matching '"
+// bug: a pipeline/operation command is an admin-authored shell STRING
+// with {branch}/{commit}/{working_directory}/{php_binary} substituted in
+// via strtr() — git allows an apostrophe in a branch name, so an
+// unescaped substitution could corrupt the resulting command line (or,
+// worse, inject a second command). escapeshellarg() on each dynamic
+// value, applied before strtr(), closes both without changing how a
+// step's own &&/| operators are authored. ---
+
+$rawReplacements = ['{branch}' => "it's a test", '{commit}' => 'abc123'];
+$escaped = ShellPlaceholders::escape($rawReplacements);
+
+check('escape() changes a value containing an apostrophe', $escaped['{branch}'] !== $rawReplacements['{branch}'], $failures, $passCount);
+check('escape() preserves every placeholder key', array_keys($escaped) === array_keys($rawReplacements), $failures, $passCount);
+
+// End-to-end proof, actually executed (not just asserted about the
+// escaped string in isolation): substituting the escaped value into a
+// template and running it through the exact same Executor pipeline steps
+// use must reproduce the original value intact — never throw, never
+// truncate, never spawn a second command.
+$branchCommand = strtr('echo {branch}', $escaped);
+$branchResult = (new Executor())->run($branchCommand, sys_get_temp_dir(), 10);
+
+check('a substituted value containing an apostrophe executes without error', $branchResult['exitCode'] === 0, $failures, $passCount);
+check('a substituted value containing an apostrophe is reproduced exactly in the output', str_contains($branchResult['output'], "it's a test"), $failures, $passCount);
+
+// Command-injection attempt: a value containing a shell command
+// separator must be treated as one literal string, never split into two
+// commands (which would prove the second "echo INJECTED" actually ran
+// as its own command rather than as literal text within the first).
+$injectionReplacements = ShellPlaceholders::escape(['{branch}' => 'main; echo INJECTED']);
+$injectionCommand = strtr('echo {branch}', $injectionReplacements);
+$injectionResult = (new Executor())->run($injectionCommand, sys_get_temp_dir(), 10);
+
+check(
+    'a value containing a shell command separator is never interpreted as a second command',
+    str_contains($injectionResult['output'], 'main; echo INJECTED'),
+    $failures,
+    $passCount,
+);
 
 echo "\n";
 foreach ($failures as $failure) {

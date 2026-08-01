@@ -48,6 +48,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $PackageDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $TaskName = 'DeploymentLocalAgent'
+$WatchdogTaskName = 'DeploymentLocalAgentWatchdog'
 
 function Fail($message) {
     Write-Host ''
@@ -102,6 +103,7 @@ New-Item -ItemType Directory -Force -Path $agentDir | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $agentDir 'lib') | Out-Null
 
 Copy-Item -Path (Join-Path $PackageDir 'agent\agent.php') -Destination $agentDir -Force
+Copy-Item -Path (Join-Path $PackageDir 'agent\heartbeat-watchdog.php') -Destination $agentDir -Force
 Copy-Item -Path (Join-Path $PackageDir 'agent\lib\*.php') -Destination (Join-Path $agentDir 'lib') -Force
 Copy-Item -Path (Join-Path $PackageDir 'config\config.example.php') -Destination $agentDir -Force
 
@@ -159,6 +161,37 @@ if ($taskExitCode -ne 0) {
 } else {
     Write-Host "Task «$TaskName» ثبت شد — از ورود بعدی به ویندوز، Agent خودکار اجرا می‌شود."
     schtasks /Run /TN $TaskName | Out-Null
+}
+
+# --- Phase D2: Watchdog Task (root-cause fix, section 9) — independent
+# heartbeat + restart recovery if the main Agent ever hangs. A TimeTrigger
+# (every 1 minute) rather than LogonTrigger, since this is a brief,
+# repeated invocation, never a continuous process. ---
+
+$watchdogTemplatePath = Join-Path $PackageDir 'config\windows-task-watchdog.xml.example'
+$watchdogPhp = Join-Path $agentDir 'heartbeat-watchdog.php'
+
+$watchdogXml = Get-Content -Path $watchdogTemplatePath -Raw -Encoding UTF8
+$watchdogXml = $watchdogXml.Replace('CHANGE_ME_WINDOWS_USER', $currentUser)
+$watchdogXml = $watchdogXml.Replace('CHANGE_ME_PHP_EXE', $PhpPath)
+$watchdogXml = $watchdogXml.Replace('CHANGE_ME_WATCHDOG_PHP', $watchdogPhp)
+$watchdogXml = $watchdogXml.Replace('CHANGE_ME_LOCAL_AGENT_DIR', $agentDir)
+$watchdogXml = $watchdogXml.Replace('encoding="UTF-8"', 'encoding="UTF-16"')
+
+$watchdogRenderedPath = Join-Path $env:TEMP 'deployment-local-agent-watchdog-task.xml'
+[System.IO.File]::WriteAllText($watchdogRenderedPath, $watchdogXml, [System.Text.Encoding]::Unicode)
+
+Write-Host ''
+Write-Host "در حال ثبت Task Scheduler برای Watchdog ($WatchdogTaskName) ..."
+schtasks /Create /TN $WatchdogTaskName /XML $watchdogRenderedPath /F | Out-Null
+$watchdogTaskExitCode = $LASTEXITCODE
+Remove-Item $watchdogRenderedPath -ErrorAction SilentlyContinue
+
+if ($watchdogTaskExitCode -ne 0) {
+    Write-Host 'هشدار: ثبت Task Scheduler برای Watchdog ناموفق بود — بازیابی خودکار Agent قفل‌شده در دسترس نخواهد بود.' -ForegroundColor Yellow
+} else {
+    Write-Host "Task «$WatchdogTaskName» ثبت شد — هر ۱ دقیقه heartbeat مستقل می‌فرستد و در صورت قفل شدن Agent، آن را بازیابی می‌کند."
+    schtasks /Run /TN $WatchdogTaskName | Out-Null
 }
 
 # --- Phase E: one status poll (pending-approval is a NORMAL outcome, not an error) ---

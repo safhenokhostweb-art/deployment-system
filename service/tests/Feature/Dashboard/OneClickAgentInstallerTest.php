@@ -307,7 +307,12 @@ class OneClickAgentInstallerTest extends TestCase
         );
 
         $this->assertNotEmpty($matches, 'Expected to find embedded source file blocks in the generated script.');
-        $this->assertCount(10, $matches, 'Expected agent.php + 9 lib/*.php files to be embedded.');
+        // agent/lib/ContENT count moves whenever a new lib/*.php file is
+        // added (most recently ShellPlaceholders.php, a root-cause fix for
+        // an unescaped shell-substitution bug in pipeline/operation
+        // command execution) — this count is a derived fact about the
+        // directory's contents, not a value worth freezing in place.
+        $this->assertCount(11, $matches, 'Expected agent.php + 10 lib/*.php files to be embedded.');
 
         foreach ($matches as $match) {
             [, $relativePath, , $heredocBody, $expectedChecksum] = $match;

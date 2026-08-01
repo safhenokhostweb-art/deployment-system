@@ -272,6 +272,8 @@ return [
     'local_agents' => [
         'title' => 'Local Agents',
         'pending_button' => 'Pending approvals',
+        'recover_stale_button' => 'Recover stale publishes',
+        'recover_stale_confirm' => 'This finalizes any PublishJob whose claiming agent went silent (lease expired) or ran too long, across every local agent — never touches a genuinely healthy running publish. Continue?',
         'no_local_agents' => 'No approved or disabled local agents yet.',
         'pending_title' => 'Pending Local Agent Approvals',
         'all_button' => 'All local agents',
@@ -361,6 +363,13 @@ return [
         'view_deployment_button' => 'View deployment details',
         'watching_status' => 'Watching — last change :time — :count file(s) pending',
         'view_changes_button' => 'View Changes',
+        'running_since' => 'Running for :seconds second(s)',
+        'job_last_heartbeat' => 'Last job heartbeat: :time',
+        'executing_agent' => 'Executing agent: :agent',
+        'lease_expires_at' => 'Lease expires: :time',
+        'lease_expired_awaiting_recovery' => 'This job\'s lease has expired but the recovery sweep has not run yet — it will be finalized within a minute.',
+        'lease_expired_at' => 'Lease expired: :time',
+        'abandoned_explanation' => 'The Hub never heard back from the claiming agent before this job\'s lease expired — it likely crashed, was killed, or lost connectivity mid-command.',
     ],
 
     'publish_history' => [

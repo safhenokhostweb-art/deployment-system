@@ -89,4 +89,46 @@ return [
     // its own; higher = fewer requests. 5-10 minutes (300-600) is a
     // reasonable default — there is rarely a reason to go below ~60.
     'project_config_ttl_seconds' => 300,
+
+    // Root-cause fix: per-command git timeouts. A command that exceeds
+    // its timeout is terminated (its whole process tree, not just the
+    // one PID — see GitManager) and reported to the Hub as a distinct
+    // `timed_out` outcome, never left to hang the agent's main loop (and
+    // with it, its own heartbeat — see job_heartbeat_interval_seconds
+    // below for how a *legitimately* slow command avoids being mistaken
+    // for a hung one anyway).
+    'git_status_timeout_seconds' => 30,
+    'git_add_timeout_seconds' => 120,
+    'git_commit_timeout_seconds' => 60,
+    'git_push_timeout_seconds' => 180,
+    'git_pull_timeout_seconds' => 180,
+
+    // How often (seconds), while a single git command is still running,
+    // the agent pings the Hub with a Job-specific heartbeat — renewing
+    // that PublishJob's lease so a slow-but-alive `git add`/`push` is
+    // never mistaken by deployments:recover-stale for an abandoned one.
+    // Keep comfortably below the Hub's own publish_job_lease_seconds
+    // (config/deployment.php, default 120s) — 20-30s leaves several
+    // heartbeats' worth of margin.
+    'job_heartbeat_interval_seconds' => 25,
+
+    // Hard, whole-job ceiling independent of any single command's own
+    // timeout above — catches a publish/rollback that cumulatively ran
+    // too long even though no individual step exceeded its own limit.
+    // Checked between steps only, never mid-command.
+    'job_max_runtime_seconds' => 600,
+
+    // heartbeat-watchdog.php (its own Scheduled Task,
+    // DeploymentLocalAgentWatchdog — see install.ps1) reads these three.
+    // Minimum time between two watchdog-initiated restarts — restart-loop
+    // protection: if whatever caused the hang recurs immediately after a
+    // restart, the watchdog refuses to restart again until this elapses,
+    // rather than cycling forever.
+    'watchdog_cooldown_seconds' => 300,
+    // Name of the Scheduled Task the watchdog stops/restarts. Must match
+    // the $TaskName install.ps1 registers the main agent under.
+    'watchdog_managed_task_name' => 'DeploymentLocalAgent',
+    // Optional: where the watchdog persists its last-restart timestamp.
+    // Defaults to a `watchdog-state.json` file next to `log_dir`.
+    // 'watchdog_state_path' => __DIR__ . '/storage/watchdog-state.json',
 ];

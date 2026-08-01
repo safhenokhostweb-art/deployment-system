@@ -14,6 +14,10 @@ return [
     // still might run).
     'skipped' => 'Skipped',
     'awaiting_approval' => 'Awaiting approval',
+    // PublishJob::STATUS_* (root-cause fix: lease/recovery states)
+    'timed_out' => 'Timed out',
+    'abandoned' => 'Abandoned after agent disconnect',
+    'awaiting_recovery' => 'Awaiting recovery',
 
     // Agent::STATUS_*
     'approved' => 'Approved',

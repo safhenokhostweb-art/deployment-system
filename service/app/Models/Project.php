@@ -26,6 +26,10 @@ class Project extends Model
         'auto_deploy',
         'github_webhook_secret',
         'is_active',
+        'locked_by_publish_job_id',
+        'locked_by_local_agent_id',
+        'locked_at',
+        'lock_expires_at',
     ];
 
     protected $hidden = [
@@ -39,6 +43,8 @@ class Project extends Model
             'auto_deploy' => 'boolean',
             'is_active' => 'boolean',
             'github_webhook_secret' => 'encrypted',
+            'locked_at' => 'datetime',
+            'lock_expires_at' => 'datetime',
         ];
     }
 
@@ -126,5 +132,30 @@ class Project extends Model
     public function isMember(User $user): bool
     {
         return $this->members()->where('user_id', $user->id)->exists();
+    }
+
+    public function lockedByPublishJob(): BelongsTo
+    {
+        return $this->belongsTo(PublishJob::class, 'locked_by_publish_job_id');
+    }
+
+    /**
+     * Root-cause fix (stuck publishes): a Project can be mapped to more
+     * than one Local Agent, so two developers publishing the same
+     * repository at once was previously unguarded. True only while an
+     * unexpired publish lock is held — an expired lock is treated as
+     * free (deployments:recover-stale releases it explicitly, but a
+     * claim attempt must never trust that sweep has already run).
+     */
+    public function isPublishLocked(): bool
+    {
+        return $this->locked_by_publish_job_id !== null
+            && $this->lock_expires_at !== null
+            && $this->lock_expires_at->isFuture();
+    }
+
+    public function isPublishLockedByAnotherJob(int $publishJobId): bool
+    {
+        return $this->isPublishLocked() && $this->locked_by_publish_job_id !== $publishJobId;
     }
 }

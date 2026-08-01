@@ -17,12 +17,14 @@ final class PushManager
     ) {
     }
 
-    public function push(string $repositoryPath, string $remoteName, string $branch): string
+    public function push(string $repositoryPath, string $remoteName, string $branch, ?callable $onTick = null): string
     {
-        $result = $this->git->run(['git', 'push', $remoteName, $branch], $repositoryPath, timeoutSeconds: 120);
+        $result = $this->git->run(['git', 'push', $remoteName, $branch], $repositoryPath, $this->git->timeoutFor('push'), $onTick);
 
         if ($result['exitCode'] !== 0) {
-            throw new \RuntimeException("git push failed in {$repositoryPath}: " . trim($result['output']));
+            $reason = $result['timedOut'] ? 'timed out' : 'failed';
+
+            throw new GitCommandException("git push {$reason} in {$repositoryPath}: " . trim($result['output']), $result['timedOut']);
         }
 
         return $result['output'];

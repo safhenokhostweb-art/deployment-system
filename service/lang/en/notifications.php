@@ -53,6 +53,8 @@ return [
     'publish_success_message' => ':action of :project completed successfully.',
     'publish_failed_title' => 'Publish failed',
     'publish_failed_message' => ':action of :project failed.',
+    'publish_abandoned_title' => 'Publish abandoned',
+    'publish_abandoned_message' => ':action of :project was abandoned — the local agent stopped responding mid-job and never reported back.',
 
     'change_detection_awaiting_approval_title' => 'Local change awaiting approval',
     'change_detection_awaiting_approval_message' => ':count file(s) changed in :project and are ready to publish.',

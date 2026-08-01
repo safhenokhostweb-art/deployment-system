@@ -11,6 +11,10 @@ return [
     'partial_success' => 'موفقیت جزئی',
     'skipped' => 'رد شده',
     'awaiting_approval' => 'منتظر تایید',
+    // PublishJob::STATUS_* (اصلاح ریشه‌ای: وضعیت‌های lease/بازیابی)
+    'timed_out' => 'اتمام زمان',
+    'abandoned' => 'رهاشده پس از قطع عامل',
+    'awaiting_recovery' => 'در انتظار بازیابی',
 
     // Agent::STATUS_*
     'approved' => 'تایید شده',

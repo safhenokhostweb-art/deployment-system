@@ -29,6 +29,16 @@ class PublishJob extends Model
     public const STATUS_SUCCEEDED = 'succeeded';
     public const STATUS_FAILED = 'failed';
     public const STATUS_REJECTED = 'rejected';
+    /** Agent-reported: its own command exceeded a configured timeout and was terminated. */
+    public const STATUS_TIMED_OUT = 'timed_out';
+    /** Hub-inferred (deployments:recover-stale): the claiming agent's lease expired with no heartbeat — crashed, killed, or lost connectivity. */
+    public const STATUS_ABANDONED = 'abandoned';
+
+    public const FAILURE_CODE_AGENT_HEARTBEAT_LOST = 'agent_heartbeat_lost';
+    public const FAILURE_CODE_JOB_LEASE_EXPIRED = 'job_lease_expired';
+    public const FAILURE_CODE_PROCESS_TIMEOUT = 'process_timeout';
+    public const FAILURE_CODE_AGENT_RESTARTED = 'agent_restarted';
+    public const FAILURE_CODE_LATE_CALLBACK_REJECTED = 'late_callback_rejected';
 
     protected $fillable = [
         'public_id',
@@ -36,6 +46,7 @@ class PublishJob extends Model
         'project_id',
         'action',
         'status',
+        'attempt',
         'commit_message',
         'changed_files',
         'blocked_files',
@@ -46,7 +57,11 @@ class PublishJob extends Model
         'approved_at',
         'output',
         'error_message',
+        'failure_code',
+        'recovery_metadata',
         'started_at',
+        'heartbeat_at',
+        'lease_expires_at',
         'finished_at',
     ];
 
@@ -55,8 +70,11 @@ class PublishJob extends Model
         return [
             'changed_files' => 'array',
             'blocked_files' => 'array',
+            'recovery_metadata' => 'array',
             'approved_at' => 'datetime',
             'started_at' => 'datetime',
+            'heartbeat_at' => 'datetime',
+            'lease_expires_at' => 'datetime',
             'finished_at' => 'datetime',
         ];
     }
@@ -80,7 +98,26 @@ class PublishJob extends Model
 
     public function isTerminal(): bool
     {
-        return in_array($this->status, [self::STATUS_SUCCEEDED, self::STATUS_FAILED, self::STATUS_REJECTED], true);
+        return in_array($this->status, [
+            self::STATUS_SUCCEEDED,
+            self::STATUS_FAILED,
+            self::STATUS_REJECTED,
+            self::STATUS_TIMED_OUT,
+            self::STATUS_ABANDONED,
+        ], true);
+    }
+
+    /**
+     * A job the Hub considers "actively claimed" — running with a lease
+     * that hasn't expired yet. False for a lease-less legacy row (one
+     * claimed before this column existed) so it's picked up by recovery
+     * on its very first eligible sweep rather than being treated as
+     * perpetually fresh.
+     */
+    public function isLeaseExpired(): bool
+    {
+        return $this->status === self::STATUS_RUNNING
+            && ($this->lease_expires_at === null || $this->lease_expires_at->isPast());
     }
 
     public function durationSeconds(): ?int

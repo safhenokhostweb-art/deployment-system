@@ -40,6 +40,37 @@ class LocalAgentControlJobController extends Controller
         ]);
     }
 
+    /**
+     * Root-cause fix (Watchdog, section 9): a distinct, parameter-free
+     * endpoint (never a query string — the signed-request scheme signs
+     * the path only, exactly as Laravel's own $request->path() reports
+     * it, so a query string here would silently break signature
+     * verification) polled by the independent heartbeat-watchdog.php
+     * process instead of next() above. Restricted to `restart` only —
+     * see LocalAgentControlJobService::claimNext()'s own docblock for why
+     * the watchdog must never be able to claim a fetch_logs/reload_config
+     * job it has no idea how to execute.
+     */
+    public function nextRestartOnly(Request $request)
+    {
+        $agent = $request->attributes->get('deployment_local_agent');
+
+        abort_unless($agent instanceof LocalAgent, 403, 'Polling for a control job requires an authenticated Local Agent.');
+
+        $job = $this->controlJobs->claimNext($agent, [LocalAgentControlJob::ACTION_RESTART]);
+
+        if ($job === null) {
+            return response()->json(['job' => null]);
+        }
+
+        return response()->json([
+            'job' => [
+                'id' => $job->public_id,
+                'action' => $job->action,
+            ],
+        ]);
+    }
+
     public function report(Request $request, string $publicId)
     {
         $agent = $request->attributes->get('deployment_local_agent');

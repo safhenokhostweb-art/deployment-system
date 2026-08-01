@@ -22,7 +22,13 @@ require __DIR__ . '/../lib/InvalidProjectCacheException.php';
 require __DIR__ . '/../lib/ProjectConfigCache.php';
 require __DIR__ . '/../lib/ProjectConfigResolver.php';
 require __DIR__ . '/../lib/ProjectConfigSyncScheduler.php';
+require __DIR__ . '/../lib/GitCommandException.php';
+require __DIR__ . '/../lib/JobMaxRuntimeExceededException.php';
+require __DIR__ . '/../lib/WatchdogCooldown.php';
+require __DIR__ . '/../lib/WatchdogState.php';
+require __DIR__ . '/../lib/TaskListParser.php';
 
+use LocalAgent\GitCommandException;
 use LocalAgent\GitManager;
 use LocalAgent\IgnoreRules;
 use LocalAgent\InvalidProjectCacheException;
@@ -33,6 +39,9 @@ use LocalAgent\ProjectConfigResolver;
 use LocalAgent\ProjectConfigSyncScheduler;
 use LocalAgent\SafetyChecker;
 use LocalAgent\ShutdownSignal;
+use LocalAgent\TaskListParser;
+use LocalAgent\WatchdogCooldown;
+use LocalAgent\WatchdogState;
 
 $failures = [];
 $passCount = 0;
@@ -480,6 +489,146 @@ check(
     $failures,
     $passCount,
 );
+
+// --- GitManager::run() timeout, tree-termination, output cap, and env
+// hardening (root-cause fix for the Local Agent hang) — exercised against
+// a real slow child process (PHP_BINARY itself, sleeping), not mocked. ---
+
+$slowCommand = [PHP_BINARY, '-r', 'sleep(10);'];
+$gitForTimeout = new GitManager();
+$timeoutStart = microtime(true);
+$timeoutResult = $gitForTimeout->run($slowCommand, sys_get_temp_dir(), 1);
+$timeoutElapsed = microtime(true) - $timeoutStart;
+
+check('run() reports timedOut=true once a command exceeds its timeout', $timeoutResult['timedOut'] === true, $failures, $passCount);
+check('run() reports exit code 124 on timeout', $timeoutResult['exitCode'] === 124, $failures, $passCount);
+// Regression guard for the actual root-cause bug found while building
+// this fix: the previous pipe-based implementation's timeout-deadline
+// check was itself blocked behind a stream_get_contents() call that
+// silently never returns early on Windows (stream_set_blocking()
+// silently fails there), so a genuinely silent hung command was NEVER
+// actually caught by the "existing" timeout — this 10s sleep against a 1s
+// timeout took over 11s end to end before this fix (proc_get_status()
+// was unreachable in a timely way). A margin well under that, but above
+// normal process-teardown jitter, proves the deadline check itself now
+// fires close to on time.
+check('run() actually terminates close to its configured timeout, never waiting out the full command', $timeoutElapsed < 4.0, $failures, $passCount);
+check('run() never crashes/throws on timeout — the caller (agent.php\'s main loop) can simply continue', true, $failures, $passCount);
+
+// onTick: fired periodically WHILE a long command is still running — the
+// mechanism that renews a PublishJob's Hub-side lease during a slow git
+// command instead of only before/after it.
+$tickCount = 0;
+$gitForTick = new GitManager(jobHeartbeatIntervalSeconds: 1);
+$gitForTick->run([PHP_BINARY, '-r', 'sleep(3);'], sys_get_temp_dir(), 5, function () use (&$tickCount): void {
+    $tickCount++;
+});
+check('run() invokes $onTick at least once during a multi-second command', $tickCount >= 1, $failures, $passCount);
+
+$tickCountWhenFast = 0;
+$gitForFastTick = new GitManager(jobHeartbeatIntervalSeconds: 5);
+$gitForFastTick->run([PHP_BINARY, '-r', 'echo "fast";'], sys_get_temp_dir(), 5, function () use (&$tickCountWhenFast): void {
+    $tickCountWhenFast++;
+});
+check('run() never invokes $onTick at all for a command that finishes immediately', $tickCountWhenFast === 0, $failures, $passCount);
+
+// Output cap: an unexpectedly huge stdout must never grow $output
+// unbounded (memory exhaustion) — capped and marked, not silently
+// dropped.
+$hugeOutputCommand = [PHP_BINARY, '-r', 'echo str_repeat("x", 5300000);'];
+$gitForCap = new GitManager();
+$cappedResult = $gitForCap->run($hugeOutputCommand, sys_get_temp_dir(), 15);
+check('run() caps runaway output instead of buffering it unbounded', strlen($cappedResult['output']) < 5300000, $failures, $passCount);
+check('run() marks output as truncated when the cap is hit', str_contains($cappedResult['output'], 'truncated'), $failures, $passCount);
+
+// GIT_TERMINAL_PROMPT=0 / GCM_INTERACTIVE=never: every command run
+// through GitManager must never be able to block on an interactive
+// credential/host-key prompt.
+$envCommand = [PHP_BINARY, '-r', 'echo getenv("GIT_TERMINAL_PROMPT") . "|" . getenv("GCM_INTERACTIVE");'];
+$gitForEnv = new GitManager();
+$envResult = $gitForEnv->run($envCommand, sys_get_temp_dir(), 10);
+check('run() sets GIT_TERMINAL_PROMPT=0 in the child environment', str_contains($envResult['output'], '0|'), $failures, $passCount);
+check('run() sets GCM_INTERACTIVE=never in the child environment', str_contains($envResult['output'], '|never'), $failures, $passCount);
+
+// timeoutFor(): the per-purpose configurable timeout CommitManager/
+// PushManager query instead of hardcoding their own values.
+$gitWithTimeouts = new GitManager(['add' => 42]);
+check('timeoutFor() returns a configured override when present', $gitWithTimeouts->timeoutFor('add') === 42, $failures, $passCount);
+check('timeoutFor() falls back to its own default for an unconfigured purpose', $gitWithTimeouts->timeoutFor('push') === 180, $failures, $passCount);
+check('timeoutFor() falls back to 30 for a completely unknown purpose', $gitWithTimeouts->timeoutFor('not-a-real-purpose') === 30, $failures, $passCount);
+
+// --- GitCommandException — carries whether the underlying failure was a
+// timeout, so agent.php can report failure_code=process_timeout to the
+// Hub distinctly from an ordinary git failure. ---
+
+$timeoutException = new GitCommandException('git push timed out', true);
+$failureException = new GitCommandException('git push failed', false);
+check('GitCommandException exposes timedOut=true when constructed as a timeout', $timeoutException->timedOut === true, $failures, $passCount);
+check('GitCommandException exposes timedOut=false when constructed as an ordinary failure', $failureException->timedOut === false, $failures, $passCount);
+
+// --- WatchdogCooldown — restart-loop protection, pure logic. ---
+
+$cooldown = new WatchdogCooldown(300);
+check('WatchdogCooldown::isActive() is false when no prior restart is recorded', $cooldown->isActive(null, time()) === false, $failures, $passCount);
+check('WatchdogCooldown::isActive() is true immediately after a restart', $cooldown->isActive(time(), time()) === true, $failures, $passCount);
+check('WatchdogCooldown::isActive() is false once the cooldown has fully elapsed', $cooldown->isActive(time() - 301, time()) === false, $failures, $passCount);
+check('WatchdogCooldown::isActive() is true just under the cooldown boundary', $cooldown->isActive(time() - 299, time()) === true, $failures, $passCount);
+check('WatchdogCooldown::remainingSeconds() is 0 when no prior restart is recorded', $cooldown->remainingSeconds(null, time()) === 0, $failures, $passCount);
+check('WatchdogCooldown::remainingSeconds() counts down correctly', $cooldown->remainingSeconds(time() - 100, time()) === 200, $failures, $passCount);
+check('WatchdogCooldown::remainingSeconds() never goes negative once elapsed', $cooldown->remainingSeconds(time() - 400, time()) === 0, $failures, $passCount);
+
+// --- WatchdogState — atomic persistence of the last restart timestamp
+// across separate watchdog invocations (each a fresh PHP process). ---
+
+$watchdogStateDir = makeRepo(); // just needs to be an empty temp dir
+$watchdogStatePath = $watchdogStateDir . '/watchdog-state.json';
+$watchdogState = new WatchdogState($watchdogStatePath);
+
+check('WatchdogState::lastRestartAt() is null before anything is ever recorded', $watchdogState->lastRestartAt() === null, $failures, $passCount);
+
+$watchdogState->recordRestart(1700000000);
+check('WatchdogState::recordRestart() persists a timestamp readable by a fresh instance', (new WatchdogState($watchdogStatePath))->lastRestartAt() === 1700000000, $failures, $passCount);
+
+$watchdogState->recordRestart(1700000500);
+check('WatchdogState::recordRestart() overwrites the previous value atomically', $watchdogState->lastRestartAt() === 1700000500, $failures, $passCount);
+$leftoverWatchdogTmpFiles = array_values(array_filter(scandir($watchdogStateDir), fn ($entry) => str_contains($entry, '.tmp-')));
+check('no leftover .tmp-* files remain after WatchdogState::recordRestart()', $leftoverWatchdogTmpFiles === [], $failures, $passCount);
+
+file_put_contents($watchdogStatePath, '{not valid json');
+check('WatchdogState::lastRestartAt() returns null (not a throw) for a corrupt state file', (new WatchdogState($watchdogStatePath))->lastRestartAt() === null, $failures, $passCount);
+
+rrmdir($watchdogStateDir);
+
+// --- TaskListParser — pure parsing of `tasklist /FO CSV /NH` output, no
+// OS/process dependency. The watchdog uses this to confirm a PID from
+// agent.pid still actually belongs to a php.exe process before ever
+// tree-killing it. ---
+
+check(
+    'isImageName() matches a real CSV tasklist line for the expected image',
+    TaskListParser::isImageName('"php.exe","12345","Console","1","12,345 K"', 'php.exe'),
+    $failures,
+    $passCount,
+);
+check(
+    'isImageName() is case-insensitive on the image name',
+    TaskListParser::isImageName('"PHP.EXE","12345","Console","1","12,345 K"', 'php.exe'),
+    $failures,
+    $passCount,
+);
+check(
+    'isImageName() is false for a different image name at that PID (a stale/reused PID must never be killed)',
+    !TaskListParser::isImageName('"notepad.exe","12345","Console","1","6,000 K"', 'php.exe'),
+    $failures,
+    $passCount,
+);
+check(
+    'isImageName() is false for tasklist\'s own "no tasks found" message',
+    !TaskListParser::isImageName('INFO: No tasks are running which match the specified criteria.', 'php.exe'),
+    $failures,
+    $passCount,
+);
+check('isImageName() is false for empty output', !TaskListParser::isImageName('', 'php.exe'), $failures, $passCount);
 
 echo "\n";
 foreach ($failures as $failure) {

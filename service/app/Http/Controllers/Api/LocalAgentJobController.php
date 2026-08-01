@@ -115,14 +115,48 @@ class LocalAgentJobController extends Controller
             'commit_hash' => 'nullable|string|max:64',
             'output' => 'nullable|string|max:100000',
             'error_message' => 'nullable|string|max:2000',
+            // Root-cause fix: lets the agent tell the Hub its own command
+            // exceeded a configured timeout (see GitManager/CommitManager/
+            // PushManager on the agent side) — a distinct, self-reported
+            // outcome from a plain failure, and from the Hub-inferred
+            // `abandoned` deployments:recover-stale produces.
+            'failure_code' => 'nullable|string|in:process_timeout',
         ]);
 
         if ($validated['status'] === 'failed') {
-            $updated = $this->publishJobs->reportFailure($job, $validated['error_message'] ?? 'Unknown agent-side publish failure.', $validated['output'] ?? null);
+            $updated = $this->publishJobs->reportFailure(
+                $job,
+                $validated['error_message'] ?? 'Unknown agent-side publish failure.',
+                $validated['output'] ?? null,
+                $validated['failure_code'] ?? null,
+            );
         } else {
             $updated = $this->publishJobs->reportResult($job, $validated['commit_hash'] ?? null, $validated['output'] ?? '');
         }
 
         return response()->json(['status' => $updated->status]);
+    }
+
+    /**
+     * The Job-heartbeat channel (distinct from heartbeat() above, which
+     * is the Local Agent's general online signal) — renews a running
+     * PublishJob's lease (and, for publish/rollback, its Project's
+     * publish lock) every ~20-30s while the agent's git command is still
+     * in progress. See PublishJobService::heartbeat().
+     */
+    public function heartbeatJob(Request $request, string $publicId)
+    {
+        $agent = $request->attributes->get('deployment_local_agent');
+
+        abort_unless($agent instanceof LocalAgent, 403, 'A job heartbeat requires an authenticated Local Agent.');
+
+        $job = PublishJob::where('public_id', $publicId)->firstOrFail();
+
+        $updated = $this->publishJobs->heartbeat($job, $agent);
+
+        return response()->json([
+            'status' => $updated->status,
+            'lease_expires_at' => $updated->lease_expires_at?->toIso8601String(),
+        ]);
     }
 }
