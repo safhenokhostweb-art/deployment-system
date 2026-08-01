@@ -34,6 +34,10 @@ Route::middleware('agent.signed')->prefix('agent')->group(function () {
     // that order inside AgentJobController.
     Route::post('/jobs/{id}/status', [AgentJobController::class, 'updateStatus'])->name('agent.jobs.status');
     Route::post('/jobs/{id}/log', [AgentJobController::class, 'appendLog'])->name('agent.jobs.log');
+    // Root-cause fix (sandogh deployment overhaul, Phase 2): a distinct
+    // mid-step lease renewal, same rationale as
+    // local-agent/publish-jobs/{id}/heartbeat — see AgentJobController::heartbeatJob().
+    Route::post('/jobs/{id}/heartbeat', [AgentJobController::class, 'heartbeatJob'])->name('agent.jobs.heartbeat');
 
     // Phase 4-H: Local Discovery. Strictly opt-in on the agent side (only
     // polled when the agent's own config sets workspace_root) and a no-op

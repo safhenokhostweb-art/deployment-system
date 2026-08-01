@@ -12,6 +12,7 @@ use App\Models\Project;
 use App\Models\Server;
 use App\Models\User;
 use App\Services\Deployment\DeploymentDispatcher;
+use App\Services\Deployment\Recipe\RecipeValidator;
 use App\Services\GitHub\GitHubApiException;
 use App\Services\GitHub\GitHubAppClient;
 use Illuminate\Http\RedirectResponse;
@@ -49,6 +50,7 @@ class ProjectController extends Controller
     public function __construct(
         private readonly DeploymentDispatcher $dispatcher,
         private readonly GitHubAppClient $github,
+        private readonly RecipeValidator $recipeValidator,
     ) {
     }
 
@@ -125,6 +127,7 @@ class ProjectController extends Controller
             'environment' => $validated['environment'],
             'server_id' => $validated['server_id'],
             'pipeline' => $validated['pipeline'],
+            'deployment_recipe' => $validated['deployment_recipe'],
             'auto_deploy' => $request->boolean('auto_deploy'),
             'github_webhook_secret' => $plainWebhookSecret,
         ]);
@@ -270,6 +273,7 @@ class ProjectController extends Controller
             'environment' => $validated['environment'],
             'server_id' => $validated['server_id'],
             'pipeline' => $validated['pipeline'],
+            'deployment_recipe' => $validated['deployment_recipe'],
             'auto_deploy' => $request->boolean('auto_deploy'),
             'is_active' => $request->boolean('is_active', true),
         ]);
@@ -361,6 +365,7 @@ class ProjectController extends Controller
             'environment' => 'required|string|max:100',
             'server_id' => 'required|exists:servers,id',
             'pipeline' => 'required|string',
+            'deployment_recipe' => 'nullable|string',
             'environment_name' => 'nullable|string|max:255',
             'github_account_id' => 'nullable|exists:github_accounts,id',
         ]);
@@ -378,6 +383,14 @@ class ProjectController extends Controller
         }
 
         $validated['pipeline'] = $pipeline;
+
+        // Optional and additive: an empty/omitted textarea leaves
+        // deployment_recipe null, so this Project keeps deploying via
+        // `pipeline` exactly as before — see Project::usesDeploymentRecipe().
+        $rawRecipe = trim((string) ($validated['deployment_recipe'] ?? ''));
+        $validated['deployment_recipe'] = $rawRecipe === ''
+            ? null
+            : $this->recipeValidator->validate(json_decode($rawRecipe, true));
 
         if ($project !== null) {
             $validated['project_key'] = $project->project_key;

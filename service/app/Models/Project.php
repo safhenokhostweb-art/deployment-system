@@ -23,6 +23,7 @@ class Project extends Model
         'server_id',
         'github_account_id',
         'pipeline',
+        'deployment_recipe',
         'auto_deploy',
         'github_webhook_secret',
         'is_active',
@@ -40,6 +41,7 @@ class Project extends Model
     {
         return [
             'pipeline' => 'array',
+            'deployment_recipe' => 'array',
             'auto_deploy' => 'boolean',
             'is_active' => 'boolean',
             'github_webhook_secret' => 'encrypted',
@@ -74,6 +76,19 @@ class Project extends Model
     public function hasGithubWebhookConfigured(): bool
     {
         return $this->github_account_id !== null;
+    }
+
+    /**
+     * `deployment_recipe` (an ordered list of typed steps — see
+     * RecipeValidator) takes precedence over the legacy `pipeline`
+     * column whenever present and non-empty. A Project that has never
+     * set one (every Project that existed before this column, and any
+     * new one left on the simple pipeline form) is entirely unaffected —
+     * see AgentJobService::claimNextJob().
+     */
+    public function usesDeploymentRecipe(): bool
+    {
+        return is_array($this->deployment_recipe) && $this->deployment_recipe !== [];
     }
 
     public function deployments(): HasMany

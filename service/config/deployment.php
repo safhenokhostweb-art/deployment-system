@@ -151,4 +151,26 @@ return [
     */
     'publish_job_max_runtime_seconds' => (int) env('DEPLOYMENT_PUBLISH_JOB_MAX_RUNTIME_SECONDS', 1800),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Deployment lease (sandogh deployment overhaul, Phase 2)
+    |--------------------------------------------------------------------------
+    |
+    | Mirrors publish_job_lease_seconds/publish_job_max_runtime_seconds above
+    | for the separate Deployment/AgentJob domain. A recipe-based deploy
+    | legitimately runs far longer than a git publish (npm install, two
+    | builds, a migration) — deployment_job_lease_seconds is renewed by the
+    | agent's per-step heartbeat tick (see agent/lib/Executor.php), not just
+    | on step boundaries, so one slow-but-alive step (a cold-cache `npm ci`)
+    | doesn't expire the lease. deployment_job_max_runtime_seconds is the
+    | hard ceiling deployments:detect-stalled enforces even if heartbeats
+    | kept arriving on schedule; it defaults well above
+    | RecipeValidator::DEFAULT_TOTAL_TIMEOUT_SECONDS so a well-behaved
+    | recipe's own timeout always fires first, with this as the backstop
+    | for a recipe that set an unusually large timeout_seconds of its own.
+    |
+    */
+    'deployment_job_lease_seconds' => (int) env('DEPLOYMENT_JOB_LEASE_SECONDS', 180),
+    'deployment_job_max_runtime_seconds' => (int) env('DEPLOYMENT_JOB_MAX_RUNTIME_SECONDS', 10800),
+
 ];

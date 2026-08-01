@@ -45,6 +45,30 @@ return [
         // 'project_key' => [
         //     'working_directory' => '/home/example/public_html',
         //     'php_binary' => 'php',
+        //
+        //     // --- deployment_recipe-only settings below (see
+        //     // RecipeStepRunner). A project still using the plain
+        //     // `pipeline` form never reads any of these. ---
+        //
+        //     // For a recipe project, working_directory (above) means the
+        //     // app ROOT, not a single checkout — the agent creates
+        //     // working_directory/releases/<id> and working_directory/current
+        //     // under it (see ReleaseManager). Never set by the Hub.
+        //
+        //     // How many seconds between heartbeat calls to the Hub while a
+        //     // single recipe step is still running (renews the
+        //     // deployment's lease — see deployments:detect-stalled).
+        //     'job_heartbeat_interval_seconds' => 30,
+        //
+        //     // How many releases (including the currently active one) to
+        //     // keep on disk — activate_release deletes anything older.
+        //     'release_retention_count' => 5,
+        //
+        //     // Defense in depth for restart_service/verify_service_active
+        //     // (ServiceAllowlist): even a compromised or buggy Hub can
+        //     // never make this agent restart a systemd unit outside this
+        //     // list, regardless of what a recipe asks for.
+        //     'allowed_services' => ['example-api.service', 'example-web.service'],
         // ],
     ],
 

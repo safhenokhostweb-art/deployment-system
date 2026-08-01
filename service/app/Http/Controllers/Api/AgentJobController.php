@@ -126,11 +126,21 @@ class AgentJobController extends Controller
             $this->authorizeServerOwnsDeployment($server, $deployment);
 
             $validated = $request->validate([
-                'status' => 'required|string|in:running,succeeded,failed',
+                // building/migrating/activating/verifying/rolled_back are
+                // the recipe-aware phases (Phase 4) — a legacy pipeline
+                // deployment never reports them, going straight
+                // running -> succeeded/failed exactly as before.
+                'status' => 'required|string|in:running,building,migrating,activating,verifying,succeeded,failed,rolled_back',
                 'message' => 'nullable|string|max:5000',
+                'failure_code' => 'nullable|string|max:100',
             ]);
 
-            $updated = $this->jobs->updateStatus($deployment, $validated['status'], $validated['message'] ?? null);
+            $updated = $this->jobs->updateStatus(
+                $deployment,
+                $validated['status'],
+                $validated['message'] ?? null,
+                $validated['failure_code'] ?? null,
+            );
 
             return response()->json(['status' => $updated->status]);
         }
@@ -148,6 +158,26 @@ class AgentJobController extends Controller
         return response()->json(['status' => $updated->status]);
     }
 
+    /**
+     * A distinct, lightweight heartbeat for the ONE deployment a server is
+     * actively executing — renews its lease mid-step (during a long `npm
+     * ci` or Next.js build), independent of step boundaries. Mirrors
+     * LocalAgentJobController::heartbeatJob() for PublishJob. Deployment
+     * only — the dormant new-domain AgentJob/DeploymentTask path has no
+     * lease columns and is out of scope here.
+     */
+    public function heartbeatJob(Request $request, string $id)
+    {
+        $server = $this->authenticatedServer($request);
+
+        $deployment = Deployment::where('public_id', $id)->firstOrFail();
+        $this->authorizeServerOwnsDeployment($server, $deployment);
+
+        $updated = $this->jobs->heartbeat($deployment);
+
+        return response()->json(['status' => $updated->status, 'lease_expires_at' => $updated->lease_expires_at?->toIso8601String()]);
+    }
+
     public function appendLog(Request $request, string $id)
     {
         $server = $this->authenticatedServer($request);
@@ -163,6 +193,14 @@ class AgentJobController extends Controller
                 'exit_code' => 'nullable|integer',
                 'duration_ms' => 'nullable|integer|min:0',
                 'timed_out' => 'nullable|boolean',
+                // Recipe-aware step tracking (Phase 2) — null for every
+                // legacy pipeline step, exactly as before this column
+                // existed. See RecipeStepType for the allowed step_type
+                // values and DeploymentLogEntry's status column comment
+                // for how a null status is interpreted.
+                'status' => 'nullable|string|in:queued,running,succeeded,failed,skipped',
+                'step_type' => 'nullable|string|max:100',
+                'failure_code' => 'nullable|string|max:100',
             ]);
 
             $entry = $this->jobs->recordLog($deployment, $validated);

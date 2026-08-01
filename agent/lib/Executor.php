@@ -26,9 +26,114 @@ final class Executor
     private const MAX_OUTPUT_BYTES = 5_000_000;
 
     /**
+     * How often (seconds) the wait loop's own polling interval permits
+     * $onTick to actually be invoked. $onTick itself decides whether
+     * that much real time has elapsed since its own last action (e.g.
+     * RecipeStepRunner throttles the Hub heartbeat call further, to
+     * config('job_heartbeat_interval_seconds')) — this constant only
+     * bounds how often Executor is willing to give it the opportunity.
+     */
+    private const TICK_INTERVAL_SECONDS = 2.0;
+
+    /**
+     * @param callable(): void|null $onTick invoked periodically while the
+     *     command is still running — e.g. to renew a Deployment's Hub
+     *     lease during a long `npm ci`/Next.js build. A thrown exception
+     *     from $onTick is caught and swallowed: a heartbeat hiccup must
+     *     never abort or corrupt the command it's only supervising.
      * @return array{exitCode: int, output: string, timedOut: bool, durationMs: int}
      */
-    public function run(string $command, string $workingDirectory, int $timeoutSeconds): array
+    public function run(string $command, string $workingDirectory, int $timeoutSeconds, ?callable $onTick = null): array
+    {
+        return $this->execute($command, $workingDirectory, $timeoutSeconds, null, $onTick);
+    }
+
+    /**
+     * Runs a command as a literal argv array — no shell involved at all
+     * (PHP's proc_open() accepts an array command since 7.4 and executes
+     * it directly), so there is nothing to shell-escape and no
+     * metacharacter/injection surface, unlike run()'s string form. Every
+     * typed recipe step (RecipeStepRunner) uses this; only the explicit
+     * `shell` step type (kept for parity with the legacy `pipeline`
+     * column) uses run().
+     *
+     * @param array<int, string> $argv
+     * @param array<string, string> $env merged on top of the agent
+     *     process's own inherited environment (never replaces it — npm/
+     *     node/prisma all need PATH, HOME, etc. to function), so a
+     *     recipe step's env only ever *adds* variables like
+     *     NEXT_PUBLIC_API_URL.
+     * @param callable(): void|null $onTick see run().
+     * @return array{exitCode: int, output: string, timedOut: bool, durationMs: int}
+     */
+    public function runArgv(array $argv, string $workingDirectory, int $timeoutSeconds, array $env = [], ?callable $onTick = null): array
+    {
+        $effectiveEnv = $env === [] ? null : array_merge((getenv() ?: []), $env);
+
+        return $this->execute(self::resolveArgv0ForWindows($argv), $workingDirectory, $timeoutSeconds, $effectiveEnv, $onTick);
+    }
+
+    /**
+     * Production only ever runs this agent on Ubuntu, where 'npm' is a
+     * real executable found directly on PATH and this is a pure no-op.
+     * On Windows, however, PHP's array-form proc_open() calls
+     * CreateProcess() directly — bypassing the PATHEXT/.cmd-shim
+     * resolution a real shell would do — so `proc_open(['npm', ...])`
+     * fails with "CreateProcess failed, error code: 2" even though `npm`
+     * works fine from any terminal. Confirmed by direct testing on this
+     * project's Windows dev machine. Resolving the .cmd/.bat/.exe
+     * manually here is what lets install_dependencies/run_script be
+     * genuinely, not just theoretically, exercised in local/CI testing
+     * on Windows, with zero effect on the real Ubuntu target.
+     *
+     * @param array<int, string> $argv
+     * @return array<int, string>
+     */
+    private static function resolveArgv0ForWindows(array $argv): array
+    {
+        if (PHP_OS_FAMILY !== 'Windows' || $argv === []) {
+            return $argv;
+        }
+
+        $program = $argv[0];
+        if ($program === '' || preg_match('/\.(exe|cmd|bat|com)$/i', $program) === 1 || is_file($program)) {
+            return $argv;
+        }
+
+        foreach (['.exe', '.cmd', '.bat'] as $extension) {
+            $resolved = self::findOnPath($program . $extension);
+            if ($resolved !== null) {
+                $argv[0] = $resolved;
+
+                return $argv;
+            }
+        }
+
+        return $argv;
+    }
+
+    private static function findOnPath(string $filename): ?string
+    {
+        foreach (explode(PATH_SEPARATOR, getenv('PATH') ?: '') as $dir) {
+            if ($dir === '') {
+                continue;
+            }
+            $candidate = rtrim($dir, '\\/') . DIRECTORY_SEPARATOR . $filename;
+            if (is_file($candidate)) {
+                return $candidate;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param string|array<int, string> $command
+     * @param array<string, string>|null $env
+     * @param callable(): void|null $onTick
+     * @return array{exitCode: int, output: string, timedOut: bool, durationMs: int}
+     */
+    private function execute(string|array $command, string $workingDirectory, int $timeoutSeconds, ?array $env, ?callable $onTick): array
     {
         $stdoutPath = tempnam(sys_get_temp_dir(), 'da-out-');
         $stderrPath = tempnam(sys_get_temp_dir(), 'da-err-');
@@ -48,15 +153,16 @@ final class Executor
             2 => ['file', $stderrPath, 'w'],
         ];
 
+        $commandLabel = is_array($command) ? implode(' ', $command) : $command;
         $start = microtime(true);
-        $process = proc_open($command, $descriptorSpec, $pipes, $workingDirectory, null);
+        $process = proc_open($command, $descriptorSpec, $pipes, $workingDirectory, $env);
 
         if (!is_resource($process)) {
             self::cleanup($stdoutPath, $stderrPath);
 
             return [
                 'exitCode' => 255,
-                'output' => "Failed to start process for command: {$command}",
+                'output' => "Failed to start process for command: {$commandLabel}",
                 'timedOut' => false,
                 'durationMs' => 0,
             ];
@@ -66,6 +172,7 @@ final class Executor
 
         $timedOut = false;
         $deadline = microtime(true) + $timeoutSeconds;
+        $lastTick = microtime(true);
 
         while (true) {
             $status = proc_get_status($process);
@@ -80,6 +187,18 @@ final class Executor
                 usleep(200000);
                 proc_terminate($process, 9);
                 break;
+            }
+
+            if ($onTick !== null && (microtime(true) - $lastTick) >= self::TICK_INTERVAL_SECONDS) {
+                $lastTick = microtime(true);
+                try {
+                    $onTick();
+                } catch (\Throwable) {
+                    // A heartbeat/tick failure must never abort the command
+                    // it's only supervising — the lease simply won't be
+                    // renewed this cycle, and the next tick (or the step's
+                    // own completion) tries again.
+                }
             }
 
             usleep(150000);

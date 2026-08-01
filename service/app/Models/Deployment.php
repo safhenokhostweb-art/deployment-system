@@ -15,11 +15,34 @@ class Deployment extends Model
     public const STATUS_PENDING_APPROVAL = 'pending_approval';
     public const STATUS_QUEUED = 'queued';
     public const STATUS_RUNNING = 'running';
+    /**
+     * Recipe-only intermediate phases (Phase 4 of the sandogh deployment
+     * overhaul) — a plain `pipeline` deployment never passes through
+     * these, going straight running -> succeeded/failed exactly as
+     * before. A recipe-driven deployment reports these via the same
+     * AgentJobService::updateStatus() endpoint as its typed steps
+     * execute, so the dashboard can show real build progress instead of
+     * one opaque "running" spinner for several minutes.
+     */
+    public const STATUS_BUILDING = 'building';
+    public const STATUS_MIGRATING = 'migrating';
+    public const STATUS_ACTIVATING = 'activating';
+    public const STATUS_VERIFYING = 'verifying';
     public const STATUS_SUCCEEDED = 'succeeded';
     public const STATUS_FAILED = 'failed';
     public const STATUS_CANCELLED = 'cancelled';
     /** Multi-target only (Phase 3-C.2): some tasks succeeded, some didn't. */
     public const STATUS_PARTIAL_SUCCESS = 'partial_success';
+    /**
+     * The agent reverted `current` to the previous release (automatically
+     * after a post-activation health-check failure, or on a manual
+     * rollback request) and confirmed the previous release is healthy
+     * again. Distinct from ACTION_ROLLBACK's legacy meaning (a brand-new
+     * Deployment row that rebuilds an older commit from scratch) — this
+     * is the fast, artifact-reuse in-place rollback recipe-based
+     * deployments use. See rolled_back_at.
+     */
+    public const STATUS_ROLLED_BACK = 'rolled_back';
 
     public const ACTION_DEPLOY = 'deploy';
     public const ACTION_ROLLBACK = 'rollback';
@@ -27,6 +50,27 @@ class Deployment extends Model
     public const TRIGGER_WEBHOOK = 'webhook';
     public const TRIGGER_MANUAL = 'manual';
     public const TRIGGER_ROLLBACK = 'rollback';
+
+    public const FAILURE_CODE_BUILD_FAILED = 'build_failed';
+    public const FAILURE_CODE_MIGRATION_FAILED = 'migration_failed';
+    public const FAILURE_CODE_MIGRATION_REQUIRES_APPROVAL = 'migration_requires_approval';
+    public const FAILURE_CODE_ACTIVATION_FAILED = 'activation_failed';
+    public const FAILURE_CODE_SERVICE_RESTART_FAILED = 'service_restart_failed';
+    public const FAILURE_CODE_HEALTH_CHECK_FAILED = 'health_check_failed';
+    public const FAILURE_CODE_LEASE_EXPIRED = 'lease_expired';
+    public const FAILURE_CODE_AGENT_HEARTBEAT_LOST = 'agent_heartbeat_lost';
+    public const FAILURE_CODE_LATE_CALLBACK_REJECTED = 'late_callback_rejected';
+    /** deployments:detect-stalled's hard ceiling (deployment_job_max_runtime_seconds) was hit — even if heartbeats kept arriving on schedule. */
+    public const FAILURE_CODE_MAX_RUNTIME_EXCEEDED = 'max_runtime_exceeded';
+
+    /** @var array<int, string> every status a deployment can be actively executing under — see isInProgress()/isLeaseExpired(). */
+    public const IN_PROGRESS_STATUSES = [
+        self::STATUS_RUNNING,
+        self::STATUS_BUILDING,
+        self::STATUS_MIGRATING,
+        self::STATUS_ACTIVATING,
+        self::STATUS_VERIFYING,
+    ];
 
     protected $fillable = [
         'public_id',
@@ -47,8 +91,13 @@ class Deployment extends Model
         'started_at',
         'finished_at',
         'failure_message',
+        'failure_code',
         'rollback_of_deployment_id',
         'last_activity_at',
+        'heartbeat_at',
+        'lease_expires_at',
+        'deployed_at',
+        'rolled_back_at',
     ];
 
     protected function casts(): array
@@ -59,6 +108,10 @@ class Deployment extends Model
             'started_at' => 'datetime',
             'finished_at' => 'datetime',
             'last_activity_at' => 'datetime',
+            'heartbeat_at' => 'datetime',
+            'lease_expires_at' => 'datetime',
+            'deployed_at' => 'datetime',
+            'rolled_back_at' => 'datetime',
         ];
     }
 
@@ -108,7 +161,43 @@ class Deployment extends Model
             self::STATUS_FAILED,
             self::STATUS_CANCELLED,
             self::STATUS_PARTIAL_SUCCESS,
+            self::STATUS_ROLLED_BACK,
         ], true);
+    }
+
+    /**
+     * A deployment the Hub considers "actively claimed" — running (in any
+     * of the running/building/migrating/activating/verifying phases)
+     * with a lease that hasn't expired yet. False for a lease-less
+     * legacy row (one claimed before this column existed, or one whose
+     * agent never renewed it) so it's picked up by
+     * deployments:detect-stalled on its very first eligible sweep rather
+     * than being treated as perpetually fresh.
+     */
+    public function isLeaseExpired(): bool
+    {
+        return $this->isInProgress()
+            && ($this->lease_expires_at === null || $this->lease_expires_at->isPast());
+    }
+
+    public function isInProgress(): bool
+    {
+        return in_array($this->status, self::IN_PROGRESS_STATUSES, true);
+    }
+
+    /**
+     * Phase 5's strong success signal: `finished_at` (and, for a legacy
+     * pipeline deployment, `status === succeeded`) only ever meant "the
+     * agent's shell commands all exited 0" — never that anyone verified
+     * the resulting service is actually serving the new code.
+     * `deployed_at` is set once (a) there was no recipe to verify against
+     * at all (finished_at IS the whole story, so it's set alongside it —
+     * every pre-recipe Project keeps behaving exactly as before) or (b)
+     * activation plus every recipe health-check step actually passed.
+     */
+    public function isVerifiedDeployed(): bool
+    {
+        return $this->deployed_at !== null;
     }
 
     /**

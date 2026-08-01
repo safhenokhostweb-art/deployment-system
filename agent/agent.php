@@ -24,6 +24,9 @@ require __DIR__ . '/lib/WorkspaceScanner.php';
 require __DIR__ . '/lib/OperationRegistry.php';
 require __DIR__ . '/lib/HealthCollector.php';
 require __DIR__ . '/lib/ShellPlaceholders.php';
+require __DIR__ . '/lib/ServiceAllowlist.php';
+require __DIR__ . '/lib/ReleaseManager.php';
+require __DIR__ . '/lib/RecipeStepRunner.php';
 
 use DeploymentAgent\Client;
 use DeploymentAgent\Executor;
@@ -31,6 +34,8 @@ use DeploymentAgent\HealthCollector;
 use DeploymentAgent\JobVerifier;
 use DeploymentAgent\Logger;
 use DeploymentAgent\OperationRegistry;
+use DeploymentAgent\RecipeStepRunner;
+use DeploymentAgent\ReleaseManager;
 use DeploymentAgent\ShellPlaceholders;
 use DeploymentAgent\WorkspaceScanner;
 
@@ -61,13 +66,14 @@ $client = new Client(
 );
 
 $executor = new Executor();
+$recipeRunner = new RecipeStepRunner($executor, $client, $logger, new ReleaseManager());
 $runOnce = in_array('--once', $argv, true);
 
 $logger->info('Deployment agent starting' . ($runOnce ? ' (single poll)' : ' (continuous)'));
 
 do {
     try {
-        pollAndExecute($client, $executor, $config, $logger);
+        pollAndExecute($client, $executor, $recipeRunner, $config, $logger);
     } catch (\Throwable $e) {
         $logger->error('Unhandled error during poll cycle: ' . $e->getMessage());
     }
@@ -106,7 +112,7 @@ do {
     }
 } while (!$runOnce);
 
-function pollAndExecute(Client $client, Executor $executor, array $config, Logger $logger): void
+function pollAndExecute(Client $client, Executor $executor, RecipeStepRunner $recipeRunner, array $config, Logger $logger): void
 {
     sendHeartbeat($client, $logger);
 
@@ -145,6 +151,21 @@ function pollAndExecute(Client $client, Executor $executor, array $config, Logge
             'status' => 'failed',
             'message' => "Unknown project_key '{$projectKey}' on this agent",
         ]);
+
+        return;
+    }
+
+    // Root-cause fix (sandogh-family-fund incomplete deploys): a recipe
+    // takes over the entire job — its own typed steps replace this
+    // function's flat pipeline loop below, including its own status/log
+    // reporting, atomic release activation, and automatic rollback on a
+    // post-activation failure. A project with no recipe (every project
+    // that existed before this feature, or one still using the simple
+    // pipeline form) never reaches this branch — deployment_recipe is
+    // null/absent and behavior is unchanged, byte for byte.
+    if (!empty($job['deployment_recipe'])) {
+        $logger->info("Starting recipe job {$job['id']} ({$job['action']}) for {$projectKey} @ {$job['commit_hash']}" . (($job['recipe_rollback'] ?? false) ? ' [rollback]' : ''));
+        $recipeRunner->run($job, $projectConfig);
 
         return;
     }

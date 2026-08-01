@@ -130,6 +130,38 @@ class LocalAgentControlJobFlowTest extends TestCase
         $this->assertSame(LocalAgentControlJob::STATUS_QUEUED, $fetchLogsJob->fresh()->status);
     }
 
+    public function test_next_restart_only_ignores_a_queued_reload_config_job(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create();
+        $reloadJob = app(LocalAgentControlJobService::class)->queue($agent, LocalAgentControlJob::ACTION_RELOAD_CONFIG, 'admin@example.test');
+
+        $headers = $this->headersFor($agent, 'GET', '/api/local-agent/control-jobs/next-restart');
+        $response = $this->get('/api/local-agent/control-jobs/next-restart', $headers)->assertOk();
+
+        $response->assertJson(['job' => null]);
+        $this->assertSame(LocalAgentControlJob::STATUS_QUEUED, $reloadJob->fresh()->status);
+    }
+
+    /**
+     * claimNext()'s query is scoped by local_agent_id, so this isn't a
+     * 403/permission rejection — a job belonging to another agent simply
+     * never appears in the candidate set at all. Confirms that isolation
+     * holds specifically for the watchdog's restart-scoped endpoint, not
+     * just the general next() one.
+     */
+    public function test_next_restart_only_never_claims_another_agents_restart_job(): void
+    {
+        $otherAgent = LocalAgent::factory()->approved()->create();
+        app(LocalAgentControlJobService::class)->queue($otherAgent, LocalAgentControlJob::ACTION_RESTART, 'admin@example.test');
+
+        $agent = LocalAgent::factory()->approved()->create();
+
+        $headers = $this->headersFor($agent, 'GET', '/api/local-agent/control-jobs/next-restart');
+        $response = $this->get('/api/local-agent/control-jobs/next-restart', $headers)->assertOk();
+
+        $response->assertJson(['job' => null]);
+    }
+
     public function test_next_returns_null_job_when_nothing_queued(): void
     {
         $agent = LocalAgent::factory()->approved()->create();

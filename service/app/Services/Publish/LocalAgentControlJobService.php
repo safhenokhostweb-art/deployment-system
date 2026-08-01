@@ -53,14 +53,16 @@ class LocalAgentControlJobService
 
     /**
      * @param array<int, string>|null $onlyActions restricts which action(s)
-     *     this call may claim — used by heartbeat-watchdog.php (via
-     *     ?only_action=restart on the API side) so it can poll the same
-     *     queue as the main agent without ever claiming a fetch_logs/
-     *     reload_config job it has no idea how to execute, which would
-     *     otherwise leave that job claimed-but-never-reported — exactly
-     *     the "stuck running forever" failure mode this whole effort
-     *     exists to eliminate. null (the main agent's own call) preserves
-     *     the original unfiltered FIFO behavior.
+     *     this call may claim — used by heartbeat-watchdog.php via the
+     *     dedicated GET /control-jobs/next-restart route (see
+     *     LocalAgentControlJobController::nextRestartOnly()) so it can
+     *     poll the same queue as the main agent without ever claiming a
+     *     fetch_logs/reload_config job it has no idea how to execute,
+     *     which would otherwise leave that job claimed-but-never-reported
+     *     — exactly the "stuck running forever" failure mode this whole
+     *     effort exists to eliminate. null (the main agent's own call via
+     *     GET /control-jobs/next) preserves the original unfiltered FIFO
+     *     behavior.
      */
     public function claimNext(LocalAgent $localAgent, ?array $onlyActions = null): ?LocalAgentControlJob
     {
