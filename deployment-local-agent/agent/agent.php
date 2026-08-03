@@ -77,7 +77,7 @@ use LocalAgent\Security;
  * Hub side for why this never triggers an automatic download). Bump
  * when agent.php or lib/* changes in a way that matters operationally.
  */
-const LOCAL_AGENT_VERSION = '1.4.0';
+const LOCAL_AGENT_VERSION = '1.4.1';
 
 $configPath = __DIR__ . '/config.php';
 
@@ -133,7 +133,21 @@ $safety = new SafetyChecker();
 // complete, runtime-ready artifact, and the production Server Agent
 // downloads the result instead of ever needing dependency/build tools
 // or external registry access at all.
-$artifactUploader = new ArtifactUploader(new LocalBuildRunner($git), new ArtifactBuilder($git), $client, $logger);
+//
+// Root-cause fix (v1.4.1): a Windows Scheduled Task's own PATH does not
+// necessarily contain composer/npm/php even when an interactive shell's
+// does (confirmed: Laragon's PATH additions are shell-session-scoped) —
+// composer_command/npm_command/php_binary let an operator pin the exact
+// executable(s) in config.php instead of depending on PATH resolution.
+$composerCommand = resolveCommandArrayConfig($config, 'composer_command', ['composer']);
+$npmCommand = resolveCommandArrayConfig($config, 'npm_command', ['npm']);
+$phpBinary = resolvePhpBinaryConfig($config);
+$artifactUploader = new ArtifactUploader(
+    new LocalBuildRunner($git, $composerCommand, $npmCommand, $phpBinary),
+    new ArtifactBuilder($git),
+    $client,
+    $logger,
+);
 $jobMaxRuntimeSeconds = (int) ($config['job_max_runtime_seconds'] ?? 600);
 
 // Project config is downloaded from the Hub (single source of truth) and
@@ -666,6 +680,67 @@ function sendHeartbeat(Client $client, Logger $logger): array
 
         return ['project_config_version' => null];
     }
+}
+
+/**
+ * Root-cause fix (v1.4.1): reads an optional argv-array config key
+ * (composer_command / npm_command) and validates it strictly before it
+ * ever reaches proc_open() — every element must be a non-empty string,
+ * since this is passed as an argv array (never a shell string), a
+ * malformed entry cannot cause command injection, only a process that
+ * fails to start with a clear error. Missing entirely (`not defined`)
+ * falls back to $default, preserving the previous, PATH-dependent
+ * behavior for every agent that never needed this.
+ *
+ * @param array<string, mixed> $config
+ * @param array<int, string> $default
+ * @return array<int, string>
+ */
+function resolveCommandArrayConfig(array $config, string $key, array $default): array
+{
+    if (!array_key_exists($key, $config)) {
+        return $default;
+    }
+
+    $value = $config[$key];
+
+    if (!is_array($value) || $value === []) {
+        fwrite(STDERR, "config.php: '{$key}' must be a non-empty array of strings (an argv list, e.g. ['composer'] or ['C:\\\\path\\\\to\\\\php.exe', 'C:\\\\path\\\\to\\\\composer.phar']) — got " . get_debug_type($value) . ". Refusing to start.\n");
+        exit(1);
+    }
+
+    foreach ($value as $part) {
+        if (!is_string($part) || $part === '') {
+            fwrite(STDERR, "config.php: '{$key}' must contain only non-empty strings — every element is one argv entry, not a shell command line. Refusing to start.\n");
+            exit(1);
+        }
+    }
+
+    return array_values($value);
+}
+
+/**
+ * Optional — only meaningful when composer_command points at a bare
+ * `*.phar` with no interpreter in front of it (see LocalBuildRunner's own
+ * docblock). Absent or blank is valid and simply disables that one
+ * fallback.
+ *
+ * @param array<string, mixed> $config
+ */
+function resolvePhpBinaryConfig(array $config): ?string
+{
+    if (!array_key_exists('php_binary', $config)) {
+        return null;
+    }
+
+    $value = $config['php_binary'];
+
+    if (!is_string($value) || $value === '') {
+        fwrite(STDERR, "config.php: 'php_binary', when present, must be a non-empty string (path to a php executable). Refusing to start.\n");
+        exit(1);
+    }
+
+    return $value;
 }
 
 /**

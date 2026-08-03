@@ -116,6 +116,66 @@ if ($LASTEXITCODE -eq 0) {
     }
 }
 
+
+# Root-cause fix (v1.4.1): a real bug found in production — a Windows
+# Scheduled Task's own PATH does not necessarily contain composer/npm/php
+# even when an interactive shell's PATH does (Laragon's PATH additions
+# are shell-session-scoped, not machine-wide), so every publish silently
+# failed with local_composer_failed even though `composer`/`npm` worked
+# fine from a terminal. This check is read-only diagnostics against the
+# EXISTING (untouched) config.php — it never writes to it — so an
+# operator immediately knows, right after upgrading, whether
+# composer_command/npm_command/php_binary need to be set.
+Write-Host ''
+Write-Host '=== بررسی دسترسی composer/npm/php برای این Agent ==='
+$foundPhpForCheck = Get-Command php.exe -ErrorAction SilentlyContinue
+if (-not $foundPhpForCheck) {
+    Write-Host 'هشدار: php.exe در PATH این شل هم پیدا نشد — بررسی command resolution رد شد. اگر Agent با خطای local_composer_failed/local_npm_install_failed شکست خورد، composer_command/npm_command/php_binary را دستی در config.php طبق نمونه‌های config.example.php تنظیم کنید.' -ForegroundColor Yellow
+} else {
+    $checkScript = @'
+<?php
+$configPath = $argv[1];
+$config = require $configPath;
+
+function resolveOne(array $cmd): string {
+    $cmd = array_values(array_filter($cmd, static fn($v) => is_string($v) && $v !== ''));
+    if ($cmd === []) {
+        return 'نامعتبر (آرایه خالی)';
+    }
+    $bin = $cmd[0];
+    $looksAbsolute = preg_match('#^([A-Za-z]:[\\\\/]|/)#', $bin) === 1;
+    if ($looksAbsolute) {
+        return is_file($bin) ? "OK ({$bin})" : "یافت نشد ({$bin}) — مسیر را در config.php بررسی کنید";
+    }
+    $exts = PHP_OS_FAMILY === 'Windows' ? ['.exe', '.cmd', '.bat', ''] : [''];
+    foreach (explode(PATH_SEPARATOR, getenv('PATH') ?: '') as $dir) {
+        if ($dir === '') { continue; }
+        foreach ($exts as $ext) {
+            if (is_file(rtrim($dir, '\\/') . DIRECTORY_SEPARATOR . $bin . $ext)) {
+                return "OK (پیدا شد در PATH: {$dir})";
+            }
+        }
+    }
+    return "در PATH پیدا نشد ({$bin}) — composer_command/npm_command را صریح در config.php تنظیم کنید (نمونه در config.example.php)";
+}
+
+echo 'composer_command: ' . resolveOne($config['composer_command'] ?? ['composer']) . "\n";
+echo 'npm_command: ' . resolveOne($config['npm_command'] ?? ['npm']) . "\n";
+
+if (isset($config['php_binary']) && $config['php_binary'] !== '') {
+    echo 'php_binary: ' . (is_file($config['php_binary']) ? "OK ({$config['php_binary']})" : "یافت نشد ({$config['php_binary']})") . "\n";
+} else {
+    echo "php_binary: تنظیم نشده (اختیاری — فقط وقتی لازم است که composer_command یک composer.phar تنها باشد)\n";
+}
+'@
+
+    $checkScriptPath = Join-Path $env:TEMP 'deployment-local-agent-command-check.php'
+    [System.IO.File]::WriteAllText($checkScriptPath, $checkScript, [System.Text.Encoding]::UTF8)
+
+    & $foundPhpForCheck.Source $checkScriptPath (Join-Path $agentDir 'config.php')
+    Remove-Item $checkScriptPath -ErrorAction SilentlyContinue
+}
+
 Write-Host ''
 Write-Host '=============================================='
 Write-Host "بروزرسانی از v$oldVersion به v$newVersion کامل شد."

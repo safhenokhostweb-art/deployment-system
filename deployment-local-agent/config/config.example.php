@@ -118,6 +118,47 @@ return [
     // Checked between steps only, never mid-command.
     'job_max_runtime_seconds' => 600,
 
+    // Root-cause fix (v1.4.1): a Windows Scheduled Task does NOT
+    // necessarily inherit the same PATH an interactive PowerShell/terminal
+    // session has — confirmed on this project's own Laragon dev machine,
+    // where `composer`/`npm`/`php` all resolve fine from an open terminal
+    // but the Task Scheduler's own process environment lacks Laragon's
+    // PATH additions entirely, causing every publish to fail with
+    // local_composer_failed ("Failed to start process for: composer
+    // install ..."). If that ever happens to you (composer/npm work from
+    // a terminal but the agent still can't find them), set the two
+    // options below to the *exact*, absolute executable(s) — no PATH
+    // lookup involved at all once they're set. Both are plain argv
+    // arrays (never a shell string), so paths containing spaces are
+    // always safe as-is — do NOT add your own quotes around them.
+    //
+    // Left unset (the default), the agent falls back to the previous,
+    // PATH-dependent behavior (['composer'] / ['npm']) — nothing changes
+    // for an agent that never hits this.
+
+    // Example — Windows / Laragon:
+    // 'php_binary' => 'C:\\laragon\\bin\\php\\php-8.3-Win32-vs16-x64\\php.exe',
+    // 'composer_command' => [
+    //     'C:\\laragon\\bin\\php\\php-8.3-Win32-vs16-x64\\php.exe',
+    //     'C:\\laragon\\bin\\composer\\composer.phar',
+    // ],
+    // 'npm_command' => ['C:\\Program Files\\nodejs\\npm.cmd'],
+
+    // Example — Linux/macOS (only ever needed if this agent's own process
+    // — e.g. a systemd user service — has a stripped-down PATH):
+    // 'composer_command' => ['/usr/local/bin/composer'],
+    // 'npm_command' => ['/usr/bin/npm'],
+
+    // 'php_binary' is only ever consulted when 'composer_command' points
+    // at a bare *.phar with no interpreter already in front of it (a
+    // single-element array, e.g. ['C:\\laragon\\bin\\composer\\composer.phar'])
+    // — Windows cannot execute a .phar file directly. It's ignored in
+    // every other case, including the two-element
+    // [php_binary, composer.phar] form shown above, which is already
+    // fully self-contained.
+    // 'php_binary' => 'C:\\laragon\\bin\\php\\php-8.3-Win32-vs16-x64\\php.exe',
+    // 'composer_command' => ['C:\\laragon\\bin\\composer\\composer.phar'],
+
     // heartbeat-watchdog.php (its own Scheduled Task,
     // DeploymentLocalAgentWatchdog — see install.ps1) reads these three.
     // Minimum time between two watchdog-initiated restarts — restart-loop

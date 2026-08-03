@@ -18,11 +18,39 @@ namespace LocalAgent;
  * actually needs (composer.json / package.json presence) rather than
  * assuming every project uses both, so a pure-static or PHP-only project
  * is unaffected.
+ *
+ * Root-cause fix (v1.4.1): a Windows Scheduled Task does not necessarily
+ * inherit the same PATH an interactive shell has (confirmed: Laragon adds
+ * its own php/composer directories to PATH only for shells it launches
+ * itself) — `composer`/`npm` resolved purely from PATH can be entirely
+ * absent from the Task's own environment even though they work fine from
+ * a terminal. $composerCommand/$npmCommand let an operator configure the
+ * exact, absolute invocation once (in config.php) instead of depending on
+ * PATH at all; the bare-name fallback (['composer'] / ['npm']) preserves
+ * the previous, PATH-dependent behavior for anyone who never hits this.
  */
 final class LocalBuildRunner
 {
+    /**
+     * @param array<int, string> $composerCommand base argv for invoking
+     *     Composer — e.g. ['composer'] (default, relies on PATH) or an
+     *     explicit path, optionally as [php_binary, composer.phar] (two
+     *     argv elements — never a shell string). Subcommand/flags are
+     *     array_merge()'d onto this, never concatenated as text.
+     * @param array<int, string> $npmCommand same idea, for npm — e.g.
+     *     ['npm'] (default) or ['C:\Program Files\nodejs\npm.cmd'].
+     * @param string|null $phpBinary consulted only when $composerCommand
+     *     resolves to a bare `*.phar` with no interpreter already in
+     *     front of it (Windows cannot execute a .phar directly) — it is
+     *     then transparently prepended. Ignored in every other case,
+     *     including the two-element [php_binary, composer.phar] form
+     *     above, which is already fully self-contained.
+     */
     public function __construct(
         private readonly GitManager $runner,
+        private readonly array $composerCommand = ['composer'],
+        private readonly array $npmCommand = ['npm'],
+        private readonly ?string $phpBinary = null,
         private readonly int $composerTimeoutSeconds = 600,
         private readonly int $npmInstallTimeoutSeconds = 600,
         private readonly int $npmBuildTimeoutSeconds = 600,
@@ -41,13 +69,12 @@ final class LocalBuildRunner
         $log = [];
 
         if (is_file("{$repositoryPath}/composer.json")) {
-            $log[] = 'composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction';
-            $result = $this->runner->run(
-                ['composer', 'install', '--no-dev', '--prefer-dist', '--optimize-autoloader', '--no-interaction'],
-                $repositoryPath,
-                $this->composerTimeoutSeconds,
-                $onTick,
+            $command = array_merge(
+                $this->resolvedComposerCommand(),
+                ['install', '--no-dev', '--prefer-dist', '--optimize-autoloader', '--no-interaction'],
             );
+            $log[] = self::describe($command);
+            $result = $this->runner->run($command, $repositoryPath, $this->composerTimeoutSeconds, $onTick);
 
             if ($result['exitCode'] !== 0) {
                 throw new LocalBuildFailedException(
@@ -59,8 +86,9 @@ final class LocalBuildRunner
         }
 
         if (is_file("{$repositoryPath}/package.json")) {
-            $log[] = 'npm ci --include=dev';
-            $installResult = $this->runner->run(['npm', 'ci', '--include=dev'], $repositoryPath, $this->npmInstallTimeoutSeconds, $onTick);
+            $installCommand = array_merge($this->resolvedNpmCommand(), ['ci', '--include=dev']);
+            $log[] = self::describe($installCommand);
+            $installResult = $this->runner->run($installCommand, $repositoryPath, $this->npmInstallTimeoutSeconds, $onTick);
 
             if ($installResult['exitCode'] !== 0) {
                 throw new LocalBuildFailedException(
@@ -71,8 +99,9 @@ final class LocalBuildRunner
             $ranNpmInstall = true;
 
             if (self::hasBuildScript($repositoryPath)) {
-                $log[] = 'npm run build';
-                $buildResult = $this->runner->run(['npm', 'run', 'build'], $repositoryPath, $this->npmBuildTimeoutSeconds, $onTick);
+                $buildCommand = array_merge($this->resolvedNpmCommand(), ['run', 'build']);
+                $log[] = self::describe($buildCommand);
+                $buildResult = $this->runner->run($buildCommand, $repositoryPath, $this->npmBuildTimeoutSeconds, $onTick);
 
                 if ($buildResult['exitCode'] !== 0) {
                     throw new LocalBuildFailedException(
@@ -85,6 +114,48 @@ final class LocalBuildRunner
         }
 
         return ['ranComposer' => $ranComposer, 'ranNpmInstall' => $ranNpmInstall, 'ranNpmBuild' => $ranNpmBuild, 'log' => $log];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function resolvedComposerCommand(): array
+    {
+        $command = array_values(array_filter($this->composerCommand, static fn (mixed $v): bool => is_string($v) && $v !== ''));
+        if ($command === []) {
+            $command = ['composer'];
+        }
+
+        if (
+            $this->phpBinary !== null
+            && $this->phpBinary !== ''
+            && str_ends_with(strtolower($command[0]), '.phar')
+        ) {
+            array_unshift($command, $this->phpBinary);
+        }
+
+        return $command;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function resolvedNpmCommand(): array
+    {
+        $command = array_values(array_filter($this->npmCommand, static fn (mixed $v): bool => is_string($v) && $v !== ''));
+
+        return $command === [] ? ['npm'] : $command;
+    }
+
+    /**
+     * @param array<int, string> $command
+     */
+    private static function describe(array $command): string
+    {
+        return implode(' ', array_map(
+            static fn (string $part): string => str_contains($part, ' ') ? '"' . $part . '"' : $part,
+            $command,
+        ));
     }
 
     private static function hasBuildScript(string $repositoryPath): bool
