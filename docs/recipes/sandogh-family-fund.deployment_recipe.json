@@ -1,0 +1,58 @@
+{
+  "timeout_seconds": 2400,
+  "steps": [
+    { "type": "verify_runtime", "name": "Node.js runtime", "runtime": "node", "min_version": "20.9.0" },
+    { "type": "verify_disk_space", "name": "Disk space", "path": "/var/www/sandogh", "min_free_mb": 2048 },
+    { "type": "verify_path_exists", "name": "API env file present", "path": "/var/www/sandogh/shared/api.env", "kind": "file" },
+    { "type": "verify_path_exists", "name": "Web env file present", "path": "/var/www/sandogh/shared/web.env", "kind": "file" },
+
+    { "type": "checkout_release", "name": "Checkout exact commit", "source_repository": "/var/www/sandogh/source", "timeout_seconds": 300 },
+
+    { "type": "shell", "name": "Link shared env files into the release", "working_directory": "{release_path}", "command": "cp /var/www/sandogh/shared/api.env {release_path}/apps/api/.env && cp /var/www/sandogh/shared/web.env {release_path}/apps/web/.env.production" },
+
+    { "type": "install_dependencies", "name": "npm ci (workspaces)", "working_directory": "{release_path}", "manager": "npm", "mode": "ci", "timeout_seconds": 1200 },
+    { "type": "run_script", "name": "Prisma generate", "working_directory": "{release_path}", "script": "prisma:generate", "timeout_seconds": 300 },
+    { "type": "run_script", "name": "Build API (NestJS)", "working_directory": "{release_path}", "script": "build:api", "timeout_seconds": 600 },
+    {
+      "type": "run_script",
+      "name": "Build Web (Next.js)",
+      "working_directory": "{release_path}",
+      "script": "build:web",
+      "env": { "NEXT_PUBLIC_API_URL": "https://sandogh.safhenokhost.ir/api" },
+      "timeout_seconds": 900
+    },
+
+    { "type": "verify_path_exists", "name": "API build artifact exists", "path": "{release_path}/apps/api/dist/main.js", "kind": "file" },
+    { "type": "verify_path_exists", "name": "Web standalone server.js exists", "path": "{release_path}/apps/web/.next/standalone/apps/web/server.js", "kind": "file" },
+    { "type": "verify_path_exists", "name": "Web static assets exist", "path": "{release_path}/apps/web/.next/static", "kind": "directory" },
+    { "type": "verify_file_not_contains", "name": "No localhost API URL leaked into the build", "path": "{release_path}/apps/web/.next", "forbidden": "localhost:3000" },
+
+    { "type": "assemble_next_standalone", "name": "Assemble Next.js standalone runtime", "app_path": "apps/web" },
+
+    {
+      "type": "prisma_migrate", "name": "Apply database migrations",
+      "working_directory": "{release_path}", "mode": "deploy", "allow_destructive": false,
+      "timeout_seconds": 300
+    },
+
+    { "type": "set_ownership", "name": "Fix release ownership", "path": "{release_path}", "owner": "sandogh:sandogh" },
+    { "type": "activate_release", "name": "Atomically activate this release" },
+
+    { "type": "restart_service", "name": "Restart API service", "service": "sandogh-api.service" },
+    { "type": "restart_service", "name": "Restart Web service", "service": "sandogh-web.service" },
+
+    { "type": "verify_service_active", "name": "API service is active", "service": "sandogh-api.service" },
+    { "type": "verify_service_active", "name": "Web service is active", "service": "sandogh-web.service" },
+    {
+      "type": "http_health_check", "name": "API health endpoint",
+      "url": "https://sandogh.safhenokhost.ir/api/health",
+      "expected_status": 200, "retries": 5, "retry_delay_seconds": 3, "request_timeout_seconds": 10
+    },
+    {
+      "type": "http_health_check", "name": "Web login page",
+      "url": "https://sandogh.safhenokhost.ir/login",
+      "expected_status": 200, "retries": 5, "retry_delay_seconds": 3, "request_timeout_seconds": 10,
+      "must_not_contain": "localhost:3000"
+    }
+  ]
+}

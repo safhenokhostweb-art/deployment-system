@@ -88,4 +88,66 @@ final class Client
 
         return ['status' => $status, 'body' => is_array($decoded) ? $decoded : []];
     }
+
+    /**
+     * Root-cause fix (customer-site direct-GitHub-dependency removal):
+     * downloads a signed GET response's body directly to a file
+     * (CURLOPT_FILE) rather than buffering it into a PHP string first —
+     * unlike request()'s JSON responses (small by construction), an
+     * artifact can be tens of megabytes, and there's no reason to hold
+     * the whole thing in memory just to then write it back out.
+     *
+     * @return array{status: int, error: ?string}
+     */
+    public function downloadToFile(string $path, string $destinationPath): array
+    {
+        $timestamp = (string) time();
+        $nonce = Signer::nonce();
+        $signature = Signer::sign('GET', $path, $timestamp, $nonce, '', $this->signingSecret);
+
+        $url = rtrim($this->baseUrl, '/') . $path;
+
+        $fileHandle = fopen($destinationPath, 'wb');
+        if ($fileHandle === false) {
+            return ['status' => 0, 'error' => "Could not open {$destinationPath} for writing."];
+        }
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_HTTPHEADER => [
+                'Authorization: Bearer ' . $this->agentToken,
+                'X-Deployment-Server-Id: ' . $this->serverId,
+                'X-Deployment-Timestamp: ' . $timestamp,
+                'X-Deployment-Nonce: ' . $nonce,
+                'X-Deployment-Signature: ' . $signature,
+                'Accept: application/octet-stream',
+            ],
+            CURLOPT_FILE => $fileHandle,
+            // A download legitimately needs longer than this agent's
+            // normal, small-JSON-payload request timeout.
+            CURLOPT_TIMEOUT => max($this->timeoutSeconds, 300),
+            CURLOPT_CONNECTTIMEOUT => $this->timeoutSeconds,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+        ]);
+
+        $success = curl_exec($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = $success === false ? curl_error($ch) : null;
+        curl_close($ch);
+        fclose($fileHandle);
+
+        if ($error !== null) {
+            @unlink($destinationPath);
+            $this->logger->error("Artifact download from {$path} failed: {$error}");
+        } elseif ($status !== 200) {
+            // A non-200 (404/403/409) response body is a small JSON error
+            // object, not artifact bytes — the file at $destinationPath is
+            // that JSON, not a corrupt archive; delete it either way so
+            // the caller never mistakes it for a real artifact.
+            @unlink($destinationPath);
+        }
+
+        return ['status' => $status, 'error' => $error];
+    }
 }

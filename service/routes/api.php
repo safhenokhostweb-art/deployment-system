@@ -1,10 +1,12 @@
 <?php
 
+use App\Http\Controllers\Api\AgentArtifactController;
 use App\Http\Controllers\Api\AgentDiscoveryController;
 use App\Http\Controllers\Api\AgentJobController;
 use App\Http\Controllers\Api\AgentOperationController;
 use App\Http\Controllers\Api\AgentRegistrationController;
 use App\Http\Controllers\Api\GitHubWebhookController;
+use App\Http\Controllers\Api\LocalAgentArtifactController;
 use App\Http\Controllers\Api\LocalAgentChangeDetectionController;
 use App\Http\Controllers\Api\LocalAgentControlJobController;
 use App\Http\Controllers\Api\LocalAgentJobController;
@@ -49,6 +51,11 @@ Route::middleware('agent.signed')->prefix('agent')->group(function () {
     // Agent-identity-only rule as Discovery — see AgentOperationController.
     Route::get('/operation-jobs/next', [AgentOperationController::class, 'next'])->name('agent.operation-jobs.next');
     Route::post('/operation-jobs/{id}/report', [AgentOperationController::class, 'report'])->name('agent.operation-jobs.report');
+
+    // Root-cause fix (customer-site direct-GitHub-dependency removal):
+    // downloads an artifact the Local Agent already uploaded — see
+    // AgentArtifactController and ArtifactManager on the agent side.
+    Route::get('/artifacts/{id}/download', [AgentArtifactController::class, 'download'])->name('agent.artifacts.download');
 });
 
 // Phase 5: Local Development Publisher Agent. A pending local agent has
@@ -87,4 +94,11 @@ Route::middleware('local-agent.signed')->prefix('local-agent')->group(function (
     // Watchdog-only, restart-scoped poll — see nextRestartOnly()'s own docblock.
     Route::get('/control-jobs/next-restart', [LocalAgentControlJobController::class, 'nextRestartOnly'])->name('local-agent.control-jobs.next-restart');
     Route::post('/control-jobs/{id}/report', [LocalAgentControlJobController::class, 'report'])->name('local-agent.control-jobs.report');
+
+    // Root-cause fix (customer-site direct-GitHub-dependency removal):
+    // uploaded right after a successful publish, in two signed phases —
+    // see LocalAgentArtifactController's own docblock for why — and
+    // ArtifactBuilder on the agent side.
+    Route::post('/artifacts', [LocalAgentArtifactController::class, 'create'])->name('local-agent.artifacts.create');
+    Route::post('/artifacts/{id}/content', [LocalAgentArtifactController::class, 'uploadContent'])->name('local-agent.artifacts.upload-content');
 });

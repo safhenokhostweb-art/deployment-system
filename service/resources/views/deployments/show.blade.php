@@ -44,8 +44,40 @@
         <tr><th>{{ __('ui.deployments.queued') }}</th><td>{{ $deployment->queued_at?->diffForHumans() ?? '—' }}</td></tr>
         <tr><th>{{ __('ui.deployments.started') }}</th><td>{{ $deployment->started_at?->diffForHumans() ?? '—' }}</td></tr>
         <tr><th>{{ __('ui.deployments.finished') }}</th><td>{{ $deployment->finished_at?->diffForHumans() ?? '—' }}</td></tr>
+        {{-- Root-cause fix (sandogh deployment overhaul, Phase 5): "the
+        agent's commands exited 0" (finished_at, above) is NOT the same
+        claim as "production is verifiably serving this release"
+        (deployed_at — set only once activation and every health check
+        this recipe defines have actually passed). Shown for every
+        deployment, not just recipe-based ones, so the distinction is
+        never silently different between the two. --}}
+        <tr>
+            <th>{{ __('ui.deployments.verified_deployed') }}</th>
+            <td>
+                @if ($deployment->deployed_at)
+                    <span class="badge badge-succeeded">{{ __('ui.deployments.verified_deployed_yes') }}</span>
+                    {{ $deployment->deployed_at->diffForHumans() }}
+                @elseif ($deployment->finished_at)
+                    <span class="badge badge-failed">{{ __('ui.deployments.verified_deployed_no') }}</span>
+                @else
+                    —
+                @endif
+            </td>
+        </tr>
         @if ($deployment->failure_message)
-        <tr><th>{{ __('ui.deployments.failure') }}</th><td>{{ $deployment->failure_message }}</td></tr>
+        <tr>
+            <th>{{ __('ui.deployments.failure') }}</th>
+            <td>
+                {{ $deployment->failure_message }}
+                @if ($deployment->failure_code)
+                    <br><span class="muted">{{ __('ui.deployments.failure_code', ['code' => $deployment->failure_code]) }}</span>
+                    @php $guidance = \App\Support\Deployment\FailureCodeGuidance::forCode($deployment->failure_code); @endphp
+                    @if ($guidance)
+                        <p class="muted" style="margin-top:0.3rem;">{{ $guidance }}</p>
+                    @endif
+                @endif
+            </td>
+        </tr>
         @endif
     </table>
 
@@ -120,9 +152,11 @@
 </x-card>
 @endif
 
-{{-- Task 4: Pipeline step visualization --}}
+{{-- Task 4 (Phase 4-I) / recipe-aware (sandogh Phase 4): step visualization —
+same markup either way, $steps just comes from RecipeStepPresenter instead
+of PipelineStepPresenter for a recipe-driven Project (see controller). --}}
 @if (!empty($steps))
-<x-card :title="__('ui.deployments.pipeline_steps_title')">
+<x-card :title="$usesRecipe ? __('ui.deployments.recipe_steps_title') : __('ui.deployments.pipeline_steps_title')">
     <div class="pipeline-steps">
         @foreach ($steps as $step)
             @php
@@ -133,8 +167,11 @@
                     'skipped' => '—',
                     default => '○',
                 };
+                $title = __('status.' . $step['status']);
+                if ($step['duration_ms'] !== null) { $title .= ' — ' . $step['duration_ms'] . 'ms'; }
+                if (($step['failure_code'] ?? null) !== null) { $title .= ' — ' . __('ui.deployments.failure_code', ['code' => $step['failure_code']]); }
             @endphp
-            <span class="pipeline-step step-{{ $step['status'] }}" title="{{ __('status.' . $step['status']) }}@if($step['duration_ms'] !== null) — {{ $step['duration_ms'] }}ms @endif">
+            <span class="pipeline-step step-{{ $step['status'] }}" title="{{ $title }}">
                 <span class="step-icon">{{ $icon }}</span> {{ $step['name'] }}
             </span>
         @endforeach
@@ -209,7 +246,21 @@
     @forelse ($deployment->logEntries as $entry)
         <h4 style="margin-bottom:0.2rem;">
             {{ $entry->sequence }}. {{ $entry->step_name }}
-            @if ($entry->exit_code === 0)
+            {{-- Root-cause fix (sandogh deployment overhaul): a recipe step
+            (explicit `status` column set) can fail with no exit_code at
+            all — a verify_* check, or a restart_service the agent-local
+            ServiceAllowlist rejected before ever spawning a process — so
+            this can't rely on exit_code alone the way a legacy pipeline
+            entry (status always null) always has. --}}
+            @if ($entry->status !== null)
+                <span class="badge badge-{{ $entry->status }}">{{ __('status.' . $entry->status) }}</span>
+                @if ($entry->step_type)
+                    <span class="badge">{{ __('ui.deployments.recipe_step_type', ['type' => $entry->step_type]) }}</span>
+                @endif
+                @if ($entry->failure_code)
+                    <span class="muted">{{ __('ui.deployments.failure_code', ['code' => $entry->failure_code]) }}</span>
+                @endif
+            @elseif ($entry->exit_code === 0)
                 <span class="badge badge-succeeded">{{ __('ui.deployment_tasks.exit_success') }}</span>
             @elseif ($entry->exit_code !== null)
                 <span class="badge badge-failed">{{ __('ui.deployment_tasks.exit_failed', ['code' => $entry->exit_code]) }}</span>

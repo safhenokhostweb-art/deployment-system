@@ -73,9 +73,40 @@ function rrmdir(string $dir): void
             continue;
         }
         $path = $dir . '/' . $entry;
-        (is_dir($path) && !is_link($path)) ? rrmdir($path) : unlink($path);
+        if (is_dir($path) && !is_link($path)) {
+            rrmdir($path);
+
+            continue;
+        }
+        // git marks object files read-only on Windows, which blocks a
+        // plain unlink() — clearing it first is harmless on every OS.
+        @chmod($path, 0666);
+        @unlink($path);
     }
-    rmdir($dir);
+    @rmdir($dir);
+}
+
+/**
+ * Whether this OS account can actually create a symlink — on Windows,
+ * unlike Ubuntu (the real production target, where any regular user can),
+ * that needs either SeCreateSymbolicLinkPrivilege or Developer Mode.
+ * ReleaseManager's atomic activation is fundamentally symlink-based (the
+ * whole point: an atomic, near-instant rename() over a symlink, not a
+ * file copy), so on a Windows host without that privilege, activation
+ * itself cannot be verified locally — a genuine test-environment gap,
+ * not a code defect, and irrelevant to the real Ubuntu target.
+ */
+function symlinksAreSupported(): bool
+{
+    $dir = sys_get_temp_dir() . '/symlink-probe-' . bin2hex(random_bytes(4));
+    mkdir($dir, 0777, true);
+    $target = $dir . '/target';
+    $link = $dir . '/link';
+    mkdir($target, 0777, true);
+    $ok = @symlink($target, $link);
+    rrmdir($dir);
+
+    return $ok === true;
 }
 
 /** @return array{exitCode: int, output: string} */
@@ -88,31 +119,43 @@ function runGit(array $argv, string $cwd): array
 }
 
 /**
- * A real git repo standing in for the persistent, out-of-band-bootstrapped
- * source clone `checkout_release` worktree-adds from. Two commits: the
- * first (A) is the "currently deployed" baseline, the second (B) is the
- * "next deploy" — package.json has zero dependencies so `npm install` is
- * instant and entirely offline. build.js writes exactly the Next.js
- * `output: 'standalone'` shape (server.js under .next/standalone/apps/web,
- * .next/static and public left OUTSIDE it) that assemble_next_standalone
- * exists to fix up — the same officially-documented gap behind the real
- * "manual Next.js standalone path fix" workaround this whole effort
- * replaces.
+ * A real bare "upstream" repo (standing in for GitHub) plus a real local
+ * clone of it (standing in for the persistent, out-of-band-bootstrapped
+ * source clone `checkout_release` worktree-adds from) — so the clone has
+ * a genuine `origin` remote and checkout()'s `git fetch origin <branch>`
+ * behaves exactly as it would in production, including actually needing
+ * to fetch a new commit down before it can be worktree-added.
+ *
+ * Two commits on `main`: the first (A) is the "currently deployed"
+ * baseline, the second (B) is the "next deploy" — package.json has zero
+ * dependencies so `npm install` is instant and entirely offline.
+ * build.js writes exactly the Next.js `output: 'standalone'` shape
+ * (server.js under .next/standalone/apps/web, .next/static and public
+ * left OUTSIDE it) that assemble_next_standalone exists to fix up — the
+ * same officially-documented gap behind the real "manual Next.js
+ * standalone path fix" workaround this whole effort replaces.
  *
  * @return array{path: string, commitA: string, commitB: string}
  */
 function buildSourceRepo(string $workspace): array
 {
-    $source = $workspace . '/source';
-    mkdir($source, 0777, true);
+    $upstream = $workspace . '/upstream.git';
+    mkdir($upstream, 0777, true);
+    runGit(['init', '--quiet', '--bare', '-b', 'main'], $upstream);
 
-    runGit(['init', '--quiet'], $source);
-    runGit(['config', 'user.email', 'test@example.test'], $source);
-    runGit(['config', 'user.name', 'Recipe Test'], $source);
+    $scratch = $workspace . '/scratch';
+    mkdir($scratch, 0777, true);
+    runGit(['init', '--quiet', '-b', 'main'], $scratch);
+    runGit(['config', 'user.email', 'test@example.test'], $scratch);
+    runGit(['config', 'user.name', 'Recipe Test'], $scratch);
+    runGit(['remote', 'add', 'origin', $upstream], $scratch);
 
-    mkdir("{$source}/apps/web", 0777, true);
-    file_put_contents("{$source}/package.json", json_encode(['name' => 'fixture-app', 'version' => '1.0.0', 'private' => true], JSON_PRETTY_PRINT));
-    file_put_contents("{$source}/apps/web/build.js", <<<'JS'
+    mkdir("{$scratch}/apps/web", 0777, true);
+    file_put_contents("{$scratch}/package.json", json_encode([
+        'name' => 'fixture-app', 'version' => '1.0.0', 'private' => true,
+        'scripts' => ['build' => 'node apps/web/build.js'],
+    ], JSON_PRETTY_PRINT));
+    file_put_contents("{$scratch}/apps/web/build.js", <<<'JS'
         const fs = require('fs');
         const base = __dirname;
         fs.mkdirSync(`${base}/.next/standalone/apps/web`, { recursive: true });
@@ -124,14 +167,24 @@ function buildSourceRepo(string $workspace): array
         console.log('build ok');
         JS);
 
-    runGit(['add', '-A'], $source);
-    runGit(['commit', '--quiet', '-m', 'initial (release A)'], $source);
-    $commitA = trim(runGit(['rev-parse', 'HEAD'], $source)['output']);
+    runGit(['add', '-A'], $scratch);
+    runGit(['commit', '--quiet', '-m', 'initial (release A)'], $scratch);
+    runGit(['push', '--quiet', 'origin', 'main'], $scratch);
+    $commitA = trim(runGit(['rev-parse', 'HEAD'], $scratch)['output']);
 
-    file_put_contents("{$source}/apps/web/build.js", str_replace('build ok', 'build ok v2', file_get_contents("{$source}/apps/web/build.js")));
-    runGit(['add', '-A'], $source);
-    runGit(['commit', '--quiet', '-m', 'second (release B)'], $source);
-    $commitB = trim(runGit(['rev-parse', 'HEAD'], $source)['output']);
+    // The clone `checkout_release` actually worktree-adds from — cloned
+    // HERE, right after commit A, so it deliberately does NOT yet have
+    // commit B below. The second deploy's checkout must genuinely
+    // `git fetch origin main` to pull it down, exactly like production's
+    // persistent bootstrap clone would need to after a new push.
+    $source = $workspace . '/source';
+    runGit(['clone', '--quiet', $upstream, $source], $workspace);
+
+    file_put_contents("{$scratch}/apps/web/build.js", str_replace('build ok', 'build ok v2', file_get_contents("{$scratch}/apps/web/build.js")));
+    runGit(['add', '-A'], $scratch);
+    runGit(['commit', '--quiet', '-m', 'second (release B)'], $scratch);
+    runGit(['push', '--quiet', 'origin', 'main'], $scratch);
+    $commitB = trim(runGit(['rev-parse', 'HEAD'], $scratch)['output']);
 
     return ['path' => $source, 'commitA' => $commitA, 'commitB' => $commitB];
 }
@@ -190,6 +243,11 @@ function step(string $type, string $name, array $params = [], int $timeoutSecond
     return array_merge(['type' => $type, 'name' => $name, 'timeout_seconds' => $timeoutSeconds], $params);
 }
 
+$symlinksSupported = symlinksAreSupported();
+if (!$symlinksSupported) {
+    echo "NOTE: this OS account cannot create symlinks (no SeCreateSymbolicLinkPrivilege/Developer Mode) — activation/rollback symlink assertions are skipped below. Production (Ubuntu) has no such restriction for a regular user; every other assertion (git worktree/fetch, real npm/node execution, step orchestration, failure detection, retention cleanup) still runs and is asserted in full.\n\n";
+}
+
 // ============================================================
 // Executor: argv-form is genuinely shell-free (no injection surface)
 // ============================================================
@@ -226,19 +284,23 @@ mkdir($releaseRoot, 0777, true);
 $releases = new ReleaseManager();
 
 $releaseA = $releases->releasePath($releaseRoot, 'deploy-a');
-$checkoutResult = $releases->checkout($executor, $source['path'], $releaseA, $source['commitA'], 30);
+$checkoutResult = $releases->checkout($executor, $source['path'], $releaseA, 'main', $source['commitA'], 30);
 check('checkout() succeeds via a real `git worktree add`', $checkoutResult['exitCode'] === 0, $failures, $passCount);
 check('checkout() materializes the exact commit content', file_exists("{$releaseA}/apps/web/build.js"), $failures, $passCount);
 
 $releases->activate($releaseRoot, $releaseA);
-check('activate() creates a `current` symlink pointing at the release', $releases->currentReleasePath($releaseRoot) === $releaseA, $failures, $passCount);
-check('activate() leaves no `previous` symlink for the very first activation', $releases->previousReleasePath($releaseRoot) === null, $failures, $passCount);
+if ($symlinksSupported) {
+    check('activate() creates a `current` symlink pointing at the release', $releases->currentReleasePath($releaseRoot) === $releaseA, $failures, $passCount);
+    check('activate() leaves no `previous` symlink for the very first activation', $releases->previousReleasePath($releaseRoot) === null, $failures, $passCount);
+}
 
 $releaseB = $releases->releasePath($releaseRoot, 'deploy-b');
-$releases->checkout($executor, $source['path'], $releaseB, $source['commitB'], 30);
+$releases->checkout($executor, $source['path'], $releaseB, 'main', $source['commitB'], 30);
 $releases->activate($releaseRoot, $releaseB);
-check('a second activate() moves `current` to the new release', $releases->currentReleasePath($releaseRoot) === $releaseB, $failures, $passCount);
-check('a second activate() sets `previous` to the release current pointed at before', $releases->previousReleasePath($releaseRoot) === $releaseA, $failures, $passCount);
+if ($symlinksSupported) {
+    check('a second activate() moves `current` to the new release', $releases->currentReleasePath($releaseRoot) === $releaseB, $failures, $passCount);
+    check('a second activate() sets `previous` to the release current pointed at before', $releases->previousReleasePath($releaseRoot) === $releaseA, $failures, $passCount);
+}
 
 // Retention: create three more fake releases, keep only retentionCount total.
 for ($i = 1; $i <= 3; $i++) {
@@ -249,8 +311,10 @@ for ($i = 1; $i <= 3; $i++) {
 $removed = $releases->cleanupOldReleases($executor, $releaseRoot, 2, $source['path']);
 $remainingReleases = array_diff(scandir($releases->releasesDir($releaseRoot)), ['.', '..']);
 check('cleanupOldReleases removes releases beyond the retention count', count($removed) > 0, $failures, $passCount);
-check('cleanupOldReleases never removes the release `current` points at', in_array('deploy-b', $remainingReleases, true), $failures, $passCount);
-check('cleanupOldReleases never removes the release `previous` points at', in_array('deploy-a', $remainingReleases, true), $failures, $passCount);
+if ($symlinksSupported) {
+    check('cleanupOldReleases never removes the release `current` points at', in_array('deploy-b', $remainingReleases, true), $failures, $passCount);
+    check('cleanupOldReleases never removes the release `previous` points at', in_array('deploy-a', $remainingReleases, true), $failures, $passCount);
+}
 
 rrmdir($workspace);
 
@@ -296,22 +360,12 @@ function happyPathSteps(): array
     ];
 }
 
-// package.json needs a "build" script pointing at build.js — add it to the
-// repo before checkout picks it up (both commits get it via a third commit).
-runGit(['config', 'user.email', 'test@example.test'], $source2['path']);
-file_put_contents($source2['path'] . '/package.json', json_encode([
-    'name' => 'fixture-app', 'version' => '1.0.0', 'private' => true,
-    'scripts' => ['build' => 'node apps/web/build.js'],
-], JSON_PRETTY_PRINT));
-runGit(['add', '-A'], $source2['path']);
-runGit(['commit', '--quiet', '-m', 'add build script'], $source2['path']);
-$commitWithScript = trim(runGit(['rev-parse', 'HEAD'], $source2['path'])['output']);
-
-// --- Deploy A: full happy path ---
+// --- Deploy A: full happy path, at commit A (already present in the
+// source clone at clone time — no fetch of anything new needed). ---
 $jobA = [
     'id' => 'deploy-a',
     'action' => 'deploy',
-    'commit_hash' => $commitWithScript,
+    'commit_hash' => $source2['commitA'],
     'previous_commit_hash' => null,
     'branch' => 'main',
     'recipe_rollback' => false,
@@ -320,7 +374,9 @@ $jobA = [
 $runner->run($jobA, $projectConfig);
 
 $releaseAPath = (new ReleaseManager())->releasePath($releaseRoot2, 'deploy-a');
-check('deploy A: current symlink points at release A after a successful recipe', (new ReleaseManager())->currentReleasePath($releaseRoot2) === $releaseAPath, $failures, $passCount);
+if ($symlinksSupported) {
+    check('deploy A: current symlink points at release A after a successful recipe', (new ReleaseManager())->currentReleasePath($releaseRoot2) === $releaseAPath, $failures, $passCount);
+}
 check('deploy A: the assembled static asset genuinely exists on disk', file_exists("{$releaseAPath}/apps/web/.next/standalone/apps/web/.next/static/foo.css"), $failures, $passCount);
 check('deploy A: the assembled .next/cache directory was created', is_dir("{$releaseAPath}/apps/web/.next/standalone/apps/web/.next/cache"), $failures, $passCount);
 
@@ -350,36 +406,45 @@ $stepsB[] = step('run_script', 'deliberately broken step', ['working_directory' 
 $jobB = [
     'id' => 'deploy-b',
     'action' => 'deploy',
-    'commit_hash' => $commitWithScript,
-    'previous_commit_hash' => $commitWithScript,
+    'commit_hash' => $source2['commitB'],
+    'previous_commit_hash' => $source2['commitA'],
     'branch' => 'main',
     'recipe_rollback' => false,
     'deployment_recipe' => ['timeout_seconds' => 300, 'steps' => $stepsB],
 ];
 $runner->run($jobB, $projectConfig);
 
-check(
-    'deploy B: after a post-activation failure, current symlink is reverted back to release A',
-    (new ReleaseManager())->currentReleasePath($releaseRoot2) === $releaseAPath,
-    $failures, $passCount,
-);
+if ($symlinksSupported) {
+    check(
+        'deploy B: after a post-activation failure, current symlink is reverted back to release A',
+        (new ReleaseManager())->currentReleasePath($releaseRoot2) === $releaseAPath,
+        $failures, $passCount,
+    );
+}
 
 $logB = readHubLog($hub['logPath']);
 $statusesB = array_values(array_filter(array_map(static fn ($e) => $e['path'] === "/api/agent/jobs/deploy-b/status" ? ($e['body']['status'] ?? null) : null, $logB)));
 check('deploy B: reaches activating before the deliberate failure', in_array('activating', $statusesB, true), $failures, $passCount);
-check('deploy B: final reported status is rolled_back, not failed', end($statusesB) === 'rolled_back', $failures, $passCount);
 
-$rolledBackEntry = null;
-foreach ($logB as $entry) {
-    if ($entry['path'] === '/api/agent/jobs/deploy-b/status' && ($entry['body']['status'] ?? null) === 'rolled_back') {
-        $rolledBackEntry = $entry;
+// Automatic rollback itself resolves its target via previousReleasePath()
+// (symlink-based) — without symlink support there is no previous release
+// to find, so handleFailure() correctly reports `failed` instead (see the
+// "no previous release" scenario below, which is exactly that same path).
+if ($symlinksSupported) {
+    check('deploy B: final reported status is rolled_back, not failed', end($statusesB) === 'rolled_back', $failures, $passCount);
+
+    $rolledBackEntry = null;
+    foreach ($logB as $entry) {
+        if ($entry['path'] === '/api/agent/jobs/deploy-b/status' && ($entry['body']['status'] ?? null) === 'rolled_back') {
+            $rolledBackEntry = $entry;
+        }
     }
+    check(
+        'deploy B: the rolled_back report explains what triggered it',
+        $rolledBackEntry !== null && str_contains($rolledBackEntry['body']['message'] ?? '', 'automatically rolled back'),
+        $failures, $passCount,
+    );
 }
-check(
-    'deploy B: the rolled_back report explains what triggered it',
-    $rolledBackEntry !== null && str_contains($rolledBackEntry['body']['message'] ?? '', 'automatically rolled back'),
-    $failures, $passCount,
-);
 
 // --- Manual rollback (recipe_rollback:true), the same code path the
 // dashboard's "Rollback" button uses — proves the previous/current
@@ -391,23 +456,29 @@ $releaseBPath = (new ReleaseManager())->releasePath($releaseRoot2, 'deploy-b');
 $jobRollback = [
     'id' => 'deploy-c-manual-rollback',
     'action' => 'rollback',
-    'commit_hash' => $commitWithScript,
-    'previous_commit_hash' => $commitWithScript,
+    'commit_hash' => $source2['commitB'],
+    'previous_commit_hash' => $source2['commitA'],
     'branch' => 'main',
     'recipe_rollback' => true,
     'deployment_recipe' => ['timeout_seconds' => 300, 'steps' => $stepsB],
 ];
 $runner->run($jobRollback, $projectConfig);
 
-check(
-    'manual rollback: current symlink flips forward to release B (whatever `previous` pointed at)',
-    (new ReleaseManager())->currentReleasePath($releaseRoot2) === $releaseBPath,
-    $failures, $passCount,
-);
+// runRollback()'s entire success path depends on previousReleasePath()
+// (symlink-based) resolving to something — without symlink support it
+// always looks like "no previous release", so both assertions below are
+// only meaningful when symlinks actually work on this host.
+if ($symlinksSupported) {
+    check(
+        'manual rollback: current symlink flips forward to release B (whatever `previous` pointed at)',
+        (new ReleaseManager())->currentReleasePath($releaseRoot2) === $releaseBPath,
+        $failures, $passCount,
+    );
 
-$logC = readHubLog($hub['logPath']);
-$statusesC = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/deploy-c-manual-rollback/status' ? ($e['body']['status'] ?? null) : null, $logC)));
-check('manual rollback: reports activating then verifying then rolled_back', $statusesC === ['activating', 'verifying', 'rolled_back'], $failures, $passCount);
+    $logC = readHubLog($hub['logPath']);
+    $statusesC = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/deploy-c-manual-rollback/status' ? ($e['body']['status'] ?? null) : null, $logC)));
+    check('manual rollback: reports activating then verifying then rolled_back', $statusesC === ['activating', 'verifying', 'rolled_back'], $failures, $passCount);
+}
 
 // --- No previous release available: must fail cleanly, not throw. ---
 @unlink($hub['logPath']);

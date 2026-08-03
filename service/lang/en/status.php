@@ -5,10 +5,17 @@ return [
     'pending_approval' => 'Pending approval',
     'queued' => 'Queued',
     'running' => 'Running',
+    // Recipe-only intermediate phases (sandogh deployment overhaul,
+    // Phase 4) — a plain pipeline deployment never reports these.
+    'building' => 'Building',
+    'migrating' => 'Migrating database',
+    'activating' => 'Activating release',
+    'verifying' => 'Verifying health',
     'succeeded' => 'Succeeded',
     'failed' => 'Failed',
     'cancelled' => 'Cancelled',
     'partial_success' => 'Partial success',
+    'rolled_back' => 'Rolled back',
     // Phase 4-I pipeline step status only (PipelineStepPresenter) — a step
     // the run stopped short of reaching, distinct from "pending" (which
     // still might run).

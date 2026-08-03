@@ -46,7 +46,11 @@ require __DIR__ . '/lib/InvalidProjectCacheException.php';
 require __DIR__ . '/lib/ProjectConfigCache.php';
 require __DIR__ . '/lib/ProjectConfigResolver.php';
 require __DIR__ . '/lib/ProjectConfigSyncScheduler.php';
+require __DIR__ . '/lib/ArtifactBuilder.php';
+require __DIR__ . '/lib/ArtifactUploader.php';
 
+use LocalAgent\ArtifactBuilder;
+use LocalAgent\ArtifactUploader;
 use LocalAgent\Client;
 use LocalAgent\CommitManager;
 use LocalAgent\GitCommandException;
@@ -70,7 +74,7 @@ use LocalAgent\Security;
  * Hub side for why this never triggers an automatic download). Bump
  * when agent.php or lib/* changes in a way that matters operationally.
  */
-const LOCAL_AGENT_VERSION = '1.2.1';
+const LOCAL_AGENT_VERSION = '1.3.0';
 
 $configPath = __DIR__ . '/config.php';
 
@@ -119,6 +123,11 @@ $git = new GitManager(
 $commits = new CommitManager($git);
 $pushes = new PushManager($git);
 $safety = new SafetyChecker();
+// Root-cause fix (customer-site direct-GitHub-dependency removal): built
+// right after a successful publish (see pollAndExecutePublish()) so the
+// production Server Agent can download this exact commit from the Hub
+// instead of ever fetching from GitHub.
+$artifactUploader = new ArtifactUploader(new ArtifactBuilder($git), $client, $logger);
 $jobMaxRuntimeSeconds = (int) ($config['job_max_runtime_seconds'] ?? 600);
 
 // Project config is downloaded from the Hub (single source of truth) and
@@ -185,7 +194,7 @@ do {
     $reloadRequested = false;
 
     try {
-        pollAndExecutePublish($client, $git, $commits, $pushes, $safety, $projects, $logger, $jobMaxRuntimeSeconds);
+        pollAndExecutePublish($client, $git, $commits, $pushes, $safety, $artifactUploader, $projects, $logger, $jobMaxRuntimeSeconds);
     } catch (\Throwable $e) {
         $logger->error('Unhandled error during poll cycle: ' . $e->getMessage());
     }
@@ -223,7 +232,7 @@ do {
     }
 } while (!$runOnce);
 
-function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $commits, PushManager $pushes, SafetyChecker $safety, array $projects, Logger $logger, int $jobMaxRuntimeSeconds): void
+function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $commits, PushManager $pushes, SafetyChecker $safety, ArtifactUploader $artifactUploader, array $projects, Logger $logger, int $jobMaxRuntimeSeconds): void
 {
     $response = $client->request('GET', '/api/local-agent/publish-jobs/next');
 
@@ -315,6 +324,21 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
 
             $output = $pushes->push($repositoryPath, $remoteName, $branch, $onTick);
             $commitHash = $git->lastCommitHash($repositoryPath);
+
+            // Root-cause fix (customer-site direct-GitHub-dependency
+            // removal): best-effort and never fails the publish itself —
+            // the push already succeeded independently of whether an
+            // artifact could be built/uploaded. A failure here just means
+            // the eventual Deployment falls back to the legacy git-based
+            // pipeline on the production server (which is exactly
+            // today's status quo for a project not yet using this path),
+            // so it's surfaced in this job's own output, not as a
+            // separate failure state.
+            $artifactResult = $artifactUploader->buildAndUpload($projectKey, $repositoryPath, $commitHash, $branch, $onTick);
+            $output .= "\n[artifact] " . ($artifactResult['succeeded'] ? 'uploaded: ' : 'FAILED: ') . $artifactResult['message'];
+            if (!$artifactResult['succeeded']) {
+                $logger->warn("Job {$job['id']}: artifact upload failed: {$artifactResult['message']}");
+            }
 
             $client->request('POST', $reportPath, ['status' => 'succeeded', 'commit_hash' => $commitHash, 'output' => $output]);
             $logger->info("Job {$job['id']}: published as {$commitHash}");

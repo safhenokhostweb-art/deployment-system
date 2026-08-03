@@ -62,6 +62,10 @@ class Deployment extends Model
     public const FAILURE_CODE_LATE_CALLBACK_REJECTED = 'late_callback_rejected';
     /** deployments:detect-stalled's hard ceiling (deployment_job_max_runtime_seconds) was hit — even if heartbeats kept arriving on schedule. */
     public const FAILURE_CODE_MAX_RUNTIME_EXCEEDED = 'max_runtime_exceeded';
+    /** Root-cause fix (customer-site): artifact-based deploy failure codes — see ArtifactManager on the agent side. */
+    public const FAILURE_CODE_ARTIFACT_DOWNLOAD_FAILED = 'artifact_download_failed';
+    public const FAILURE_CODE_ARTIFACT_CHECKSUM_MISMATCH = 'artifact_checksum_mismatch';
+    public const FAILURE_CODE_ARTIFACT_EXTRACT_FAILED = 'artifact_extract_failed';
 
     /** @var array<int, string> every status a deployment can be actively executing under — see isInProgress()/isLeaseExpired(). */
     public const IN_PROGRESS_STATUSES = [
@@ -93,6 +97,7 @@ class Deployment extends Model
         'failure_message',
         'failure_code',
         'rollback_of_deployment_id',
+        'artifact_id',
         'last_activity_at',
         'heartbeat_at',
         'lease_expires_at',
@@ -130,6 +135,17 @@ class Deployment extends Model
     public function server(): BelongsTo
     {
         return $this->belongsTo(Server::class);
+    }
+
+    /**
+     * Root-cause fix (customer-site direct-GitHub-dependency removal):
+     * null for every Deployment whose project/commit had no matching
+     * Artifact at creation time — the agent then runs the exact legacy
+     * git-based pipeline, unchanged. See DeploymentDispatcher.
+     */
+    public function artifact(): BelongsTo
+    {
+        return $this->belongsTo(Artifact::class);
     }
 
     public function rollbackOf(): BelongsTo

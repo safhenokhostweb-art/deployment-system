@@ -24,6 +24,7 @@ class Project extends Model
         'github_account_id',
         'pipeline',
         'deployment_recipe',
+        'artifact_preserve_paths',
         'auto_deploy',
         'github_webhook_secret',
         'is_active',
@@ -42,6 +43,7 @@ class Project extends Model
         return [
             'pipeline' => 'array',
             'deployment_recipe' => 'array',
+            'artifact_preserve_paths' => 'array',
             'auto_deploy' => 'boolean',
             'is_active' => 'boolean',
             'github_webhook_secret' => 'encrypted',
@@ -137,6 +139,16 @@ class Project extends Model
     public function publishJobs(): HasMany
     {
         return $this->hasMany(PublishJob::class);
+    }
+
+    /**
+     * Root-cause fix (customer-site direct-GitHub-dependency removal):
+     * artifacts the Local Agent has uploaded for this Project, one per
+     * commit — see ArtifactService::findMatching().
+     */
+    public function artifacts(): HasMany
+    {
+        return $this->hasMany(Artifact::class);
     }
 
     public function changeDetectionJobs(): HasMany

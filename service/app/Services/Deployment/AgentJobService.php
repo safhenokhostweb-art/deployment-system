@@ -46,7 +46,7 @@ class AgentJobService
                 ->whereDoesntHave('tasks')
                 ->oldest('queued_at')
                 ->lockForUpdate()
-                ->with('project')
+                ->with(['project', 'artifact'])
                 ->first();
 
             if (!$deployment) {
@@ -106,6 +106,20 @@ class AgentJobService
                 // absent/false and RollbackService's legacy full-pipeline
                 // re-run behavior continues exactly as before.
                 'recipe_rollback' => $usesRecipe && $deployment->action === Deployment::ACTION_ROLLBACK,
+                // Root-cause fix (customer-site direct-GitHub-dependency
+                // removal): present only when the Local Agent already
+                // uploaded a matching artifact for this exact commit (see
+                // DeploymentDispatcher::attachArtifactIfAvailable()) — the
+                // agent downloads it from THIS Hub (a connection it
+                // already needs for polling) instead of ever fetching
+                // from GitHub. null for every project not using the
+                // Local Agent artifact-publish flow; the agent then runs
+                // the exact legacy git-based pipeline, unchanged.
+                'artifact' => $deployment->artifact !== null ? [
+                    'public_id' => $deployment->artifact->public_id,
+                    'checksum_sha256' => $deployment->artifact->checksum_sha256,
+                    'size_bytes' => $deployment->artifact->size_bytes,
+                ] : null,
                 'issued_at' => now()->timestamp,
             ];
 

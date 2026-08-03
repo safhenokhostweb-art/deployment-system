@@ -7,6 +7,7 @@ use App\Models\AuditLogEntry;
 use App\Models\Deployment;
 use App\Models\DeploymentTask;
 use App\Models\Project;
+use App\Services\Deployment\Artifact\ArtifactService;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -35,6 +36,7 @@ class DeploymentDispatcher
 {
     public function __construct(
         private readonly DeploymentTargetResolver $resolver,
+        private readonly ArtifactService $artifacts,
     ) {
     }
 
@@ -158,6 +160,25 @@ class DeploymentDispatcher
     }
 
     /**
+     * Root-cause fix (customer-site direct-GitHub-dependency removal):
+     * called right after every Deployment::create() above. A Project
+     * whose Local Agent never uploaded a matching artifact for this
+     * exact commit (every Project not using the Local Agent artifact-
+     * publish flow, or one where the upload simply hasn't landed yet)
+     * leaves artifact_id null — AgentJobService::claimNextJob() then
+     * omits `artifact` from the job payload and the agent runs the
+     * exact legacy git-based pipeline, unchanged.
+     */
+    private function attachArtifactIfAvailable(Deployment $deployment, Project $project, string $commitHash): void
+    {
+        $artifact = $this->artifacts->findMatching($project, $commitHash);
+
+        if ($artifact !== null) {
+            $deployment->update(['artifact_id' => $artifact->id]);
+        }
+    }
+
+    /**
      * @param array<int, TargetView> $targets
      */
     private function isLegacyTargetSet(array $targets): bool
@@ -186,6 +207,8 @@ class DeploymentDispatcher
                 'approved_by' => $project->auto_deploy ? 'auto_deploy' : null,
                 'approved_at' => $project->auto_deploy ? now() : null,
             ]);
+
+            $this->attachArtifactIfAvailable($deployment, $project, $commitHash);
 
             AuditLogEntry::record(
                 actorType: AuditLogEntry::ACTOR_GITHUB,
@@ -223,6 +246,8 @@ class DeploymentDispatcher
                 'approved_at' => now(),
                 'queued_at' => now(),
             ]);
+
+            $this->attachArtifactIfAvailable($deployment, $project, $commitHash);
 
             AuditLogEntry::record(
                 actorType: AuditLogEntry::ACTOR_USER,
@@ -291,6 +316,8 @@ class DeploymentDispatcher
                 'approved_by' => $autoApprove ? ($trigger === Deployment::TRIGGER_WEBHOOK ? 'auto_deploy' : $triggeredBy) : null,
                 'approved_at' => $autoApprove ? now() : null,
             ]);
+
+            $this->attachArtifactIfAvailable($deployment, $project, $commitHash);
 
             if ($autoApprove) {
                 $this->createTasksForDeployment($deployment, $targets);

@@ -22,8 +22,20 @@ use Illuminate\Support\Str;
 
 class ProjectController extends Controller
 {
+    /**
+     * Root-cause fix (customer-site production deploys failing because
+     * the production server cannot reach github.com directly): every
+     * preset's first step is marked skip_when_artifact — the agent skips
+     * it entirely (see agent/agent.php's pollAndExecute()) whenever the
+     * Hub already attached a matching Local-Agent-built artifact to this
+     * Deployment, downloading and activating that instead. Harmless for
+     * any project that never uploads one (this flag is only ever
+     * consulted when job['artifact'] is present) — every project not
+     * using the Local Agent artifact-publish flow keeps running this
+     * exact git-based step as before.
+     */
     private const PIPELINE_PRESET_LARAVEL = [
-        ['name' => 'git pull', 'command' => 'git fetch origin {branch} && git reset --hard {commit}'],
+        ['name' => 'git pull', 'command' => 'git fetch origin {branch} && git reset --hard {commit}', 'skip_when_artifact' => true],
         ['name' => 'composer install', 'command' => 'composer install --no-dev --optimize-autoloader --no-interaction'],
         ['name' => 'migrate', 'command' => '{php_binary} artisan migrate --force'],
         ['name' => 'cache clear', 'command' => '{php_binary} artisan optimize:clear && {php_binary} artisan optimize'],
@@ -32,7 +44,7 @@ class ProjectController extends Controller
     ];
 
     private const PIPELINE_PRESET_STATIC = [
-        ['name' => 'git pull', 'command' => 'git fetch origin {branch} && git reset --hard {commit}'],
+        ['name' => 'git pull', 'command' => 'git fetch origin {branch} && git reset --hard {commit}', 'skip_when_artifact' => true],
         ['name' => 'install', 'command' => 'npm ci'],
         ['name' => 'build', 'command' => 'npm run build'],
     ];
@@ -43,7 +55,7 @@ class ProjectController extends Controller
     // preset, this only fills the textarea; nothing executes until the
     // user reviews/saves it.
     private const PIPELINE_PRESET_WORDPRESS = [
-        ['name' => 'git pull', 'command' => 'git fetch origin {branch} && git reset --hard {commit}'],
+        ['name' => 'git pull', 'command' => 'git fetch origin {branch} && git reset --hard {commit}', 'skip_when_artifact' => true],
         ['name' => 'file permissions', 'command' => 'chmod -R 755 {working_directory}/wp-content'],
     ];
 

@@ -117,7 +117,7 @@ return [
     | that keeps these three from drifting apart again.
     |
     */
-    'latest_local_agent_version' => env('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION', '1.2.1'),
+    'latest_local_agent_version' => env('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION', '1.3.0'),
 
     /*
     |--------------------------------------------------------------------------
@@ -172,5 +172,29 @@ return [
     */
     'deployment_job_lease_seconds' => (int) env('DEPLOYMENT_JOB_LEASE_SECONDS', 180),
     'deployment_job_max_runtime_seconds' => (int) env('DEPLOYMENT_JOB_MAX_RUNTIME_SECONDS', 10800),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Artifact-based deployment (customer-site direct-GitHub-dependency removal)
+    |--------------------------------------------------------------------------
+    |
+    | Root cause: the production server (Iran) cannot reach github.com
+    | directly (direct connect and SSH on 22/443 both time out after
+    | ~135s). The Local Agent — which does have working GitHub access —
+    | now builds a `git archive` artifact right after a successful push
+    | and uploads it here; the Server Agent downloads it from the Hub
+    | instead, a connection it already needs for polling. See
+    | ArtifactService and agent/lib/ArtifactManager.php.
+    |
+    | artifact_retention_count_per_project: how many artifacts (including
+    | the newest) ArtifactService::store() keeps per project — enforced
+    | immediately on every upload, independent of the scheduled command.
+    | artifact_retention_days: how far out expires_at is set at upload
+    | time; artifacts:cleanup (scheduled) deletes anything past it.
+    |
+    */
+    'artifact_retention_count_per_project' => (int) env('DEPLOYMENT_ARTIFACT_RETENTION_COUNT', 3),
+    'artifact_retention_days' => (int) env('DEPLOYMENT_ARTIFACT_RETENTION_DAYS', 14),
+    'artifact_max_size_mb' => (int) env('DEPLOYMENT_ARTIFACT_MAX_SIZE_MB', 500),
 
 ];

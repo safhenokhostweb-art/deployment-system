@@ -47,6 +47,17 @@ return [
             'report' => false,
         ],
 
+        // Root-cause fix (customer-site direct-GitHub-dependency removal):
+        // where uploaded deploy artifacts (see Artifact model) live —
+        // private, never served directly (no 'serve'/'url'), downloaded
+        // only through the signed AgentArtifactController route.
+        'artifacts' => [
+            'driver' => 'local',
+            'root' => storage_path('app/artifacts'),
+            'throw' => false,
+            'report' => false,
+        ],
+
         's3' => [
             'driver' => 's3',
             'key' => env('AWS_ACCESS_KEY_ID'),

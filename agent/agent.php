@@ -27,7 +27,9 @@ require __DIR__ . '/lib/ShellPlaceholders.php';
 require __DIR__ . '/lib/ServiceAllowlist.php';
 require __DIR__ . '/lib/ReleaseManager.php';
 require __DIR__ . '/lib/RecipeStepRunner.php';
+require __DIR__ . '/lib/ArtifactManager.php';
 
+use DeploymentAgent\ArtifactManager;
 use DeploymentAgent\Client;
 use DeploymentAgent\Executor;
 use DeploymentAgent\HealthCollector;
@@ -67,13 +69,14 @@ $client = new Client(
 
 $executor = new Executor();
 $recipeRunner = new RecipeStepRunner($executor, $client, $logger, new ReleaseManager());
+$artifactManager = new ArtifactManager($client);
 $runOnce = in_array('--once', $argv, true);
 
 $logger->info('Deployment agent starting' . ($runOnce ? ' (single poll)' : ' (continuous)'));
 
 do {
     try {
-        pollAndExecute($client, $executor, $recipeRunner, $config, $logger);
+        pollAndExecute($client, $executor, $recipeRunner, $artifactManager, $config, $logger);
     } catch (\Throwable $e) {
         $logger->error('Unhandled error during poll cycle: ' . $e->getMessage());
     }
@@ -112,7 +115,7 @@ do {
     }
 } while (!$runOnce);
 
-function pollAndExecute(Client $client, Executor $executor, RecipeStepRunner $recipeRunner, array $config, Logger $logger): void
+function pollAndExecute(Client $client, Executor $executor, RecipeStepRunner $recipeRunner, ArtifactManager $artifactManager, array $config, Logger $logger): void
 {
     sendHeartbeat($client, $logger);
 
@@ -187,7 +190,59 @@ function pollAndExecute(Client $client, Executor $executor, RecipeStepRunner $re
     $sequence = 0;
     $failed = false;
 
+    // Root-cause fix (customer-site direct-GitHub-dependency removal):
+    // present only when the Local Agent already uploaded a matching
+    // artifact for this exact commit — see AgentJobService::claimNextJob()
+    // on the Hub side. Downloads, verifies, extracts, and atomically
+    // activates it here, BEFORE any pipeline step runs, so a pipeline
+    // step whose job was only ever "get the code onto this server" (the
+    // `git fetch origin {branch} && git reset --hard {commit}` step every
+    // preset seeds) can be marked `skip_when_artifact: true` in the
+    // Project's pipeline JSON and is skipped below — every project that
+    // hasn't set that flag (every project that existed before this
+    // feature) keeps running that step exactly as before, unaffected.
+    $usedArtifact = false;
+    if (!empty($job['artifact'])) {
+        $sequence++;
+        $artifactResult = $artifactManager->deploy(
+            $job['artifact'],
+            $workingDirectory,
+            $projectConfig['artifact_preserve_paths'] ?? [],
+            (int) ($projectConfig['artifact_retention_count'] ?? 3),
+        );
+
+        $client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+            'sequence' => $sequence,
+            'step_name' => 'deploy artifact',
+            'command' => "download+extract+activate artifact {$job['artifact']['public_id']}",
+            'output' => $artifactResult['message'] ?? 'Artifact activated successfully.',
+            'exit_code' => $artifactResult['status'] === 'succeeded' ? 0 : 1,
+            'duration_ms' => null,
+            'timed_out' => false,
+        ]);
+
+        if ($artifactResult['status'] !== 'succeeded') {
+            $logger->error("Job {$job['id']}: artifact deployment failed: {$artifactResult['message']}");
+            $client->request('POST', "/api/agent/jobs/{$job['id']}/status", [
+                'status' => 'failed',
+                'message' => $artifactResult['message'],
+                'failure_code' => $artifactResult['failureCode'],
+            ]);
+
+            return;
+        }
+
+        $usedArtifact = true;
+        $logger->info("Job {$job['id']}: artifact activated successfully.");
+    }
+
     foreach ($job['pipeline'] as $step) {
+        if ($usedArtifact && ($step['skip_when_artifact'] ?? false)) {
+            $logger->info("Job {$job['id']}: skipping step '{$step['name']}' — its work was already done by the artifact deploy above.");
+
+            continue;
+        }
+
         $sequence++;
         $command = strtr($step['command'], $replacements);
 

@@ -69,6 +69,26 @@ return [
         //     // never make this agent restart a systemd unit outside this
         //     // list, regardless of what a recipe asks for.
         //     'allowed_services' => ['example-api.service', 'example-web.service'],
+        //
+        //     // --- artifact-deploy-only settings below (see
+        //     // ArtifactManager). Only read when the Hub's job payload
+        //     // includes an `artifact` — i.e. the Local Agent already
+        //     // uploaded one for this exact commit. A project not using
+        //     // that flow never reads any of these; the agent runs the
+        //     // exact legacy git-based pipeline as before. ---
+        //
+        //     // Project-relative paths copied from the currently-active
+        //     // version into a new release before it's activated — the
+        //     // runtime files a fresh `git archive` extraction never
+        //     // contains at all (they're gitignored, so never tracked).
+        //     // Defaults to ['.env', 'storage', 'public/storage'] when
+        //     // omitted (see ArtifactManager::DEFAULT_PRESERVE_PATHS).
+        //     'artifact_preserve_paths' => ['.env', 'storage', 'public/storage'],
+        //
+        //     // How many previous releases (renamed aside as
+        //     // `working_directory.backup-*`, never deleted outright) to
+        //     // keep on disk before the oldest are cleaned up.
+        //     'artifact_retention_count' => 3,
         // ],
     ],
 

@@ -336,10 +336,11 @@ final class RecipeStepRunner
         $sourceRepository = strtr($step['source_repository'], $tokens);
         $this->lastCheckoutSourceRepository = $sourceRepository;
         $commit = $tokens['{commit}'] ?? '';
+        $branch = $tokens['{branch}'] ?? '';
 
-        $result = $this->releases->checkout($this->executor, $sourceRepository, $releasePath, $commit, $timeoutSeconds, $onTick);
+        $result = $this->releases->checkout($this->executor, $sourceRepository, $releasePath, $branch, $commit, $timeoutSeconds, $onTick);
 
-        return $this->fromExecutorResult($result, self::FAILURE_BUILD_FAILED, "checkout {$commit} from {$sourceRepository} into {$releasePath}");
+        return $this->fromExecutorResult($result, self::FAILURE_BUILD_FAILED, "checkout {$commit} (branch {$branch}) from {$sourceRepository} into {$releasePath}");
     }
 
     private function runVerifyRuntime(array $step, int $timeoutSeconds, callable $onTick): array

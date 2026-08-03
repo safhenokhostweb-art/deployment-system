@@ -56,3 +56,13 @@ Schedule::command('publish:auto-publish-stable-changes')
     ->everyFiveMinutes()
     ->withoutOverlapping()
     ->onOneServer();
+
+// Root-cause fix (customer-site direct-GitHub-dependency removal):
+// deletes artifacts past their retention window and uploads abandoned
+// mid-flight (phase one done, phase two never happened) — see
+// CleanupArtifacts and ArtifactService::cleanupOldArtifacts() (which
+// already handles per-project retention count on every upload).
+Schedule::command('artifacts:cleanup')
+    ->hourly()
+    ->withoutOverlapping()
+    ->onOneServer();

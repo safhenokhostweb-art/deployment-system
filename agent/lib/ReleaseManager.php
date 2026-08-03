@@ -66,15 +66,25 @@ final class ReleaseManager
      * network on every deploy) and produces a directory that is, once
      * created, never written to again by any later deploy.
      *
+     * Fetches the BRANCH, not the raw commit SHA: most real git hosts
+     * (GitHub included) restrict smart-HTTP/SSH fetches to advertised
+     * refs and reject `git fetch origin <arbitrary-sha>` outright unless
+     * that SHA happens to already be a ref tip. Since the deployed commit
+     * is, by definition, reachable from the branch that was just pushed
+     * to (that push is what triggered this deployment), fetching the
+     * branch always pulls the exact commit's object in too — the same
+     * fetch-branch-then-target-commit shape the legacy `pipeline` preset
+     * already uses (`git fetch origin {branch} && git reset --hard {commit}`).
+     *
      * @return array{exitCode: int, output: string, timedOut: bool, durationMs: int}
      */
-    public function checkout(Executor $executor, string $sourceRepository, string $releasePath, string $commitHash, int $timeoutSeconds, ?callable $onTick = null): array
+    public function checkout(Executor $executor, string $sourceRepository, string $releasePath, string $branch, string $commitHash, int $timeoutSeconds, ?callable $onTick = null): array
     {
         if (!is_dir(dirname($releasePath))) {
             mkdir(dirname($releasePath), 0755, true);
         }
 
-        $fetch = $executor->runArgv(['git', '-C', $sourceRepository, 'fetch', '--quiet', 'origin', $commitHash], sys_get_temp_dir(), $timeoutSeconds, [], $onTick);
+        $fetch = $executor->runArgv(['git', '-C', $sourceRepository, 'fetch', '--quiet', 'origin', $branch], sys_get_temp_dir(), $timeoutSeconds, [], $onTick);
         if ($fetch['exitCode'] !== 0) {
             return $fetch;
         }
