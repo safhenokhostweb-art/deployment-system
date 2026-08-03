@@ -169,6 +169,18 @@ symlink, which is a deliberate safety property (see §6).
 Runs before the artifact is ever archived, in the project's own directory,
 each stage individually timed and logged:
 
+0. `composer check-platform-reqs --no-dev --format=json` — only if
+   `composer.json` exists, run BEFORE `composer install`. Composer's own,
+   authoritative check of `composer.lock`'s real (including transitive)
+   `ext-*`/`php` requirements against the PHP environment actually running
+   Composer. A genuine missing extension fails fast with
+   `LocalBuildFailedException('missing_php_extension')` — never bypassed
+   with `--ignore-platform-req` — carrying the exact extension name, the
+   package that required it, the loaded php.ini path, and the raw `php
+   --ini`/`php -m` output for diagnosis. Best-effort: if this sub-command
+   can't produce a verdict at all (old Composer, broken composer_command),
+   it silently defers to step 1's own authoritative result instead of
+   inventing a false diagnosis.
 1. `composer install --no-dev --prefer-dist --optimize-autoloader
    --no-interaction` — only if `composer.json` exists. Failure →
    `LocalBuildFailedException('local_composer_failed')`.
@@ -279,6 +291,7 @@ Publish Job itself with a specific code (`PublishJob::AGENT_REPORTABLE_FAILURE_C
 
 | `failure_code` | Meaning |
 |---|---|
+| `missing_php_extension` | The Local Agent's configured PHP binary is missing a `composer.lock`-required PHP extension (e.g. ext-gd) — detected via `composer check-platform-reqs` BEFORE `composer install` runs; never bypassed with `--ignore-platform-req` |
 | `local_composer_failed` | `composer install` failed on the Local Agent |
 | `local_npm_install_failed` | `npm ci` failed on the Local Agent |
 | `local_asset_build_failed` | `npm run build` failed on the Local Agent |

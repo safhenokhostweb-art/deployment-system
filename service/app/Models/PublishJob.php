@@ -57,6 +57,16 @@ class PublishJob extends Model
     public const FAILURE_CODE_ARTIFACT_MISSING_VENDOR = 'artifact_missing_vendor';
     public const FAILURE_CODE_ARTIFACT_MISSING_BUILD = 'artifact_missing_build';
 
+    /**
+     * Root-cause fix (v1.4.2): a required PHP extension (e.g. ext-gd for
+     * phpoffice/phpspreadsheet) missing from the Local Agent's configured
+     * PHP binary — detected by LocalBuildRunner's own `composer
+     * check-platform-reqs` pre-check BEFORE `composer install` ever
+     * starts, so it never gets lumped into the generic
+     * local_composer_failed. See LocalBuildRunner::assertPlatformRequirementsSatisfied().
+     */
+    public const FAILURE_CODE_MISSING_PHP_EXTENSION = 'missing_php_extension';
+
     /** @var array<int, string> every value the Local Agent may report via report()'s failure_code field. */
     public const AGENT_REPORTABLE_FAILURE_CODES = [
         self::FAILURE_CODE_PROCESS_TIMEOUT,
@@ -67,6 +77,7 @@ class PublishJob extends Model
         self::FAILURE_CODE_ARTIFACT_UPLOAD_FAILED,
         self::FAILURE_CODE_ARTIFACT_MISSING_VENDOR,
         self::FAILURE_CODE_ARTIFACT_MISSING_BUILD,
+        self::FAILURE_CODE_MISSING_PHP_EXTENSION,
     ];
 
     protected $fillable = [
