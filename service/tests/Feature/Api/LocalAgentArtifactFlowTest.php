@@ -46,6 +46,29 @@ class LocalAgentArtifactFlowTest extends TestCase
         return $this->localAgentHeaders($method, $path, $body, $agent->public_id, LocalAgentFactory::$lastPlainToken, LocalAgentFactory::$lastPlainSecret);
     }
 
+    /**
+     * The Hub now independently re-inspects uploaded archive contents
+     * (defense-in-depth against a compromised/buggy Local Agent), so any
+     * fixture that's expected to reach STATUS_AVAILABLE must be a real,
+     * openable zip — not an arbitrary string.
+     *
+     * @param array<string, string> $entries
+     */
+    private function buildZipBytes(array $entries): string
+    {
+        $path = tempnam(sys_get_temp_dir(), 'local-agent-artifact-flow-test-') . '.zip';
+        $zip = new \ZipArchive();
+        $zip->open($path, \ZipArchive::CREATE);
+        foreach ($entries as $name => $content) {
+            $zip->addFromString($name, $content);
+        }
+        $zip->close();
+        $bytes = file_get_contents($path);
+        @unlink($path);
+
+        return $bytes;
+    }
+
     public function test_create_starts_a_pending_upload_for_a_mapped_project(): void
     {
         [$agent, $project] = $this->mappedAgentAndProject();
@@ -104,7 +127,7 @@ class LocalAgentArtifactFlowTest extends TestCase
     public function test_upload_content_stores_the_file_and_marks_the_artifact_available(): void
     {
         [$agent, $project] = $this->mappedAgentAndProject();
-        $content = str_repeat('artifact-bytes-', 100);
+        $content = $this->buildZipBytes(['index.php' => str_repeat('artifact-bytes-', 100)]);
         $checksum = hash('sha256', $content);
         $commitHash = str_repeat('b', 40);
 
@@ -187,7 +210,7 @@ class LocalAgentArtifactFlowTest extends TestCase
         config(['deployment.artifact_retention_count_per_project' => 2]);
 
         foreach (range(1, 3) as $i) {
-            $content = "artifact-{$i}";
+            $content = $this->buildZipBytes(['index.php' => "artifact-{$i}"]);
             $checksum = hash('sha256', $content);
             $commitHash = str_repeat((string) $i, 40);
 

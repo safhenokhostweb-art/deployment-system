@@ -117,10 +117,13 @@ class LocalAgentJobController extends Controller
             'error_message' => 'nullable|string|max:2000',
             // Root-cause fix: lets the agent tell the Hub its own command
             // exceeded a configured timeout (see GitManager/CommitManager/
-            // PushManager on the agent side) — a distinct, self-reported
-            // outcome from a plain failure, and from the Hub-inferred
-            // `abandoned` deployments:recover-stale produces.
-            'failure_code' => 'nullable|string|in:process_timeout',
+            // PushManager on the agent side), or that the full local
+            // build+artifact pipeline (LocalBuildRunner/ArtifactBuilder/
+            // ArtifactUploader) failed at a specific, identifiable stage —
+            // distinct, self-reported outcomes from a plain failure, and
+            // from the Hub-inferred `abandoned` deployments:recover-stale
+            // produces.
+            'failure_code' => 'nullable|string|in:' . implode(',', PublishJob::AGENT_REPORTABLE_FAILURE_CODES),
         ]);
 
         if ($validated['status'] === 'failed') {

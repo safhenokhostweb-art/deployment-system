@@ -48,6 +48,8 @@ require __DIR__ . '/lib/ProjectConfigResolver.php';
 require __DIR__ . '/lib/ProjectConfigSyncScheduler.php';
 require __DIR__ . '/lib/ArtifactBuilder.php';
 require __DIR__ . '/lib/ArtifactUploader.php';
+require __DIR__ . '/lib/LocalBuildFailedException.php';
+require __DIR__ . '/lib/LocalBuildRunner.php';
 
 use LocalAgent\ArtifactBuilder;
 use LocalAgent\ArtifactUploader;
@@ -57,6 +59,7 @@ use LocalAgent\GitCommandException;
 use LocalAgent\GitManager;
 use LocalAgent\IgnoreRules;
 use LocalAgent\JobMaxRuntimeExceededException;
+use LocalAgent\LocalBuildRunner;
 use LocalAgent\Logger;
 use LocalAgent\LogTail;
 use LocalAgent\ProjectConfigCache;
@@ -74,7 +77,7 @@ use LocalAgent\Security;
  * Hub side for why this never triggers an automatic download). Bump
  * when agent.php or lib/* changes in a way that matters operationally.
  */
-const LOCAL_AGENT_VERSION = '1.3.0';
+const LOCAL_AGENT_VERSION = '1.4.0';
 
 $configPath = __DIR__ . '/config.php';
 
@@ -123,11 +126,14 @@ $git = new GitManager(
 $commits = new CommitManager($git);
 $pushes = new PushManager($git);
 $safety = new SafetyChecker();
-// Root-cause fix (customer-site direct-GitHub-dependency removal): built
-// right after a successful publish (see pollAndExecutePublish()) so the
-// production Server Agent can download this exact commit from the Hub
-// instead of ever fetching from GitHub.
-$artifactUploader = new ArtifactUploader(new ArtifactBuilder($git), $client, $logger);
+// Root-cause fix (production has no access to repo.packagist.org,
+// api.github.com, or the npm registry): built right after a successful
+// publish (see pollAndExecutePublish()) — LocalBuildRunner runs
+// composer/npm HERE (where they work), ArtifactBuilder assembles a
+// complete, runtime-ready artifact, and the production Server Agent
+// downloads the result instead of ever needing dependency/build tools
+// or external registry access at all.
+$artifactUploader = new ArtifactUploader(new LocalBuildRunner($git), new ArtifactBuilder($git), $client, $logger);
 $jobMaxRuntimeSeconds = (int) ($config['job_max_runtime_seconds'] ?? 600);
 
 // Project config is downloaded from the Hub (single source of truth) and
@@ -325,20 +331,30 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
             $output = $pushes->push($repositoryPath, $remoteName, $branch, $onTick);
             $commitHash = $git->lastCommitHash($repositoryPath);
 
-            // Root-cause fix (customer-site direct-GitHub-dependency
-            // removal): best-effort and never fails the publish itself —
-            // the push already succeeded independently of whether an
-            // artifact could be built/uploaded. A failure here just means
-            // the eventual Deployment falls back to the legacy git-based
-            // pipeline on the production server (which is exactly
-            // today's status quo for a project not yet using this path),
-            // so it's surfaced in this job's own output, not as a
-            // separate failure state.
+            // Root-cause fix (production has no access to
+            // repo.packagist.org, api.github.com, or the npm registry):
+            // the push to GitHub already succeeded at this point, but the
+            // publish itself is now only reported `succeeded` once the
+            // full local build + artifact pipeline (composer/npm,
+            // archive+assembly, upload) has ALSO succeeded — production
+            // depends entirely on that artifact existing now that it can
+            // never run composer/npm itself, so a broken build here is a
+            // genuine publish failure, not a side note.
             $artifactResult = $artifactUploader->buildAndUpload($projectKey, $repositoryPath, $commitHash, $branch, $onTick);
-            $output .= "\n[artifact] " . ($artifactResult['succeeded'] ? 'uploaded: ' : 'FAILED: ') . $artifactResult['message'];
+
             if (!$artifactResult['succeeded']) {
-                $logger->warn("Job {$job['id']}: artifact upload failed: {$artifactResult['message']}");
+                $logger->error("Job {$job['id']}: publish failed at the artifact stage [{$artifactResult['failureCode']}]: {$artifactResult['message']}");
+                $client->request('POST', $reportPath, [
+                    'status' => 'failed',
+                    'error_message' => $artifactResult['message'],
+                    'failure_code' => $artifactResult['failureCode'],
+                    'output' => $output . "\n[artifact] FAILED: " . $artifactResult['message'],
+                ]);
+
+                return;
             }
+
+            $output .= "\n[artifact] uploaded: " . $artifactResult['message'];
 
             $client->request('POST', $reportPath, ['status' => 'succeeded', 'commit_hash' => $commitHash, 'output' => $output]);
             $logger->info("Job {$job['id']}: published as {$commitHash}");

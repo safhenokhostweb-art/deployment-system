@@ -40,6 +40,35 @@ class PublishJob extends Model
     public const FAILURE_CODE_AGENT_RESTARTED = 'agent_restarted';
     public const FAILURE_CODE_LATE_CALLBACK_REJECTED = 'late_callback_rejected';
 
+    /**
+     * Root-cause fix (full local build + artifact pipeline): a publish is
+     * only ever reported `succeeded` once the local composer/npm build,
+     * the artifact archive, and its upload to the Hub have ALL
+     * succeeded — see local-agent/lib/LocalBuildRunner.php and
+     * ArtifactBuilder/ArtifactUploader. A project with neither
+     * composer.json nor package.json never reaches the composer/npm
+     * codes below (both stages are skipped entirely, not "succeeded").
+     */
+    public const FAILURE_CODE_LOCAL_COMPOSER_FAILED = 'local_composer_failed';
+    public const FAILURE_CODE_LOCAL_NPM_INSTALL_FAILED = 'local_npm_install_failed';
+    public const FAILURE_CODE_LOCAL_ASSET_BUILD_FAILED = 'local_asset_build_failed';
+    public const FAILURE_CODE_ARTIFACT_BUILD_FAILED = 'artifact_build_failed';
+    public const FAILURE_CODE_ARTIFACT_UPLOAD_FAILED = 'artifact_upload_failed';
+    public const FAILURE_CODE_ARTIFACT_MISSING_VENDOR = 'artifact_missing_vendor';
+    public const FAILURE_CODE_ARTIFACT_MISSING_BUILD = 'artifact_missing_build';
+
+    /** @var array<int, string> every value the Local Agent may report via report()'s failure_code field. */
+    public const AGENT_REPORTABLE_FAILURE_CODES = [
+        self::FAILURE_CODE_PROCESS_TIMEOUT,
+        self::FAILURE_CODE_LOCAL_COMPOSER_FAILED,
+        self::FAILURE_CODE_LOCAL_NPM_INSTALL_FAILED,
+        self::FAILURE_CODE_LOCAL_ASSET_BUILD_FAILED,
+        self::FAILURE_CODE_ARTIFACT_BUILD_FAILED,
+        self::FAILURE_CODE_ARTIFACT_UPLOAD_FAILED,
+        self::FAILURE_CODE_ARTIFACT_MISSING_VENDOR,
+        self::FAILURE_CODE_ARTIFACT_MISSING_BUILD,
+    ];
+
     protected $fillable = [
         'public_id',
         'local_agent_id',

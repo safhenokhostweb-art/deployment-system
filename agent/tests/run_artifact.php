@@ -79,6 +79,13 @@ function buildFixtureZip(string $dir, string $name, string $marker): array
     $zip->open($zipPath, ZipArchive::CREATE);
     $zip->addFromString('index.php', "<?php\n// {$marker}\n");
     $zip->addFromString('app/Kernel.php', "<?php\n// fixture kernel\n");
+    // vendor/ and public/build/ are already baked into a real artifact by
+    // the Local Agent (see local-agent's ArtifactBuilder) — every entry
+    // here is tagged with $marker so a test can prove which release's
+    // build output actually ended up active, never a stale one preserved
+    // from whatever the previous release happened to have.
+    $zip->addFromString('vendor/autoload.php', "<?php\n// vendor from {$marker}\n");
+    $zip->addFromString('public/build/manifest.json', json_encode(['from' => $marker]));
     $zip->close();
 
     return ['path' => $zipPath, 'checksum' => hash_file('sha256', $zipPath), 'size' => filesize($zipPath)];
@@ -94,15 +101,19 @@ function startFakeHub(): array
     file_put_contents($manifestPath, json_encode([]));
     $router = __DIR__ . '/fixtures/fake_hub_artifact_download_server.php';
 
-    $descriptorSpec = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+    // Root-cause fix (the exact class of bug already documented in
+    // Executor.php/GitManager.php elsewhere in this codebase): `php -S`
+    // logs a line to its own stdout/stderr per request; piped and never
+    // drained, the OS pipe buffer can fill and block the server's next
+    // write, silently freezing it. A file redirect can never block.
+    $serverLogPath = tempnam(sys_get_temp_dir(), 'fake-hub-server-stdio-');
+    $descriptorSpec = [1 => ['file', $serverLogPath, 'w'], 2 => ['file', $serverLogPath, 'w']];
     $env = array_merge(getenv() ?: [], ['ARTIFACT_MANIFEST_PATH' => $manifestPath]);
     $process = proc_open([PHP_BINARY, '-S', "127.0.0.1:{$port}", $router], $descriptorSpec, $pipes, __DIR__, $env);
 
     if (!is_resource($process)) {
         throw new \RuntimeException('Could not start fake Hub server.');
     }
-    stream_set_blocking($pipes[1], false);
-    stream_set_blocking($pipes[2], false);
 
     $deadline = microtime(true) + 5;
     while (microtime(true) < $deadline) {
@@ -110,7 +121,7 @@ function startFakeHub(): array
         if ($conn !== false) {
             fclose($conn);
 
-            return ['process' => $process, 'port' => $port, 'manifestPath' => $manifestPath];
+            return ['process' => $process, 'port' => $port, 'manifestPath' => $manifestPath, 'serverLogPath' => $serverLogPath];
         }
         usleep(100000);
     }
@@ -123,6 +134,7 @@ function stopFakeHub(array $hub): void
     proc_terminate($hub['process']);
     proc_close($hub['process']);
     @unlink($hub['manifestPath']);
+    @unlink($hub['serverLogPath']);
 }
 
 function registerManifestEntry(string $manifestPath, string $publicId, string $file, int $status = 200): void
@@ -186,6 +198,14 @@ check('second deploy succeeds', $resultB['status'] === 'succeeded', $failures, $
 check('second deploy has the new release content', str_contains((string) @file_get_contents("{$workingDirectory}/index.php"), 'release B'), $failures, $passCount);
 check('.env survived the swap', trim((string) @file_get_contents("{$workingDirectory}/.env")) === 'DB_PASSWORD=must-survive', $failures, $passCount);
 check('storage/app/upload.txt survived the swap', trim((string) @file_get_contents("{$workingDirectory}/storage/app/upload.txt")) === 'user-uploaded-file', $failures, $passCount);
+
+// vendor/ and public/build/ are NOT in the preserve-paths list passed to
+// deploy() above (only .env/storage are) — they must come exclusively
+// from the new artifact (release B), never carried over from release A.
+$vendorContent = (string) @file_get_contents("{$workingDirectory}/vendor/autoload.php");
+$manifestContent = (string) @file_get_contents("{$workingDirectory}/public/build/manifest.json");
+check('vendor/ comes from the NEW artifact, not preserved from the previous release', str_contains($vendorContent, 'release B') && !str_contains($vendorContent, 'release A'), $failures, $passCount);
+check('public/build/ comes from the NEW artifact, not preserved from the previous release', str_contains($manifestContent, 'release B') && !str_contains($manifestContent, 'release A'), $failures, $passCount);
 
 $backups = glob("{$workspace}/site.backup-*");
 check('the previous release was renamed aside as a backup, not deleted', count($backups) === 1, $failures, $passCount);

@@ -100,8 +100,18 @@ class ArtifactService
      * its actual sha256 doesn't match what phase one recorded — that
      * checksum was itself authenticated via a proper signed request, so
      * this is a genuine tamper/corruption check, not a redundant one.
+     * Also independently re-validates the zip's own contents (defense in
+     * depth against an outdated or misbehaving Local Agent binary that
+     * skipped ArtifactBuilder's equivalent local checks — the same
+     * "don't rely on a single enforcement point" principle
+     * ServiceAllowlist already applies agent-side): a project whose zip
+     * contains ANY vendor/ entry must contain vendor/autoload.php; ANY
+     * public/build/ entry must come with public/build/manifest.json. A
+     * project with neither directory in its zip at all (never ran
+     * composer/npm) is unaffected — this only fires for a build that
+     * demonstrably started but produced an incomplete result.
      *
-     * @throws \RuntimeException on checksum mismatch
+     * @throws ArtifactValidationException on checksum mismatch or a failed content validation
      */
     public function finalizeUpload(Artifact $artifact, string $rawBytes, int $retentionCount): Artifact
     {
@@ -111,21 +121,19 @@ class ArtifactService
         $actualChecksum = hash('sha256', $rawBytes);
 
         if ($actualChecksum !== $artifact->checksum_sha256) {
-            $artifact->update(['status' => Artifact::STATUS_FAILED, 'failure_message' => "Checksum mismatch: expected {$artifact->checksum_sha256}, received {$actualChecksum}."]);
-
-            AuditLogEntry::record(
-                actorType: AuditLogEntry::ACTOR_AGENT,
-                actorIdentifier: $artifact->uploaded_by,
-                action: 'artifact.checksum_mismatch_rejected',
-                subjectType: Artifact::class,
-                subjectId: $artifact->id,
-                metadata: ['expected_checksum' => $artifact->checksum_sha256, 'actual_checksum' => $actualChecksum],
-            );
-
-            throw new \RuntimeException("Uploaded artifact checksum mismatch: expected {$artifact->checksum_sha256}, received {$actualChecksum}.");
+            $this->rejectUpload($artifact, 'checksum_mismatch', "Checksum mismatch: expected {$artifact->checksum_sha256}, received {$actualChecksum}.", [
+                'expected_checksum' => $artifact->checksum_sha256,
+                'actual_checksum' => $actualChecksum,
+            ]);
         }
 
         Storage::disk('artifacts')->put($artifact->disk_path, $rawBytes);
+
+        $contentIssue = $this->validateArchiveContents($artifact);
+        if ($contentIssue !== null) {
+            Storage::disk('artifacts')->delete($artifact->disk_path);
+            $this->rejectUpload($artifact, $contentIssue['reason'], $contentIssue['message'], []);
+        }
 
         $artifact->update(['status' => Artifact::STATUS_AVAILABLE, 'size_bytes' => strlen($rawBytes)]);
 
@@ -141,6 +149,80 @@ class ArtifactService
         $this->cleanupOldArtifacts($artifact->project, $retentionCount);
 
         return $artifact->refresh();
+    }
+
+    /**
+     * @return array{reason: string, message: string}|null null if the archive looks structurally sound
+     */
+    private function validateArchiveContents(Artifact $artifact): ?array
+    {
+        $path = Storage::disk('artifacts')->path($artifact->disk_path);
+
+        $zip = new \ZipArchive();
+        if ($zip->open($path) !== true) {
+            return ['reason' => 'corrupt_zip', 'message' => 'The uploaded artifact could not be opened as a zip archive.'];
+        }
+
+        if ($zip->numFiles === 0) {
+            $zip->close();
+
+            return ['reason' => 'empty_archive', 'message' => 'The uploaded artifact archive is empty.'];
+        }
+
+        $hasVendorEntry = false;
+        $hasAutoload = false;
+        $hasBuildEntry = false;
+        $hasManifest = false;
+
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $name = $zip->getNameIndex($i);
+            if ($name === false) {
+                continue;
+            }
+            if (str_starts_with($name, 'vendor/')) {
+                $hasVendorEntry = true;
+                if ($name === 'vendor/autoload.php') {
+                    $hasAutoload = true;
+                }
+            }
+            if (str_starts_with($name, 'public/build/')) {
+                $hasBuildEntry = true;
+                if ($name === 'public/build/manifest.json') {
+                    $hasManifest = true;
+                }
+            }
+        }
+        $zip->close();
+
+        if ($hasVendorEntry && !$hasAutoload) {
+            return ['reason' => 'missing_vendor', 'message' => 'The uploaded artifact has a vendor/ directory but no vendor/autoload.php.'];
+        }
+
+        if ($hasBuildEntry && !$hasManifest) {
+            return ['reason' => 'missing_build', 'message' => 'The uploaded artifact has a public/build/ directory but no public/build/manifest.json.'];
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string, mixed> $metadata
+     * @throws ArtifactValidationException always — this method never returns
+     */
+    private function rejectUpload(Artifact $artifact, string $reason, string $message, array $metadata): void
+    {
+        $artifact->update(['status' => Artifact::STATUS_FAILED, 'failure_message' => $message]);
+
+        AuditLogEntry::record(
+            actorType: AuditLogEntry::ACTOR_AGENT,
+            actorIdentifier: $artifact->uploaded_by,
+            action: 'artifact.upload_rejected',
+            subjectType: Artifact::class,
+            subjectId: $artifact->id,
+            metadata: ['reason' => $reason] + $metadata,
+        );
+
+        throw new ArtifactValidationException($reason, $message);
     }
 
     public function findMatching(Project $project, string $commitHash): ?Artifact

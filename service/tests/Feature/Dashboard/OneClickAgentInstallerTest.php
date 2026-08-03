@@ -308,11 +308,11 @@ class OneClickAgentInstallerTest extends TestCase
 
         $this->assertNotEmpty($matches, 'Expected to find embedded source file blocks in the generated script.');
         // agent/lib/ content count moves whenever a new lib/*.php file is
-        // added (most recently ArtifactManager.php, for the customer-site
-        // direct-GitHub-dependency removal work) — this count is a
-        // derived fact about the directory's contents, not a value worth
-        // freezing in place.
-        $this->assertCount(15, $matches, 'Expected agent.php + 14 lib/*.php files to be embedded.');
+        // added (most recently PipelineExecutor.php, extracted out of
+        // agent.php's own pollAndExecute() for testability) — this count
+        // is a derived fact about the directory's contents, not a value
+        // worth freezing in place.
+        $this->assertCount(16, $matches, 'Expected agent.php + 15 lib/*.php files to be embedded.');
 
         foreach ($matches as $match) {
             [, $relativePath, , $heredocBody, $expectedChecksum] = $match;

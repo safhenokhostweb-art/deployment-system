@@ -199,15 +199,19 @@ function startFakeHub(): array
     $router = __DIR__ . '/fixtures/fake_hub_server.php';
 
     $phpBinary = PHP_BINARY;
-    $descriptorSpec = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+    // Root-cause fix (the exact class of bug already documented in
+    // Executor.php/GitManager.php elsewhere in this codebase): `php -S`
+    // logs a line to its own stdout/stderr per request; piped and never
+    // drained, the OS pipe buffer can fill and block the server's next
+    // write, silently freezing it. A file redirect can never block.
+    $serverLogPath = tempnam(sys_get_temp_dir(), 'fake-hub-server-stdio-');
+    $descriptorSpec = [1 => ['file', $serverLogPath, 'w'], 2 => ['file', $serverLogPath, 'w']];
     $env = array_merge(getenv() ?: [], ['FAKE_HUB_LOG' => $logPath]);
     $process = proc_open([$phpBinary, '-S', "127.0.0.1:{$port}", $router], $descriptorSpec, $pipes, __DIR__, $env);
 
     if (!is_resource($process)) {
         throw new \RuntimeException('Could not start fake Hub server.');
     }
-    stream_set_blocking($pipes[1], false);
-    stream_set_blocking($pipes[2], false);
 
     $deadline = microtime(true) + 5;
     while (microtime(true) < $deadline) {
@@ -215,7 +219,7 @@ function startFakeHub(): array
         if ($conn !== false) {
             fclose($conn);
 
-            return ['process' => $process, 'port' => $port, 'logPath' => $logPath];
+            return ['process' => $process, 'port' => $port, 'logPath' => $logPath, 'serverLogPath' => $serverLogPath];
         }
         usleep(100000);
     }
@@ -228,6 +232,7 @@ function stopFakeHub(array $hub): void
     proc_terminate($hub['process']);
     proc_close($hub['process']);
     @unlink($hub['logPath']);
+    @unlink($hub['serverLogPath']);
 }
 
 /** @return array<int, array{method: string, path: string, body: array<string, mixed>|null}> */

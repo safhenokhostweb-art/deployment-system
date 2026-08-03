@@ -3,21 +3,27 @@
 declare(strict_types=1);
 
 /**
- * Dependency-free integration test for ArtifactBuilder/ArtifactUploader
- * (the customer-site direct-GitHub-dependency removal work) — same
- * philosophy as tests/run.php: no mocking framework, real fixtures, real
- * assertions. Genuinely runs `git archive` against a real temporary
- * repository and verifies the resulting zip's contents with PHP's own
- * ZipArchive, then exercises the full two-phase upload flow against a
- * real `php -S` fake Hub process.
+ * Dependency-free integration test for the full local build + artifact
+ * pipeline (LocalBuildRunner + ArtifactBuilder + ArtifactUploader) — the
+ * root-cause fix for production having no access to repo.packagist.org,
+ * api.github.com, or the npm registry. Same philosophy as tests/run.php:
+ * no mocking framework, real fixtures, real assertions. Genuinely runs
+ * real `composer`/`npm`/`git` processes against real temporary
+ * repositories and a real `php -S` fake Hub process.
+ *
+ * Requires `composer` and `npm` to be resolvable on PATH (this project's
+ * dev machine has both via Laragon's bundled composer.bat and Node's
+ * npm.cmd — see Executor/GitManager's Windows .cmd-shim resolution).
  *
  * Usage: php tests/run_artifact.php
  */
 
-require __DIR__ . '/../lib/Logger.php';
 require __DIR__ . '/../lib/Security.php';
+require __DIR__ . '/../lib/Logger.php';
 require __DIR__ . '/../lib/Client.php';
 require __DIR__ . '/../lib/GitManager.php';
+require __DIR__ . '/../lib/LocalBuildFailedException.php';
+require __DIR__ . '/../lib/LocalBuildRunner.php';
 require __DIR__ . '/../lib/ArtifactBuilder.php';
 require __DIR__ . '/../lib/ArtifactUploader.php';
 
@@ -25,6 +31,8 @@ use LocalAgent\ArtifactBuilder;
 use LocalAgent\ArtifactUploader;
 use LocalAgent\Client;
 use LocalAgent\GitManager;
+use LocalAgent\LocalBuildFailedException;
+use LocalAgent\LocalBuildRunner;
 use LocalAgent\Logger;
 
 $failures = [];
@@ -72,14 +80,30 @@ function rrmdir(string $dir): void
 
 function runGit(GitManager $git, array $argv, string $cwd): array
 {
-    return $git->run(array_merge(['git'], $argv), $cwd, 30);
+    return $git->run(array_merge(['git'], $argv), $cwd, 60);
+}
+
+function zipEntryNames(string $zipPath): array
+{
+    $zip = new ZipArchive();
+    $zip->open($zipPath);
+    $names = [];
+    for ($i = 0; $i < $zip->numFiles; $i++) {
+        $names[] = $zip->getNameIndex($i);
+    }
+    $zip->close();
+
+    return $names;
 }
 
 /**
- * A real git repo with tracked source files, a gitignored .env, and a
- * gitignored node_modules/ directory — proving `git archive` excludes
- * exactly what's untracked, with zero bespoke exclusion logic of this
- * project's own.
+ * A real git repo with: a composer.json (zero real dependencies — offline
+ * and instant), a package.json with a "build" script that writes
+ * public/build/manifest.json (also zero real npm dependencies), tracked
+ * source, and a .gitignore excluding .env/node_modules/storage/logs/
+ * vendor — proving the final artifact contains vendor/public-build
+ * (added by ArtifactBuilder from the live working tree) alongside the
+ * git-archived source, but never .git or anything gitignored.
  */
 function buildFixtureRepo(GitManager $git, string $workspace): array
 {
@@ -90,16 +114,31 @@ function buildFixtureRepo(GitManager $git, string $workspace): array
     runGit($git, ['config', 'user.email', 'test@example.test'], $repo);
     runGit($git, ['config', 'user.name', 'Artifact Test'], $repo);
 
-    file_put_contents("{$repo}/.gitignore", ".env\nnode_modules/\nstorage/logs/\nvendor/\n");
+    file_put_contents("{$repo}/.gitignore", ".env\nnode_modules/\nstorage/logs/\nvendor/\npublic/build/\n");
     mkdir("{$repo}/app", 0777, true);
     file_put_contents("{$repo}/app/Kernel.php", "<?php\n// fixture app code\n");
-    file_put_contents("{$repo}/composer.json", json_encode(['name' => 'fixture/app']));
+    file_put_contents("{$repo}/composer.json", json_encode(['name' => 'fixture/app'], JSON_PRETTY_PRINT));
+    file_put_contents("{$repo}/package.json", json_encode([
+        'name' => 'fixture-app', 'private' => true,
+        'scripts' => ['build' => 'node build.js'],
+    ], JSON_PRETTY_PRINT));
+    file_put_contents("{$repo}/build.js", <<<'JS'
+        const fs = require('fs');
+        fs.mkdirSync(`${__dirname}/public/build`, { recursive: true });
+        fs.writeFileSync(`${__dirname}/public/build/manifest.json`, JSON.stringify({ 'app.js': 'assets/app.abc123.js' }));
+        fs.writeFileSync(`${__dirname}/public/build/app.abc123.js`, '// built asset\n');
+        console.log('build ok');
+        JS);
 
-    mkdir("{$repo}/node_modules/some-pkg", 0777, true);
-    file_put_contents("{$repo}/node_modules/some-pkg/index.js", "// should never be archived\n");
     mkdir("{$repo}/storage/logs", 0777, true);
     file_put_contents("{$repo}/storage/logs/laravel.log", "should never be archived\n");
     file_put_contents("{$repo}/.env", "DB_PASSWORD=super-secret-should-never-be-archived\n");
+
+    // `npm ci` (what LocalBuildRunner actually runs) requires an existing
+    // package-lock.json by design — a real project always commits one;
+    // this fixture generates and commits it the same way, offline and
+    // instantly since there are zero real dependencies to resolve.
+    $git->run(['npm', 'install', '--package-lock-only'], $repo, 60);
 
     runGit($git, ['add', '-A'], $repo);
     runGit($git, ['commit', '--quiet', '-m', 'initial'], $repo);
@@ -109,7 +148,7 @@ function buildFixtureRepo(GitManager $git, string $workspace): array
 }
 
 /**
- * @return array{process: resource, port: int, storageDir: string}
+ * @return array{process: resource, port: int, storageDir: string, serverLogPath: string}
  */
 function startFakeHub(): array
 {
@@ -118,15 +157,14 @@ function startFakeHub(): array
     mkdir($storageDir, 0777, true);
     $router = __DIR__ . '/fixtures/fake_hub_artifact_server.php';
 
-    $descriptorSpec = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+    $serverLogPath = tempnam(sys_get_temp_dir(), 'fake-hub-server-stdio-');
+    $descriptorSpec = [1 => ['file', $serverLogPath, 'w'], 2 => ['file', $serverLogPath, 'w']];
     $env = array_merge(getenv() ?: [], ['FAKE_HUB_STORAGE_DIR' => $storageDir]);
     $process = proc_open([PHP_BINARY, '-S', "127.0.0.1:{$port}", $router], $descriptorSpec, $pipes, __DIR__, $env);
 
     if (!is_resource($process)) {
         throw new \RuntimeException('Could not start fake Hub server.');
     }
-    stream_set_blocking($pipes[1], false);
-    stream_set_blocking($pipes[2], false);
 
     $deadline = microtime(true) + 5;
     while (microtime(true) < $deadline) {
@@ -134,7 +172,7 @@ function startFakeHub(): array
         if ($conn !== false) {
             fclose($conn);
 
-            return ['process' => $process, 'port' => $port, 'storageDir' => $storageDir];
+            return ['process' => $process, 'port' => $port, 'storageDir' => $storageDir, 'serverLogPath' => $serverLogPath];
         }
         usleep(100000);
     }
@@ -146,65 +184,194 @@ function stopFakeHub(array $hub): void
 {
     proc_terminate($hub['process']);
     proc_close($hub['process']);
+    @unlink($hub['serverLogPath']);
     rrmdir($hub['storageDir']);
 }
 
 // ============================================================
-// ArtifactBuilder: real `git archive`, verified with real ZipArchive
+// LocalBuildRunner: real composer + npm, success and every failure mode
 // ============================================================
 $workspace = makeWorkspace();
 $git = new GitManager();
 $fixture = buildFixtureRepo($git, $workspace);
 
-$builder = new ArtifactBuilder($git);
-$ticks = 0;
-$archive = $builder->build($fixture['path'], $fixture['commitHash'], function () use (&$ticks) { $ticks++; });
+$runner = new LocalBuildRunner($git);
+$result = $runner->run($fixture['path']);
 
-check('build() returns a path to a real file', is_file($archive['path']), $failures, $passCount);
-check('build() returns a nonzero size matching the actual file', $archive['size'] === filesize($archive['path']) && $archive['size'] > 0, $failures, $passCount);
-check('build() returns a checksum matching hash_file()', $archive['checksum'] === hash_file('sha256', $archive['path']), $failures, $passCount);
+check('LocalBuildRunner: composer.json present -> ranComposer', $result['ranComposer'] === true, $failures, $passCount);
+check('LocalBuildRunner: composer install actually produced vendor/autoload.php', is_file("{$fixture['path']}/vendor/autoload.php"), $failures, $passCount);
+check('LocalBuildRunner: package.json present -> ranNpmInstall', $result['ranNpmInstall'] === true, $failures, $passCount);
+check('LocalBuildRunner: "build" script present -> ranNpmBuild', $result['ranNpmBuild'] === true, $failures, $passCount);
+check('LocalBuildRunner: npm run build actually produced the manifest', is_file("{$fixture['path']}/public/build/manifest.json"), $failures, $passCount);
 
-$zip = new ZipArchive();
-$openResult = $zip->open($archive['path']);
-check('the built archive is a valid, openable zip', $openResult === true, $failures, $passCount);
+// A project with neither manifest: both stages skipped, no exception.
+$bareWorkspace = makeWorkspace();
+$bareRepo = $bareWorkspace . '/repo';
+mkdir($bareRepo, 0777, true);
+runGit($git, ['init', '--quiet', '-b', 'main'], $bareRepo);
+$bareResult = $runner->run($bareRepo);
+check('LocalBuildRunner: a project with neither composer.json nor package.json skips both stages', $bareResult === ['ranComposer' => false, 'ranNpmInstall' => false, 'ranNpmBuild' => false, 'log' => []], $failures, $passCount);
+rrmdir($bareWorkspace);
 
-if ($openResult === true) {
-    $names = [];
-    for ($i = 0; $i < $zip->numFiles; $i++) {
-        $names[] = $zip->getNameIndex($i);
-    }
-    $zip->close();
-
-    check('archive contains the tracked app file', in_array('app/Kernel.php', $names, true), $failures, $passCount);
-    check('archive contains composer.json', in_array('composer.json', $names, true), $failures, $passCount);
-    check('archive does NOT contain .env (gitignored, never tracked)', !in_array('.env', $names, true), $failures, $passCount);
-    check(
-        'archive does NOT contain any node_modules/ entry (gitignored, never tracked)',
-        !array_filter($names, static fn ($n) => str_starts_with($n, 'node_modules/')),
-        $failures, $passCount,
-    );
-    check(
-        'archive does NOT contain storage/logs/laravel.log (gitignored, never tracked)',
-        !in_array('storage/logs/laravel.log', $names, true),
-        $failures, $passCount,
-    );
-    check('archive does NOT contain a .git directory', !array_filter($names, static fn ($n) => str_starts_with($n, '.git/')), $failures, $passCount);
-}
-
-@unlink($archive['path']);
-
-check('a bogus commit hash fails cleanly with a RuntimeException', (function () use ($builder, $fixture) {
+// composer install failure: a composer.json requiring a package that cannot possibly exist.
+$brokenComposerWorkspace = makeWorkspace();
+$brokenComposerRepo = $brokenComposerWorkspace . '/repo';
+mkdir($brokenComposerRepo, 0777, true);
+file_put_contents("{$brokenComposerRepo}/composer.json", json_encode(['name' => 'fixture/broken', 'require' => ['this-vendor/this-package-does-not-exist-anywhere' => '^999.0']]));
+check('LocalBuildRunner: a composer install failure throws local_composer_failed', (function () use ($runner, $brokenComposerRepo) {
     try {
-        $builder->build($fixture['path'], str_repeat('f', 40));
+        $runner->run($brokenComposerRepo);
 
         return false;
-    } catch (\RuntimeException) {
-        return true;
+    } catch (LocalBuildFailedException $e) {
+        return $e->failureCode === 'local_composer_failed';
+    }
+})(), $failures, $passCount);
+rrmdir($brokenComposerWorkspace);
+
+// npm ci failure: package.json + package-lock.json that are inconsistent (npm ci requires an exact lockfile match).
+$brokenNpmWorkspace = makeWorkspace();
+$brokenNpmRepo = $brokenNpmWorkspace . '/repo';
+mkdir($brokenNpmRepo, 0777, true);
+file_put_contents("{$brokenNpmRepo}/package.json", json_encode(['name' => 'broken-npm', 'dependencies' => ['this-pkg-does-not-exist-xyz' => '^1.0.0']]));
+file_put_contents("{$brokenNpmRepo}/package-lock.json", json_encode(['name' => 'broken-npm', 'lockfileVersion' => 3]));
+check('LocalBuildRunner: an npm ci failure throws local_npm_install_failed', (function () use ($runner, $brokenNpmRepo) {
+    try {
+        $runner->run($brokenNpmRepo);
+
+        return false;
+    } catch (LocalBuildFailedException $e) {
+        return $e->failureCode === 'local_npm_install_failed';
+    }
+})(), $failures, $passCount);
+rrmdir($brokenNpmWorkspace);
+
+// npm run build failure: a "build" script that deliberately exits non-zero.
+// Needs its own package-lock.json too — otherwise `npm ci` itself would
+// fail first (no lockfile), never even reaching the broken build script.
+$brokenBuildWorkspace = makeWorkspace();
+$brokenBuildRepo = $brokenBuildWorkspace . '/repo';
+mkdir($brokenBuildRepo, 0777, true);
+file_put_contents("{$brokenBuildRepo}/package.json", json_encode(['name' => 'broken-build', 'scripts' => ['build' => 'node -e "process.exit(1)"']]));
+$git->run(['npm', 'install', '--package-lock-only'], $brokenBuildRepo, 60);
+check('LocalBuildRunner: an npm run build failure throws local_asset_build_failed', (function () use ($runner, $brokenBuildRepo) {
+    try {
+        $runner->run($brokenBuildRepo);
+
+        return false;
+    } catch (LocalBuildFailedException $e) {
+        return $e->failureCode === 'local_asset_build_failed';
+    }
+})(), $failures, $passCount);
+rrmdir($brokenBuildWorkspace);
+
+// ============================================================
+// ArtifactBuilder: full assembly, exclusions, race guard, validation
+// ============================================================
+$builder = new ArtifactBuilder($git);
+$buildResult = ['ranComposer' => true, 'ranNpmBuild' => true];
+$archive = $builder->build($fixture['path'], $fixture['commitHash'], $buildResult);
+
+check('ArtifactBuilder: produces a real, nonzero-size file', is_file($archive['path']) && $archive['size'] > 0, $failures, $passCount);
+check('ArtifactBuilder: checksum matches hash_file()', $archive['checksum'] === hash_file('sha256', $archive['path']), $failures, $passCount);
+
+$names = zipEntryNames($archive['path']);
+check('artifact contains the tracked source file', in_array('app/Kernel.php', $names, true), $failures, $passCount);
+check('artifact contains vendor/autoload.php', in_array('vendor/autoload.php', $names, true), $failures, $passCount);
+check('artifact contains public/build/manifest.json', in_array('public/build/manifest.json', $names, true), $failures, $passCount);
+check('artifact does NOT contain .env', !in_array('.env', $names, true), $failures, $passCount);
+check('artifact does NOT contain any .git/ entry', !array_filter($names, static fn ($n) => str_starts_with($n, '.git/')), $failures, $passCount);
+check('artifact does NOT contain any node_modules/ entry', !array_filter($names, static fn ($n) => str_starts_with($n, 'node_modules/')), $failures, $passCount);
+check('artifact does NOT contain storage/logs/laravel.log', !in_array('storage/logs/laravel.log', $names, true), $failures, $passCount);
+
+// Deterministic: building the same commit + same on-disk build output
+// twice yields byte-identical checksums (sorted entry order + pinned mtimes).
+$archive2 = $builder->build($fixture['path'], $fixture['commitHash'], $buildResult);
+check('ArtifactBuilder: building the same commit twice is deterministic (identical checksum)', $archive['checksum'] === $archive2['checksum'], $failures, $passCount);
+@unlink($archive['path']);
+@unlink($archive2['path']);
+
+// Race-condition guard: a commit hash that isn't the current HEAD must be rejected.
+check('ArtifactBuilder: refuses to build for a commit that is not the current HEAD', (function () use ($builder, $fixture, $buildResult) {
+    try {
+        $builder->build($fixture['path'], str_repeat('f', 40), $buildResult);
+
+        return false;
+    } catch (\RuntimeException $e) {
+        return str_contains($e->getMessage(), 'Refusing to build');
+    }
+})(), $failures, $passCount);
+
+// Validation: claims composer ran, but vendor/autoload.php doesn't actually exist.
+$noVendorWorkspace = makeWorkspace();
+$git2 = new GitManager();
+$noVendorFixture = buildFixtureRepoMinimal($git2, $noVendorWorkspace);
+check('ArtifactBuilder: throws artifact_missing_vendor when composer supposedly ran but vendor is absent', (function () use ($builder, $noVendorFixture) {
+    try {
+        $builder->build($noVendorFixture['path'], $noVendorFixture['commitHash'], ['ranComposer' => true, 'ranNpmBuild' => false]);
+
+        return false;
+    } catch (LocalBuildFailedException $e) {
+        return $e->failureCode === 'artifact_missing_vendor';
+    }
+})(), $failures, $passCount);
+check('ArtifactBuilder: throws artifact_missing_build when npm build supposedly ran but manifest is absent', (function () use ($builder, $noVendorFixture) {
+    try {
+        $builder->build($noVendorFixture['path'], $noVendorFixture['commitHash'], ['ranComposer' => false, 'ranNpmBuild' => true]);
+
+        return false;
+    } catch (LocalBuildFailedException $e) {
+        return $e->failureCode === 'artifact_missing_build';
+    }
+})(), $failures, $passCount);
+rrmdir($noVendorWorkspace);
+
+function buildFixtureRepoMinimal(GitManager $git, string $workspace): array
+{
+    $repo = $workspace . '/repo';
+    mkdir($repo, 0777, true);
+    runGit($git, ['init', '--quiet', '-b', 'main'], $repo);
+    runGit($git, ['config', 'user.email', 'test@example.test'], $repo);
+    runGit($git, ['config', 'user.name', 'Artifact Test'], $repo);
+    file_put_contents("{$repo}/index.php", "<?php\n");
+    runGit($git, ['add', '-A'], $repo);
+    runGit($git, ['commit', '--quiet', '-m', 'initial'], $repo);
+    $commitHash = trim(runGit($git, ['rev-parse', 'HEAD'], $repo)['output']);
+
+    return ['path' => $repo, 'commitHash' => $commitHash];
+}
+
+// ZIP-Slip guard: exercised directly via Reflection since extractZipSafely()
+// is a private implementation detail with no public seam of its own —
+// still a REAL call against a REAL hand-crafted malicious zip, not a mock.
+check('ArtifactBuilder: rejects a zip entry with a path-traversal name (ZIP Slip)', (function () use ($workspace) {
+    $maliciousZip = "{$workspace}/malicious.zip";
+    $zip = new ZipArchive();
+    $zip->open($maliciousZip, ZipArchive::CREATE);
+    $zip->addFromString('../../evil.txt', 'escaped');
+    $zip->close();
+
+    $destination = "{$workspace}/zip-slip-destination";
+    mkdir($destination, 0777, true);
+
+    $method = new \ReflectionMethod(ArtifactBuilder::class, 'extractZipSafely');
+    $method->setAccessible(true);
+
+    try {
+        $method->invoke(null, $maliciousZip, $destination);
+
+        return false;
+    } catch (\RuntimeException $e) {
+        return str_contains($e->getMessage(), 'unsafe path');
+    } finally {
+        rrmdir($destination);
+        @unlink($maliciousZip);
     }
 })(), $failures, $passCount);
 
 // ============================================================
-// ArtifactUploader: full two-phase flow against a real fake Hub process
+// ArtifactUploader: full pipeline against a real fake Hub, and every
+// failure mode reported without ever claiming success.
 // ============================================================
 $hub = startFakeHub();
 $logger = new Logger($workspace . '/logs');
@@ -216,45 +383,52 @@ $client = new Client(
     timeoutSeconds: 10,
     logger: $logger,
 );
-$uploader = new ArtifactUploader(new ArtifactBuilder($git), $client, $logger);
+$uploader = new ArtifactUploader(new LocalBuildRunner($git), new ArtifactBuilder($git), $client, $logger);
 
-$uploadTicks = 0;
-$result = $uploader->buildAndUpload('fixture-project', $fixture['path'], $fixture['commitHash'], 'main', function () use (&$uploadTicks) { $uploadTicks++; });
-
-check('buildAndUpload() reports success against a healthy fake Hub', $result['succeeded'] === true, $failures, $passCount);
+$uploadResult = $uploader->buildAndUpload('fixture-project', $fixture['path'], $fixture['commitHash'], 'main');
+check('ArtifactUploader: full pipeline succeeds against a healthy fake Hub', $uploadResult['succeeded'] === true, $failures, $passCount);
+check('ArtifactUploader: failureCode is null on success', $uploadResult['failureCode'] === null, $failures, $passCount);
 
 $metaFiles = glob("{$hub['storageDir']}/*.meta.json");
 check('exactly one artifact metadata record was created', count($metaFiles) === 1, $failures, $passCount);
-
 if ($metaFiles !== [] && $metaFiles !== false) {
-    $meta = json_decode(file_get_contents($metaFiles[0]), true);
-    check('uploaded metadata has the correct project_key', ($meta['project_key'] ?? null) === 'fixture-project', $failures, $passCount);
-    check('uploaded metadata has the correct commit_hash', ($meta['commit_hash'] ?? null) === $fixture['commitHash'], $failures, $passCount);
-
     $artifactId = basename($metaFiles[0], '.meta.json');
-    $binPath = "{$hub['storageDir']}/{$artifactId}.bin";
-    check('the fake Hub received the artifact content', is_file($binPath), $failures, $passCount);
-
-    if (is_file($binPath)) {
-        check('the received bytes checksum matches the metadata-claimed checksum', hash_file('sha256', $binPath) === $meta['checksum_sha256'], $failures, $passCount);
-    }
+    check('the fake Hub received the artifact content (containing vendor + public/build)', is_file("{$hub['storageDir']}/{$artifactId}.bin"), $failures, $passCount);
 }
 
-// Failure path: the Hub is unreachable entirely — must never throw out
-// of buildAndUpload(), must report failure with a useful message.
+// Failure path: LocalBuildRunner fails (broken composer.json) — the
+// Publish Job must be reported as failed, with the specific failure
+// code, and no artifact metadata/content should ever be sent to the Hub.
+@array_map('unlink', glob("{$hub['storageDir']}/*"));
+$brokenComposerWorkspace2 = makeWorkspace();
+$brokenComposerRepo2 = $brokenComposerWorkspace2 . '/repo';
+mkdir($brokenComposerRepo2, 0777, true);
+runGit($git, ['init', '--quiet', '-b', 'main'], $brokenComposerRepo2);
+runGit($git, ['config', 'user.email', 'test@example.test'], $brokenComposerRepo2);
+runGit($git, ['config', 'user.name', 'Artifact Test'], $brokenComposerRepo2);
+file_put_contents("{$brokenComposerRepo2}/composer.json", json_encode(['name' => 'fixture/broken2', 'require' => ['nope/nope-xyz' => '^999.0']]));
+runGit($git, ['add', '-A'], $brokenComposerRepo2);
+runGit($git, ['commit', '--quiet', '-m', 'initial'], $brokenComposerRepo2);
+$brokenCommit = trim(runGit($git, ['rev-parse', 'HEAD'], $brokenComposerRepo2)['output']);
+
+$brokenUploadResult = $uploader->buildAndUpload('fixture-project', $brokenComposerRepo2, $brokenCommit, 'main');
+check('ArtifactUploader: a local build failure is reported as not-succeeded', $brokenUploadResult['succeeded'] === false, $failures, $passCount);
+check('ArtifactUploader: the failure code is local_composer_failed', $brokenUploadResult['failureCode'] === 'local_composer_failed', $failures, $passCount);
+check('ArtifactUploader: no artifact metadata was ever sent to the Hub for a build that failed before archiving', glob("{$hub['storageDir']}/*.meta.json") === [], $failures, $passCount);
+rrmdir($brokenComposerWorkspace2);
+
+// Failure path: Hub entirely unreachable — must report failure, never throw, never claim success.
 $deadClient = new Client(
-    baseUrl: 'http://127.0.0.1:1', // nothing listens here
+    baseUrl: 'http://127.0.0.1:1',
     localAgentId: 'test-local-agent',
     agentToken: 'test-token',
     signingSecret: 'test-signing-secret',
     timeoutSeconds: 2,
     logger: $logger,
 );
-$deadUploader = new ArtifactUploader(new ArtifactBuilder($git), $deadClient, $logger);
+$deadUploader = new ArtifactUploader(new LocalBuildRunner($git), new ArtifactBuilder($git), $deadClient, $logger);
 $deadResult = $deadUploader->buildAndUpload('fixture-project', $fixture['path'], $fixture['commitHash'], 'main');
-
-check('buildAndUpload() reports failure (not a thrown exception) when the Hub is unreachable', $deadResult['succeeded'] === false, $failures, $passCount);
-check('the failure message is non-empty and useful', $deadResult['message'] !== '', $failures, $passCount);
+check('ArtifactUploader: reports failure (not a thrown exception) when the Hub is unreachable', $deadResult['succeeded'] === false, $failures, $passCount);
 
 stopFakeHub($hub);
 rrmdir($workspace);

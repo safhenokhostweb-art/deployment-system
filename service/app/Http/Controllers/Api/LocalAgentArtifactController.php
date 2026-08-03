@@ -8,6 +8,7 @@ use App\Models\LocalAgent;
 use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use App\Services\Deployment\Artifact\ArtifactService;
+use App\Services\Deployment\Artifact\ArtifactValidationException;
 use Illuminate\Http\Request;
 
 /**
@@ -71,8 +72,12 @@ class LocalAgentArtifactController extends Controller
                 rawBytes: $request->getContent(),
                 retentionCount: (int) config('deployment.artifact_retention_count_per_project'),
             );
-        } catch (\RuntimeException $e) {
-            abort(422, $e->getMessage());
+        } catch (ArtifactValidationException $e) {
+            // `reason` lets ArtifactUploader (Local Agent side) report a
+            // specific PublishJob::FAILURE_CODE_ARTIFACT_MISSING_VENDOR/
+            // _BUILD instead of a generic "upload failed" when that's
+            // what actually happened.
+            return response()->json(['message' => $e->getMessage(), 'reason' => $e->reason], 422);
         }
 
         return response()->json(['status' => 'ok', 'artifact_id' => $finalized->public_id, 'size_bytes' => $finalized->size_bytes]);

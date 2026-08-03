@@ -156,7 +156,7 @@ final class GitManager
         // indefinitely rather than failing fast with a real error.
         $env = self::buildEnv();
 
-        $process = proc_open($command, $descriptorSpec, $pipes, $cwd, $env);
+        $process = proc_open(self::resolveArgv0ForWindows($command), $descriptorSpec, $pipes, $cwd, $env);
 
         if (!is_resource($process)) {
             @unlink($stdoutPath);
@@ -235,6 +235,63 @@ final class GitManager
     {
         @unlink($stdoutPath);
         @unlink($stderrPath);
+    }
+
+    /**
+     * Root-cause fix (full local build + artifact pipeline): this class's
+     * run() is now also used to invoke `composer`/`npm` (see
+     * LocalBuildRunner), not just `git`. On Windows, PHP's array-form
+     * proc_open() calls CreateProcess() directly — bypassing the
+     * PATHEXT/.cmd-shim resolution a real shell would do — so
+     * `proc_open(['npm', ...])` fails with "CreateProcess failed, error
+     * code: 2" even though `npm`/`composer` work fine from any terminal
+     * (both are .cmd shims on a typical Windows install). Confirmed by
+     * direct testing on this project's own Windows dev machine, and
+     * already fixed the identical way in the production Server Agent's
+     * Executor.php. `git` itself is a real .exe and was never affected —
+     * this is a pure no-op for every git command already running through
+     * here, and a pure no-op on Linux/macOS (the real production
+     * targets) regardless of which executable is invoked.
+     *
+     * @param array<int, string> $argv
+     * @return array<int, string>
+     */
+    private static function resolveArgv0ForWindows(array $argv): array
+    {
+        if (PHP_OS_FAMILY !== 'Windows' || $argv === []) {
+            return $argv;
+        }
+
+        $program = $argv[0];
+        if ($program === '' || preg_match('/\.(exe|cmd|bat|com)$/i', $program) === 1 || is_file($program)) {
+            return $argv;
+        }
+
+        foreach (['.exe', '.cmd', '.bat'] as $extension) {
+            $resolved = self::findOnPath($program . $extension);
+            if ($resolved !== null) {
+                $argv[0] = $resolved;
+
+                return $argv;
+            }
+        }
+
+        return $argv;
+    }
+
+    private static function findOnPath(string $filename): ?string
+    {
+        foreach (explode(PATH_SEPARATOR, getenv('PATH') ?: '') as $dir) {
+            if ($dir === '') {
+                continue;
+            }
+            $candidate = rtrim($dir, '\\/') . DIRECTORY_SEPARATOR . $filename;
+            if (is_file($candidate)) {
+                return $candidate;
+            }
+        }
+
+        return null;
     }
 
     /**
