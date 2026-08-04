@@ -175,7 +175,7 @@ check('custom composer_command: the fake script really ran (vendor/autoload.php 
 $invocation1 = json_decode((string) @file_get_contents("{$repo1}/composer-invocation.json"), true);
 check(
     'custom composer_command: array_merge appended the exact install flags onto the configured base command',
-    $invocation1 === ['install', '--no-dev', '--prefer-dist', '--optimize-autoloader', '--no-interaction'],
+    $invocation1 === ['install', '--no-dev', '--prefer-dist', '--optimize-autoloader', '--no-interaction', '--no-scripts'],
     $failures,
     $passCount,
 );

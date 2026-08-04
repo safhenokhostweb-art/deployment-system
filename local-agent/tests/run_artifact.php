@@ -3,13 +3,20 @@
 declare(strict_types=1);
 
 /**
- * Dependency-free integration test for the full local build + artifact
- * pipeline (LocalBuildRunner + ArtifactBuilder + ArtifactUploader) — the
- * root-cause fix for production having no access to repo.packagist.org,
- * api.github.com, or the npm registry. Same philosophy as tests/run.php:
- * no mocking framework, real fixtures, real assertions. Genuinely runs
- * real `composer`/`npm`/`git` processes against real temporary
- * repositories and a real `php -S` fake Hub process.
+ * Dependency-free integration test for LocalBuildRunner + ArtifactBuilder
+ * + ArtifactUploader — the root-cause fix for production having no access
+ * to repo.packagist.org, api.github.com, or the npm registry. Same
+ * philosophy as tests/run.php: no mocking framework, real fixtures, real
+ * assertions. Genuinely runs real `composer`/`npm`/`git` processes.
+ *
+ * Root-cause fix (v1.4.2, isolated build workspace): ArtifactBuilder no
+ * longer does `git archive`/staging assembly itself (that moved to
+ * WorkspaceSourcePreparer — see run_workspace_isolation.php for its own
+ * dedicated tests) — it now just validates + zips an ALREADY-PREPARED
+ * directory. This file's ArtifactBuilder/ArtifactUploader sections were
+ * rewritten for that new, narrower API; the LocalBuildRunner section is
+ * unchanged (that class was never coupled to workspaces at all — it just
+ * runs composer/npm in whatever directory it's given).
  *
  * Requires `composer` and `npm` to be resolvable on PATH (this project's
  * dev machine has both via Laragon's bundled composer.bat and Node's
@@ -24,16 +31,22 @@ require __DIR__ . '/../lib/Client.php';
 require __DIR__ . '/../lib/GitManager.php';
 require __DIR__ . '/../lib/LocalBuildFailedException.php';
 require __DIR__ . '/../lib/LocalBuildRunner.php';
+require __DIR__ . '/../lib/SafeFilesystem.php';
+require __DIR__ . '/../lib/BuildWorkspace.php';
+require __DIR__ . '/../lib/WorkspaceSourcePreparer.php';
 require __DIR__ . '/../lib/ArtifactBuilder.php';
 require __DIR__ . '/../lib/ArtifactUploader.php';
 
 use LocalAgent\ArtifactBuilder;
 use LocalAgent\ArtifactUploader;
+use LocalAgent\BuildWorkspace;
 use LocalAgent\Client;
 use LocalAgent\GitManager;
 use LocalAgent\LocalBuildFailedException;
 use LocalAgent\LocalBuildRunner;
 use LocalAgent\Logger;
+use LocalAgent\SafeFilesystem;
+use LocalAgent\WorkspaceSourcePreparer;
 
 $failures = [];
 $passCount = 0;
@@ -101,9 +114,7 @@ function zipEntryNames(string $zipPath): array
  * and instant), a package.json with a "build" script that writes
  * public/build/manifest.json (also zero real npm dependencies), tracked
  * source, and a .gitignore excluding .env/node_modules/storage/logs/
- * vendor — proving the final artifact contains vendor/public-build
- * (added by ArtifactBuilder from the live working tree) alongside the
- * git-archived source, but never .git or anything gitignored.
+ * vendor.
  */
 function buildFixtureRepo(GitManager $git, string $workspace): array
 {
@@ -140,6 +151,21 @@ function buildFixtureRepo(GitManager $git, string $workspace): array
     // instantly since there are zero real dependencies to resolve.
     $git->run(['npm', 'install', '--package-lock-only'], $repo, 60);
 
+    runGit($git, ['add', '-A'], $repo);
+    runGit($git, ['commit', '--quiet', '-m', 'initial'], $repo);
+    $commitHash = trim(runGit($git, ['rev-parse', 'HEAD'], $repo)['output']);
+
+    return ['path' => $repo, 'commitHash' => $commitHash];
+}
+
+function buildFixtureRepoMinimal(GitManager $git, string $workspace): array
+{
+    $repo = $workspace . '/repo';
+    mkdir($repo, 0777, true);
+    runGit($git, ['init', '--quiet', '-b', 'main'], $repo);
+    runGit($git, ['config', 'user.email', 'test@example.test'], $repo);
+    runGit($git, ['config', 'user.name', 'Artifact Test'], $repo);
+    file_put_contents("{$repo}/index.php", "<?php\n");
     runGit($git, ['add', '-A'], $repo);
     runGit($git, ['commit', '--quiet', '-m', 'initial'], $repo);
     $commitHash = trim(runGit($git, ['rev-parse', 'HEAD'], $repo)['output']);
@@ -189,7 +215,10 @@ function stopFakeHub(array $hub): void
 }
 
 // ============================================================
-// LocalBuildRunner: real composer + npm, success and every failure mode
+// LocalBuildRunner: real composer + npm, success and every failure mode.
+// Unaffected by the isolated-workspace refactor — this class only ever
+// runs composer/npm in whatever directory it's given, with no coupling
+// to where that directory came from.
 // ============================================================
 $workspace = makeWorkspace();
 $git = new GitManager();
@@ -247,8 +276,6 @@ check('LocalBuildRunner: an npm ci failure throws local_npm_install_failed', (fu
 rrmdir($brokenNpmWorkspace);
 
 // npm run build failure: a "build" script that deliberately exits non-zero.
-// Needs its own package-lock.json too — otherwise `npm ci` itself would
-// fail first (no lockfile), never even reaching the broken build script.
 $brokenBuildWorkspace = makeWorkspace();
 $brokenBuildRepo = $brokenBuildWorkspace . '/repo';
 mkdir($brokenBuildRepo, 0777, true);
@@ -266,85 +293,11 @@ check('LocalBuildRunner: an npm run build failure throws local_asset_build_faile
 rrmdir($brokenBuildWorkspace);
 
 // ============================================================
-// ArtifactBuilder: full assembly, exclusions, race guard, validation
+// SafeFilesystem: ZIP-Slip guard (moved here from ArtifactBuilder in the
+// v1.4.2 isolated-workspace refactor — now a shared primitive used by
+// both WorkspaceSourcePreparer and (indirectly) ArtifactBuilder).
 // ============================================================
-$builder = new ArtifactBuilder($git);
-$buildResult = ['ranComposer' => true, 'ranNpmBuild' => true];
-$archive = $builder->build($fixture['path'], $fixture['commitHash'], $buildResult);
-
-check('ArtifactBuilder: produces a real, nonzero-size file', is_file($archive['path']) && $archive['size'] > 0, $failures, $passCount);
-check('ArtifactBuilder: checksum matches hash_file()', $archive['checksum'] === hash_file('sha256', $archive['path']), $failures, $passCount);
-
-$names = zipEntryNames($archive['path']);
-check('artifact contains the tracked source file', in_array('app/Kernel.php', $names, true), $failures, $passCount);
-check('artifact contains vendor/autoload.php', in_array('vendor/autoload.php', $names, true), $failures, $passCount);
-check('artifact contains public/build/manifest.json', in_array('public/build/manifest.json', $names, true), $failures, $passCount);
-check('artifact does NOT contain .env', !in_array('.env', $names, true), $failures, $passCount);
-check('artifact does NOT contain any .git/ entry', !array_filter($names, static fn ($n) => str_starts_with($n, '.git/')), $failures, $passCount);
-check('artifact does NOT contain any node_modules/ entry', !array_filter($names, static fn ($n) => str_starts_with($n, 'node_modules/')), $failures, $passCount);
-check('artifact does NOT contain storage/logs/laravel.log', !in_array('storage/logs/laravel.log', $names, true), $failures, $passCount);
-
-// Deterministic: building the same commit + same on-disk build output
-// twice yields byte-identical checksums (sorted entry order + pinned mtimes).
-$archive2 = $builder->build($fixture['path'], $fixture['commitHash'], $buildResult);
-check('ArtifactBuilder: building the same commit twice is deterministic (identical checksum)', $archive['checksum'] === $archive2['checksum'], $failures, $passCount);
-@unlink($archive['path']);
-@unlink($archive2['path']);
-
-// Race-condition guard: a commit hash that isn't the current HEAD must be rejected.
-check('ArtifactBuilder: refuses to build for a commit that is not the current HEAD', (function () use ($builder, $fixture, $buildResult) {
-    try {
-        $builder->build($fixture['path'], str_repeat('f', 40), $buildResult);
-
-        return false;
-    } catch (\RuntimeException $e) {
-        return str_contains($e->getMessage(), 'Refusing to build');
-    }
-})(), $failures, $passCount);
-
-// Validation: claims composer ran, but vendor/autoload.php doesn't actually exist.
-$noVendorWorkspace = makeWorkspace();
-$git2 = new GitManager();
-$noVendorFixture = buildFixtureRepoMinimal($git2, $noVendorWorkspace);
-check('ArtifactBuilder: throws artifact_missing_vendor when composer supposedly ran but vendor is absent', (function () use ($builder, $noVendorFixture) {
-    try {
-        $builder->build($noVendorFixture['path'], $noVendorFixture['commitHash'], ['ranComposer' => true, 'ranNpmBuild' => false]);
-
-        return false;
-    } catch (LocalBuildFailedException $e) {
-        return $e->failureCode === 'artifact_missing_vendor';
-    }
-})(), $failures, $passCount);
-check('ArtifactBuilder: throws artifact_missing_build when npm build supposedly ran but manifest is absent', (function () use ($builder, $noVendorFixture) {
-    try {
-        $builder->build($noVendorFixture['path'], $noVendorFixture['commitHash'], ['ranComposer' => false, 'ranNpmBuild' => true]);
-
-        return false;
-    } catch (LocalBuildFailedException $e) {
-        return $e->failureCode === 'artifact_missing_build';
-    }
-})(), $failures, $passCount);
-rrmdir($noVendorWorkspace);
-
-function buildFixtureRepoMinimal(GitManager $git, string $workspace): array
-{
-    $repo = $workspace . '/repo';
-    mkdir($repo, 0777, true);
-    runGit($git, ['init', '--quiet', '-b', 'main'], $repo);
-    runGit($git, ['config', 'user.email', 'test@example.test'], $repo);
-    runGit($git, ['config', 'user.name', 'Artifact Test'], $repo);
-    file_put_contents("{$repo}/index.php", "<?php\n");
-    runGit($git, ['add', '-A'], $repo);
-    runGit($git, ['commit', '--quiet', '-m', 'initial'], $repo);
-    $commitHash = trim(runGit($git, ['rev-parse', 'HEAD'], $repo)['output']);
-
-    return ['path' => $repo, 'commitHash' => $commitHash];
-}
-
-// ZIP-Slip guard: exercised directly via Reflection since extractZipSafely()
-// is a private implementation detail with no public seam of its own —
-// still a REAL call against a REAL hand-crafted malicious zip, not a mock.
-check('ArtifactBuilder: rejects a zip entry with a path-traversal name (ZIP Slip)', (function () use ($workspace) {
+check('SafeFilesystem: rejects a zip entry with a path-traversal name (ZIP Slip)', (function () use ($workspace) {
     $maliciousZip = "{$workspace}/malicious.zip";
     $zip = new ZipArchive();
     $zip->open($maliciousZip, ZipArchive::CREATE);
@@ -354,11 +307,8 @@ check('ArtifactBuilder: rejects a zip entry with a path-traversal name (ZIP Slip
     $destination = "{$workspace}/zip-slip-destination";
     mkdir($destination, 0777, true);
 
-    $method = new \ReflectionMethod(ArtifactBuilder::class, 'extractZipSafely');
-    $method->setAccessible(true);
-
     try {
-        $method->invoke(null, $maliciousZip, $destination);
+        SafeFilesystem::extractZipSafely($maliciousZip, $destination);
 
         return false;
     } catch (\RuntimeException $e) {
@@ -370,9 +320,67 @@ check('ArtifactBuilder: rejects a zip entry with a path-traversal name (ZIP Slip
 })(), $failures, $passCount);
 
 // ============================================================
-// ArtifactUploader: full pipeline against a real fake Hub, and every
-// failure mode reported without ever claiming success.
+// ArtifactBuilder: now takes an ALREADY-PREPARED project directory (see
+// run_workspace_isolation.php for how WorkspaceSourcePreparer populates
+// one for real) — validate + zip only, no more archive/copy-in logic.
 // ============================================================
+$builder = new ArtifactBuilder();
+$buildResult = ['ranComposer' => true, 'ranNpmBuild' => true];
+// $fixture['path'] doubles as "an already-prepared project dir" here —
+// composer/npm above already ran directly inside it, so it already has
+// tracked source + vendor + public/build, exactly what a real prepared
+// workspace project dir would look like.
+$commitTimestamp = time();
+$archive = $builder->build($fixture['path'], $workspace, $commitTimestamp, $buildResult);
+
+check('ArtifactBuilder: produces a real, nonzero-size file', is_file($archive['path']) && $archive['size'] > 0, $failures, $passCount);
+check('ArtifactBuilder: checksum matches hash_file()', $archive['checksum'] === hash_file('sha256', $archive['path']), $failures, $passCount);
+
+$names = zipEntryNames($archive['path']);
+check('artifact contains the tracked source file', in_array('app/Kernel.php', $names, true), $failures, $passCount);
+check('artifact contains vendor/autoload.php', in_array('vendor/autoload.php', $names, true), $failures, $passCount);
+check('artifact contains public/build/manifest.json', in_array('public/build/manifest.json', $names, true), $failures, $passCount);
+check('artifact does NOT contain any node_modules/ entry (excluded even though it now sits right next to vendor/)', !array_filter($names, static fn ($n) => str_starts_with($n, 'node_modules/')), $failures, $passCount);
+check('artifact does NOT contain any .git/ entry', !array_filter($names, static fn ($n) => str_starts_with($n, '.git/')), $failures, $passCount);
+
+// Deterministic: building the same prepared directory twice yields byte-identical checksums.
+$archive2 = $builder->build($fixture['path'], $workspace, $commitTimestamp, $buildResult);
+check('ArtifactBuilder: building the same prepared directory twice is deterministic (identical checksum)', $archive['checksum'] === $archive2['checksum'], $failures, $passCount);
+@unlink($archive['path']);
+@unlink($archive2['path']);
+
+// Validation: claims composer ran, but vendor/autoload.php doesn't actually exist.
+$noVendorWorkspace = makeWorkspace();
+$git2 = new GitManager();
+$noVendorFixture = buildFixtureRepoMinimal($git2, $noVendorWorkspace);
+check('ArtifactBuilder: throws artifact_missing_vendor when composer supposedly ran but vendor is absent', (function () use ($builder, $noVendorFixture, $noVendorWorkspace) {
+    try {
+        $builder->build($noVendorFixture['path'], $noVendorWorkspace, time(), ['ranComposer' => true, 'ranNpmBuild' => false]);
+
+        return false;
+    } catch (LocalBuildFailedException $e) {
+        return $e->failureCode === 'artifact_missing_vendor';
+    }
+})(), $failures, $passCount);
+check('ArtifactBuilder: throws artifact_missing_build when npm build supposedly ran but manifest is absent', (function () use ($builder, $noVendorFixture, $noVendorWorkspace) {
+    try {
+        $builder->build($noVendorFixture['path'], $noVendorWorkspace, time(), ['ranComposer' => false, 'ranNpmBuild' => true]);
+
+        return false;
+    } catch (LocalBuildFailedException $e) {
+        return $e->failureCode === 'artifact_missing_build';
+    }
+})(), $failures, $passCount);
+rrmdir($noVendorWorkspace);
+
+// ============================================================
+// ArtifactUploader: full pipeline (workspace create -> prepare -> build
+// -> npm/composer -> zip -> upload -> cleanup) against a real fake Hub.
+// Root-cause fix (v1.4.2): the fixture repo used as $fixture['path'] is
+// now what a REAL developer working tree is — the whole point of this
+// section is proving the pipeline NEVER writes into it.
+// ============================================================
+$uploaderWorkspaceBase = makeWorkspace() . '/agent-workspaces';
 $hub = startFakeHub();
 $logger = new Logger($workspace . '/logs');
 $client = new Client(
@@ -383,11 +391,27 @@ $client = new Client(
     timeoutSeconds: 10,
     logger: $logger,
 );
-$uploader = new ArtifactUploader(new LocalBuildRunner($git), new ArtifactBuilder($git), $client, $logger);
+$uploader = new ArtifactUploader(new LocalBuildRunner($git), new WorkspaceSourcePreparer($git), new ArtifactBuilder(), $client, $logger, $uploaderWorkspaceBase);
 
-$uploadResult = $uploader->buildAndUpload('fixture-project', $fixture['path'], $fixture['commitHash'], 'main');
+// A fresh repo for this section — the earlier $fixture['path'] already
+// has vendor/node_modules from the direct LocalBuildRunner test above,
+// which would make "the real working tree was never touched" trivially
+// true for the wrong reason (there was nothing there to touch in the
+// first place after this point). This one starts clean.
+$uploadWorkspace = makeWorkspace();
+$uploadFixture = buildFixtureRepo($git, $uploadWorkspace);
+// A real repo's working tree at this exact commit has none of these yet
+// — confirmed BEFORE the pipeline runs, so "still absent after" actually
+// proves something.
+check('sanity: the fresh fixture repo has no vendor/ yet', !is_dir("{$uploadFixture['path']}/vendor"), $failures, $passCount);
+check('sanity: the fresh fixture repo has no node_modules/ yet', !is_dir("{$uploadFixture['path']}/node_modules"), $failures, $passCount);
+
+$uploadResult = $uploader->buildAndUpload('fixture-project', $uploadFixture['path'], $uploadFixture['commitHash'], 'main', 'job-1');
 check('ArtifactUploader: full pipeline succeeds against a healthy fake Hub', $uploadResult['succeeded'] === true, $failures, $passCount);
 check('ArtifactUploader: failureCode is null on success', $uploadResult['failureCode'] === null, $failures, $passCount);
+check('ArtifactUploader: the REAL working tree still has no vendor/ after a successful build (composer ran in an isolated workspace, not here)', !is_dir("{$uploadFixture['path']}/vendor"), $failures, $passCount);
+check('ArtifactUploader: the REAL working tree still has no node_modules/ after a successful build', !is_dir("{$uploadFixture['path']}/node_modules"), $failures, $passCount);
+check('ArtifactUploader: the isolated workspace for this job was cleaned up afterwards', !is_dir("{$uploaderWorkspaceBase}/fixture-project/job-1"), $failures, $passCount);
 
 $metaFiles = glob("{$hub['storageDir']}/*.meta.json");
 check('exactly one artifact metadata record was created', count($metaFiles) === 1, $failures, $passCount);
@@ -411,10 +435,11 @@ runGit($git, ['add', '-A'], $brokenComposerRepo2);
 runGit($git, ['commit', '--quiet', '-m', 'initial'], $brokenComposerRepo2);
 $brokenCommit = trim(runGit($git, ['rev-parse', 'HEAD'], $brokenComposerRepo2)['output']);
 
-$brokenUploadResult = $uploader->buildAndUpload('fixture-project', $brokenComposerRepo2, $brokenCommit, 'main');
+$brokenUploadResult = $uploader->buildAndUpload('fixture-project', $brokenComposerRepo2, $brokenCommit, 'main', 'job-2');
 check('ArtifactUploader: a local build failure is reported as not-succeeded', $brokenUploadResult['succeeded'] === false, $failures, $passCount);
 check('ArtifactUploader: the failure code is local_composer_failed', $brokenUploadResult['failureCode'] === 'local_composer_failed', $failures, $passCount);
 check('ArtifactUploader: no artifact metadata was ever sent to the Hub for a build that failed before archiving', glob("{$hub['storageDir']}/*.meta.json") === [], $failures, $passCount);
+check('ArtifactUploader: the workspace for a FAILED job is also cleaned up (cleanup runs in a finally block)', !is_dir("{$uploaderWorkspaceBase}/fixture-project/job-2"), $failures, $passCount);
 rrmdir($brokenComposerWorkspace2);
 
 // Failure path: Hub entirely unreachable — must report failure, never throw, never claim success.
@@ -426,12 +451,14 @@ $deadClient = new Client(
     timeoutSeconds: 2,
     logger: $logger,
 );
-$deadUploader = new ArtifactUploader(new LocalBuildRunner($git), new ArtifactBuilder($git), $deadClient, $logger);
-$deadResult = $deadUploader->buildAndUpload('fixture-project', $fixture['path'], $fixture['commitHash'], 'main');
+$deadUploader = new ArtifactUploader(new LocalBuildRunner($git), new WorkspaceSourcePreparer($git), new ArtifactBuilder(), $deadClient, $logger, $uploaderWorkspaceBase);
+$deadResult = $deadUploader->buildAndUpload('fixture-project', $uploadFixture['path'], $uploadFixture['commitHash'], 'main', 'job-3');
 check('ArtifactUploader: reports failure (not a thrown exception) when the Hub is unreachable', $deadResult['succeeded'] === false, $failures, $passCount);
 
 stopFakeHub($hub);
 rrmdir($workspace);
+rrmdir($uploadWorkspace);
+rrmdir(dirname($uploaderWorkspaceBase));
 
 echo "\n";
 foreach ($failures as $failure) {

@@ -46,6 +46,9 @@ require __DIR__ . '/lib/InvalidProjectCacheException.php';
 require __DIR__ . '/lib/ProjectConfigCache.php';
 require __DIR__ . '/lib/ProjectConfigResolver.php';
 require __DIR__ . '/lib/ProjectConfigSyncScheduler.php';
+require __DIR__ . '/lib/SafeFilesystem.php';
+require __DIR__ . '/lib/BuildWorkspace.php';
+require __DIR__ . '/lib/WorkspaceSourcePreparer.php';
 require __DIR__ . '/lib/ArtifactBuilder.php';
 require __DIR__ . '/lib/ArtifactUploader.php';
 require __DIR__ . '/lib/LocalBuildFailedException.php';
@@ -69,6 +72,7 @@ use LocalAgent\ShutdownSignal;
 use LocalAgent\PushManager;
 use LocalAgent\SafetyChecker;
 use LocalAgent\Security;
+use LocalAgent\WorkspaceSourcePreparer;
 
 /**
  * Reported on every heartbeat so the Hub can flag a developer machine
@@ -77,7 +81,7 @@ use LocalAgent\Security;
  * Hub side for why this never triggers an automatic download). Bump
  * when agent.php or lib/* changes in a way that matters operationally.
  */
-const LOCAL_AGENT_VERSION = '1.4.1';
+const LOCAL_AGENT_VERSION = '1.4.2';
 
 $configPath = __DIR__ . '/config.php';
 
@@ -142,11 +146,21 @@ $safety = new SafetyChecker();
 $composerCommand = resolveCommandArrayConfig($config, 'composer_command', ['composer']);
 $npmCommand = resolveCommandArrayConfig($config, 'npm_command', ['npm']);
 $phpBinary = resolvePhpBinaryConfig($config);
+// Root-cause fix (v1.4.2): composer install/npm ci now run inside a
+// disposable, isolated workspace under this — NEVER inside any
+// project's own directory — so a file locked by Windows/VS Code/an
+// editor inside the REAL node_modules/vendor can never block a publish;
+// see BuildWorkspace's own docblock for the exact bug this fixes.
+$workspaceBaseDir = str_replace('\\', '/', rtrim((string) ($config['workspace_base_dir'] ?? (sys_get_temp_dir() . '/DeploymentLocalAgent/builds')), '\\/'));
+$workspaceTtlSeconds = (int) ($config['workspace_ttl_seconds'] ?? 86400);
 $artifactUploader = new ArtifactUploader(
     new LocalBuildRunner($git, $composerCommand, $npmCommand, $phpBinary),
-    new ArtifactBuilder($git),
+    new WorkspaceSourcePreparer($git),
+    new ArtifactBuilder(),
     $client,
     $logger,
+    $workspaceBaseDir,
+    $workspaceTtlSeconds,
 );
 $jobMaxRuntimeSeconds = (int) ($config['job_max_runtime_seconds'] ?? 600);
 
@@ -354,7 +368,7 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
             // depends entirely on that artifact existing now that it can
             // never run composer/npm itself, so a broken build here is a
             // genuine publish failure, not a side note.
-            $artifactResult = $artifactUploader->buildAndUpload($projectKey, $repositoryPath, $commitHash, $branch, $onTick);
+            $artifactResult = $artifactUploader->buildAndUpload($projectKey, $repositoryPath, $commitHash, $branch, (string) $job['id'], $onTick);
 
             if (!$artifactResult['succeeded']) {
                 $logger->error("Job {$job['id']}: publish failed at the artifact stage [{$artifactResult['failureCode']}]: {$artifactResult['message']}");

@@ -17,29 +17,48 @@ namespace LocalAgent;
  * never reaches the composer/npm stages at all (LocalBuildRunner skips
  * them silently), so this adds no new failure surface for a project
  * that doesn't need either.
+ *
+ * Root-cause fix (v1.4.2): composer/npm now run inside an isolated
+ * BuildWorkspace, never the developer's real working tree — see
+ * BuildWorkspace's own docblock for the real `npm ci` EPERM bug this
+ * fixes. This class owns the workspace's whole lifecycle: prune stale
+ * leftovers, create, populate (WorkspaceSourcePreparer), build, and —
+ * in a `finally` block, so it runs on every exit path including every
+ * failure branch below — clean up. A cleanup failure is only ever
+ * logged (BuildWorkspace::cleanup() never throws); it can never turn an
+ * otherwise-successful publish into a failed one, or vice versa.
  */
 final class ArtifactUploader
 {
     public function __construct(
         private readonly LocalBuildRunner $buildRunner,
+        private readonly WorkspaceSourcePreparer $sourcePreparer,
         private readonly ArtifactBuilder $builder,
         private readonly Client $client,
         private readonly Logger $logger,
+        private readonly string $workspaceBaseDir,
+        private readonly int $workspaceTtlSeconds = 86400,
     ) {
     }
 
     /**
      * @return array{succeeded: bool, message: string, failureCode: ?string}
      */
-    public function buildAndUpload(string $projectKey, string $repositoryPath, string $commitHash, string $branch, ?callable $onTick = null): array
+    public function buildAndUpload(string $projectKey, string $repositoryPath, string $commitHash, string $branch, string $jobId, ?callable $onTick = null): array
     {
+        BuildWorkspace::pruneStale($this->workspaceBaseDir, $this->workspaceTtlSeconds, $this->logger);
+
+        $workspace = null;
         $archivePath = null;
 
         try {
-            $buildResult = $this->buildRunner->run($repositoryPath, $onTick);
+            $workspace = BuildWorkspace::create($this->workspaceBaseDir, $projectKey, $jobId);
+            $prepared = $this->sourcePreparer->prepare($workspace, $repositoryPath, $commitHash, $onTick);
+
+            $buildResult = $this->buildRunner->run($workspace->projectDir(), $onTick);
             $this->logger->info("Local build for commit {$commitHash}: " . (empty($buildResult['log']) ? 'nothing to build' : implode(' && ', $buildResult['log'])));
 
-            $archive = $this->builder->build($repositoryPath, $commitHash, $buildResult, $onTick);
+            $archive = $this->builder->build($workspace->projectDir(), $workspace->root(), $prepared['commitTimestamp'], $buildResult);
             $archivePath = $archive['path'];
 
             $createResponse = $this->client->request('POST', '/api/local-agent/artifacts', [
@@ -96,6 +115,7 @@ final class ArtifactUploader
 
             return ['succeeded' => false, 'message' => $e->getMessage(), 'failureCode' => 'artifact_build_failed'];
         } finally {
+            $workspace?->cleanup($this->logger);
             if ($archivePath !== null) {
                 @unlink($archivePath);
             }

@@ -43,6 +43,32 @@ namespace LocalAgent;
  * `missing_php_extension` code and the exact php.ini path attached —
  * never silently bypassed (`--ignore-platform-req` is never passed
  * anywhere in this class).
+ *
+ * Root-cause fix (v1.4.2, isolated build workspace): `composer install`
+ * now always passes `--no-scripts`. This was added specifically because
+ * moving the build into an isolated workspace (no `.env`, no real
+ * database, no real credentials — by design, see BuildWorkspace) exposed
+ * that a project's own `post-autoload-dump` script
+ * (`artisan package:discover`, standard in every Laravel project) fully
+ * BOOTS the application, including every registered service provider —
+ * confirmed by direct testing against a real project's exact dependency
+ * tree: this failed first on a missing SQLite database file, and after
+ * that was worked around, failed again on a broadcasting provider
+ * constructing a Pusher client with a null auth key — both purely
+ * because no `.env` exists yet at this point, never because anything
+ * was actually wrong with the build. Chasing each such failure with a
+ * fake/dummy env value is an unbounded, project-specific game of
+ * whack-a-mole. `--no-scripts` sidesteps the entire category: the
+ * package-discovery cache it would have produced
+ * (`bootstrap/cache/packages.php`) is not required for Laravel to run —
+ * `PackageManifest` regenerates it lazily, in-process, the first time
+ * ANY artisan command or request boots the framework and finds that
+ * file missing (standard Laravel behavior, not something this project
+ * has to arrange) — and the very first thing production's own pipeline
+ * runs after activating the new artifact is `artisan migrate --force`,
+ * which will trigger exactly that lazy rebuild using the REAL `.env`
+ * this local build deliberately never has. That's the more correct
+ * place for it to happen anyway.
  */
 final class LocalBuildRunner
 {
@@ -91,7 +117,7 @@ final class LocalBuildRunner
 
             $command = array_merge(
                 $this->resolvedComposerCommand(),
-                ['install', '--no-dev', '--prefer-dist', '--optimize-autoloader', '--no-interaction'],
+                ['install', '--no-dev', '--prefer-dist', '--optimize-autoloader', '--no-interaction', '--no-scripts'],
             );
             $log[] = self::describe($command);
             $result = $this->runner->run($command, $repositoryPath, $this->composerTimeoutSeconds, $onTick);

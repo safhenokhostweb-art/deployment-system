@@ -67,6 +67,20 @@ class PublishJob extends Model
      */
     public const FAILURE_CODE_MISSING_PHP_EXTENSION = 'missing_php_extension';
 
+    /**
+     * Root-cause fix (v1.4.2, isolated build workspace): composer
+     * install/npm ci now run inside a disposable per-job workspace, never
+     * the developer's real working tree (a real `npm ci` EPERM failure —
+     * a Tailwind native binary locked by Windows/an editor — is what a
+     * REAL working-tree build could hit and this isolation prevents
+     * entirely). `local_workspace_cleanup_failed` is deliberately NOT
+     * listed below: a cleanup failure is only ever logged locally
+     * (BuildWorkspace::cleanup() never throws) and must never affect a
+     * Publish Job's actual success/failure — see ArtifactUploader.
+     */
+    public const FAILURE_CODE_LOCAL_WORKSPACE_CREATE_FAILED = 'local_workspace_create_failed';
+    public const FAILURE_CODE_LOCAL_WORKSPACE_PREPARE_FAILED = 'local_workspace_prepare_failed';
+
     /** @var array<int, string> every value the Local Agent may report via report()'s failure_code field. */
     public const AGENT_REPORTABLE_FAILURE_CODES = [
         self::FAILURE_CODE_PROCESS_TIMEOUT,
@@ -78,6 +92,8 @@ class PublishJob extends Model
         self::FAILURE_CODE_ARTIFACT_MISSING_VENDOR,
         self::FAILURE_CODE_ARTIFACT_MISSING_BUILD,
         self::FAILURE_CODE_MISSING_PHP_EXTENSION,
+        self::FAILURE_CODE_LOCAL_WORKSPACE_CREATE_FAILED,
+        self::FAILURE_CODE_LOCAL_WORKSPACE_PREPARE_FAILED,
     ];
 
     protected $fillable = [
