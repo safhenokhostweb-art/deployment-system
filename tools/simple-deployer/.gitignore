@@ -1,0 +1,13 @@
+# Real config with server_host/server_user/ssh_key_path — never commit.
+config.json
+
+# Crash-recovery marker — purely local runtime state, never committed.
+state/*.json
+
+# Local test scratch output, if any test writes here.
+tests/.scratch/
+
+# Per-run launcher logs — local runtime output, never committed (secrets
+# are redacted before writing, but these are still local operational logs).
+logs/
+launcher-startup-error.log

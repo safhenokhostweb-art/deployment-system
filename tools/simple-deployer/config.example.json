@@ -1,0 +1,139 @@
+{
+    "_comment": "Copy this file to config.json (already in .gitignore — NEVER commit config.json). Every value below marked CHANGE_ME was NOT discoverable by auditing the real repositories/docs on this machine and MUST be filled in by a human operator before SimpleDeploy will allow that project to deploy. Every other value (local_path, branch, remote, server_path) was confirmed against the real projects' own git remotes and their own DEPLOY.md/DEPLOY-fa.md/DEPLOYMENT.md documentation — not guessed.",
+    "deployment_service": {
+        "_comment": "Controls pausing the EXISTING Deployment Hub/Local Agent/Server Agent system for the duration of a SimpleDeploy run, so the two systems never run a build/publish/deploy at the same time. This tool never modifies that system's code, database, or config.php — it only temporarily stops/starts it.",
+        "windows_scheduled_tasks": [
+            "DeploymentLocalAgent",
+            "DeploymentLocalAgentWatchdog"
+        ],
+        "windows_process_names": [
+            "php.exe",
+            "node.exe",
+            "npm.exe",
+            "composer.exe"
+        ],
+        "windows_process_commandline_marker": "DeploymentLocalAgent",
+        "linux_service_name": "deployment-agent.service",
+        "linux_service_stop_timeout_seconds": 30,
+        "pause_by_default": true
+    },
+    "ssh": {
+        "_comment": "Applies to every project unless a project overrides it. StrictHostKeyChecking is deliberately NOT configurable to 'no' anywhere in this tool — see README-FA.md.",
+        "connect_timeout_seconds": 10,
+        "known_hosts_path": "%USERPROFILE%\\.ssh\\known_hosts"
+    },
+    "projects": {
+        "customer-site": {
+            "_audit": "local_path/branch/remote confirmed via `git remote -v` + `git branch --show-current` on the real checkout. server_path confirmed via customer-site's own DEPLOY-fa.md (`cd /var/www/customer-site`). Current real production layout is a FLAT working directory updated via `git pull` in place (NOT a releases/current symlink layout yet) — activation_mode is set to the compatible mode to match.",
+            "enabled": true,
+            "local_path": "C:\\laragon\\www\\customer-site",
+            "branch": "main",
+            "remote": "origin",
+            "project_type": "laravel",
+            "build_mode": "artifact",
+            "activation_mode": "working_directory",
+            "server_host": "CHANGE_ME_SERVER_HOST",
+            "server_user": "CHANGE_ME_SERVER_USER",
+            "server_path": "/var/www/customer-site",
+            "ssh_key_path": "CHANGE_ME_SSH_KEY_PATH",
+            "health_check_url": "CHANGE_ME_HEALTH_CHECK_URL",
+            "preserve_paths": [
+                ".env",
+                "storage",
+                "public/storage"
+            ],
+            "retention_count": 3,
+            "run_migrations": true,
+            "database_backup": false,
+            "composer_command": null,
+            "npm_command": null,
+            "php_binary": null,
+            "remote_php_binary": null,
+            "server_port": 22
+        },
+        "saas-platform": {
+            "_audit": "local_path/branch/remote confirmed via `git remote -v` + `git branch --show-current`. server_path confirmed via saas-platform's own DEPLOY-fa.md (`cd /var/www/saas-platform`). Same flat, non-symlink production layout as customer-site.",
+            "enabled": true,
+            "local_path": "C:\\laragon\\www\\saas-platform",
+            "branch": "main",
+            "remote": "origin",
+            "project_type": "laravel",
+            "build_mode": "artifact",
+            "activation_mode": "working_directory",
+            "server_host": "CHANGE_ME_SERVER_HOST",
+            "server_user": "CHANGE_ME_SERVER_USER",
+            "server_path": "/var/www/saas-platform",
+            "ssh_key_path": "CHANGE_ME_SSH_KEY_PATH",
+            "health_check_url": "CHANGE_ME_HEALTH_CHECK_URL",
+            "preserve_paths": [
+                ".env",
+                "storage",
+                "public/storage"
+            ],
+            "retention_count": 3,
+            "run_migrations": true,
+            "database_backup": false,
+            "composer_command": null,
+            "npm_command": null,
+            "php_binary": null,
+            "remote_php_binary": null,
+            "server_port": 22
+        },
+        "deployment-system": {
+            "_audit": "local_path/branch/remote confirmed via `git remote -v` + `git branch --show-current` (this project's own repository — branch is `master`, not `main`). build_mode is DELIBERATELY 'disabled', not 'artifact': this repo is a MONOREPO where the real Laravel app lives in service/ (service/artisan, service/composer.json, service/public/index.php), not at the repo root — but SimpleDeploy's build pipeline (git-archive + composer/npm build + artifact packaging) always operates on local_path's own root, with no 'app subdirectory' concept anywhere in lib/SimpleDeploy.Build.ps1. Enabling build_mode=artifact here would silently package the ENTIRE monorepo (including this very tool's own source and the unrelated Local/Server Agent PHP source) and extract it one directory too deep on the server. server_path is corrected to /var/www/deployment-system/service (the real Laravel app root, confirmed both locally and via deployment-bootstrap/config.example.env's own TARGET_LARAVEL_PATH) for reference, but is inert while build_mode=disabled.",
+            "enabled": true,
+            "local_path": "C:\\laragon\\www\\deployment-system",
+            "branch": "master",
+            "remote": "origin",
+            "project_type": "laravel-monorepo",
+            "build_mode": "disabled",
+            "activation_mode": "working_directory",
+            "server_host": "CHANGE_ME_SERVER_HOST",
+            "server_user": "CHANGE_ME_SERVER_USER",
+            "server_path": "/var/www/deployment-system/service",
+            "ssh_key_path": "CHANGE_ME_SSH_KEY_PATH",
+            "health_check_url": "CHANGE_ME_HEALTH_CHECK_URL",
+            "preserve_paths": [
+                ".env",
+                "storage",
+                "public/storage"
+            ],
+            "retention_count": 3,
+            "run_migrations": true,
+            "database_backup": false,
+            "composer_command": null,
+            "npm_command": null,
+            "php_binary": null,
+            "remote_php_binary": null,
+            "server_port": 22
+        },
+        "sandogh-family-fund": {
+            "_audit": "local_path/branch/remote confirmed via `git remote -v` + `git branch --show-current` at C:\\Users\\Farshad-IT\\Sandogh. server_path confirmed via this project's own DEPLOYMENT.md ('Production is /var/www/sandogh'). IMPORTANT — this project is NOT Laravel: its own DEPLOYMENT.md describes a Node.js/Next.js stack with Prisma migrations and PM2 process supervision (npm ci --omit=dev, prisma:generate, prisma:migrate:deploy, PM2-managed ports 3000/3001) — completely different from the Laravel composer/artisan pipeline this tool's build_mode=artifact implements. Building a correct Node/Prisma/PM2 pipeline was NOT part of this task's specification, so build_mode is deliberately left as 'disabled' rather than guessing one. enabled is left true so `git status`/commit/push still work for this project (still useful on its own), but SimpleDeploy will refuse the build/transfer/activate stages for it until this is deliberately completed by a human.",
+            "enabled": true,
+            "local_path": "C:\\Users\\Farshad-IT\\Sandogh",
+            "branch": "main",
+            "remote": "origin",
+            "project_type": "nodejs",
+            "build_mode": "disabled",
+            "activation_mode": "working_directory",
+            "server_host": "CHANGE_ME_SERVER_HOST",
+            "server_user": "CHANGE_ME_SERVER_USER",
+            "server_path": "/var/www/sandogh",
+            "ssh_key_path": "CHANGE_ME_SSH_KEY_PATH",
+            "health_check_url": "CHANGE_ME_HEALTH_CHECK_URL",
+            "preserve_paths": [
+                ".env",
+                "storage",
+                "public/storage"
+            ],
+            "retention_count": 3,
+            "run_migrations": false,
+            "database_backup": false,
+            "composer_command": null,
+            "npm_command": null,
+            "php_binary": null,
+            "remote_php_binary": null,
+            "server_port": 22
+        }
+    }
+}
