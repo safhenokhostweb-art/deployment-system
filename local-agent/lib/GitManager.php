@@ -32,6 +32,30 @@ namespace LocalAgent;
  * for the running-check and the timeout-deadline check) never touches
  * the pipes at all, so the loop's timing is accurate regardless of
  * whether the child has produced any output.
+ *
+ * Root-cause fix (v1.4.2, npm process-tail on Windows): a SEPARATE audit
+ * (real `esbuild` install, instrumented `proc_open()`/`proc_get_status()`
+ * polling, and a live `Win32_Process` tree snapshot mid-run) proved
+ * `proc_get_status()` is NOT buggy — it accurately reports that the PID
+ * this class tracks (`cmd.exe /c npm.cmd ...`, which Windows implicitly
+ * wraps any `.cmd` target in) is genuinely still alive, because its own
+ * child (`node.exe` running npm-cli.js) is genuinely still alive too,
+ * for several seconds to (with a large, real dependency tree, over a
+ * degraded network path) potentially minutes AFTER npm's user-visible
+ * work — including postinstall scripts — has already finished
+ * successfully. This is standard Node.js/npm behavior: a process doesn't
+ * exit the instant its script logic finishes, only once its event loop
+ * is empty — npm's registry HTTP client leaves keep-alive sockets open
+ * post-request, and npm's own background update-notifier check is a
+ * second, independent async request with the same effect (confirmed:
+ * disabling it measurably shrinks, but doesn't eliminate, the gap).
+ * run()'s optional `$gracePeriodSeconds`/`$isLikelyComplete` params exist
+ * so a caller who KNOWS its command has this tail-lifetime shape (see
+ * LocalBuildRunner's npm invocations) can avoid force-killing a command
+ * that has already succeeded, without weakening the timeout for any
+ * other caller: every existing call site's behavior is untouched (both
+ * new params default to "off", producing the exact same kill-at-deadline
+ * code path as before for git and Composer).
  */
 final class GitManager
 {
@@ -128,10 +152,40 @@ final class GitManager
      *     duration of a long `git add`/`push`, not just between commands.
      *     Any exception it throws is swallowed (a heartbeat failure must
      *     never abort the git command actually in progress).
+     * @param int $gracePeriodSeconds root-cause fix (npm process-tail):
+     *     0 (default) preserves the exact original behavior — kill the
+     *     instant $timeoutSeconds elapses, unconditionally. When > 0 AND
+     *     $isLikelyComplete is also given, reaching $timeoutSeconds does
+     *     NOT kill immediately: the command's accumulated output is
+     *     checked against $isLikelyComplete first, and only killed
+     *     immediately if that returns false (or wasn't given). If it
+     *     returns true, up to $gracePeriodSeconds MORE is allowed for the
+     *     process to exit on its own before it's force-killed — see this
+     *     class's own docblock for why a command can look completely done
+     *     and still be a genuinely live OS process for a while.
+     * @param callable|null $isLikelyComplete `function(string $output): bool`
+     *     — consulted exactly once, only at the moment $timeoutSeconds is
+     *     first reached (never before, never repeatedly during the grace
+     *     window itself) — never called at all when $gracePeriodSeconds
+     *     is 0.
+     * @param callable|null $onLog `function(string $message): void` for
+     *     the three events a grace-eligible timeout can produce: entering
+     *     the graceful wait, exiting naturally during it, or the eventual
+     *     force-kill (either immediate — no grace granted — or after the
+     *     grace window itself elapses). Any exception it throws is
+     *     swallowed, same as $onTick. Never called at all for a plain
+     *     command that finishes before $timeoutSeconds.
      * @return array{exitCode: int, output: string, timedOut: bool}
      */
-    public function run(array $command, string $cwd, int $timeoutSeconds = 30, ?callable $onTick = null): array
-    {
+    public function run(
+        array $command,
+        string $cwd,
+        int $timeoutSeconds = 30,
+        ?callable $onTick = null,
+        int $gracePeriodSeconds = 0,
+        ?callable $isLikelyComplete = null,
+        ?callable $onLog = null,
+    ): array {
         // See this class's own docblock: files, not pipes — a pipe read
         // can block the whole wait loop on Windows regardless of the
         // (silently-failing) stream_set_blocking() call; a file read
@@ -169,6 +223,13 @@ final class GitManager
 
         $deadline = microtime(true) + $timeoutSeconds;
         $lastTickAt = microtime(true);
+        // Non-null only once the original $timeoutSeconds has been
+        // reached AND a grace window was actually granted — see this
+        // method's own docblock. Stays null for the lifetime of every
+        // call that doesn't opt in, which is what keeps this a pure
+        // addition rather than a behavior change for git/Composer.
+        $graceDeadline = null;
+        $graceEnteredAt = null;
 
         while (true) {
             $status = proc_get_status($process);
@@ -189,12 +250,50 @@ final class GitManager
                 }
             }
 
-            if (microtime(true) > $deadline) {
+            $now = microtime(true);
+
+            if ($graceDeadline === null && $now > $deadline) {
+                if ($gracePeriodSeconds > 0 && $isLikelyComplete !== null) {
+                    $currentOutput = self::readCapped($stdoutPath) . self::readCapped($stderrPath);
+                    $looksComplete = false;
+                    try {
+                        $looksComplete = $isLikelyComplete($currentOutput);
+                    } catch (\Throwable) {
+                        // A broken predicate must never itself cause a
+                        // false "looks complete" — fall through to the
+                        // original, unconditional kill-at-deadline path.
+                    }
+
+                    if ($looksComplete) {
+                        $graceDeadline = $now + $gracePeriodSeconds;
+                        $graceEnteredAt = $now;
+                        self::log($onLog, "command exceeded {$timeoutSeconds}s timeout but its output already looks complete — entering a {$gracePeriodSeconds}s graceful wait before force-killing (PID {$status['pid']}).");
+                    }
+                }
+
+                if ($graceDeadline === null) {
+                    // No grace requested, or the output doesn't look
+                    // done — exactly the original, unconditional
+                    // kill-at-deadline behavior.
+                    self::terminateTree($process, $status['pid']);
+                    proc_close($process);
+
+                    $output = self::readCapped($stdoutPath) . self::readCapped($stderrPath);
+                    $output .= "\n[local-agent] command exceeded {$timeoutSeconds}s timeout and was terminated (PID {$status['pid']})\n";
+                    self::log($onLog, "force-killing (PID {$status['pid']}) — reason: exceeded {$timeoutSeconds}s with no confirmed completion.");
+                    self::cleanup($stdoutPath, $stderrPath);
+
+                    return ['exitCode' => 124, 'output' => $output, 'timedOut' => true];
+                }
+            }
+
+            if ($graceDeadline !== null && $now > $graceDeadline) {
                 self::terminateTree($process, $status['pid']);
                 proc_close($process);
 
                 $output = self::readCapped($stdoutPath) . self::readCapped($stderrPath);
-                $output .= "\n[local-agent] command exceeded {$timeoutSeconds}s timeout and was terminated (PID {$status['pid']})\n";
+                $output .= "\n[local-agent] command's output looked complete after {$timeoutSeconds}s, but the process did not exit within the {$gracePeriodSeconds}s grace period — terminated (PID {$status['pid']})\n";
+                self::log($onLog, "force-killing (PID {$status['pid']}) — reason: {$gracePeriodSeconds}s grace period elapsed without the process exiting on its own after its work appeared complete.");
                 self::cleanup($stdoutPath, $stderrPath);
 
                 return ['exitCode' => 124, 'output' => $output, 'timedOut' => true];
@@ -203,11 +302,32 @@ final class GitManager
             usleep(100000);
         }
 
+        if ($graceEnteredAt !== null) {
+            self::log($onLog, 'process exited naturally during the graceful wait, ' . round(microtime(true) - $graceEnteredAt, 1) . 's after entering it — no force-kill was needed.');
+        }
+
         $exitCode = proc_close($process);
         $output = self::readCapped($stdoutPath) . self::readCapped($stderrPath);
         self::cleanup($stdoutPath, $stderrPath);
 
         return ['exitCode' => $exitCode, 'output' => $output, 'timedOut' => false];
+    }
+
+    /**
+     * Same swallow-and-continue contract as $onTick above — a logging
+     * callback failing must never affect the command actually in
+     * progress, or its eventual kill/grace decision.
+     */
+    private static function log(?callable $onLog, string $message): void
+    {
+        if ($onLog === null) {
+            return;
+        }
+
+        try {
+            $onLog($message);
+        } catch (\Throwable) {
+        }
     }
 
     /**

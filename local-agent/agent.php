@@ -153,8 +153,16 @@ $phpBinary = resolvePhpBinaryConfig($config);
 // see BuildWorkspace's own docblock for the exact bug this fixes.
 $workspaceBaseDir = str_replace('\\', '/', rtrim((string) ($config['workspace_base_dir'] ?? (sys_get_temp_dir() . '/DeploymentLocalAgent/builds')), '\\/'));
 $workspaceTtlSeconds = (int) ($config['workspace_ttl_seconds'] ?? 86400);
+// Root-cause fix (v1.4.2, npm process-tail on Windows): npm can finish
+// all of its visible work and still be a genuinely live OS process for a
+// long tail afterward (registry-client keep-alive sockets, the
+// update-notifier check) — see GitManager's and LocalBuildRunner's own
+// docblocks for the full, instrumented audit. This only ever grants MORE
+// time to a build whose own output already shows it succeeded; it never
+// weakens detection of an actually-stuck build.
+$npmGracePeriodSeconds = (int) ($config['npm_grace_period_seconds'] ?? 120);
 $artifactUploader = new ArtifactUploader(
-    new LocalBuildRunner($git, $composerCommand, $npmCommand, $phpBinary),
+    new LocalBuildRunner($git, $composerCommand, $npmCommand, $phpBinary, logger: $logger, npmGracePeriodSeconds: $npmGracePeriodSeconds),
     new WorkspaceSourcePreparer($git),
     new ArtifactBuilder(),
     $client,

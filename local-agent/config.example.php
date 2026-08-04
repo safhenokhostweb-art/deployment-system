@@ -159,6 +159,35 @@ return [
     // 'php_binary' => 'C:\\laragon\\bin\\php\\php-8.3-Win32-vs16-x64\\php.exe',
     // 'composer_command' => ['C:\\laragon\\bin\\composer\\composer.phar'],
 
+    // Root-cause fix (v1.4.2, isolated build workspace): composer/npm run
+    // in a disposable, per-publish directory tree entirely outside any
+    // project's own folder — never the real vendor/node_modules — see
+    // docs/ARTIFACT_DEPLOYMENT.md §5. Defaults to
+    // "%TEMP%\DeploymentLocalAgent\builds" — only worth overriding if
+    // %TEMP% is unusually space-constrained or on slow/network storage.
+    // 'workspace_base_dir' => 'D:\\DeploymentLocalAgent\\builds',
+    // How long (seconds) a leftover workspace from a crashed/killed agent
+    // process is kept before the next publish's stale-sweep removes it —
+    // the normal path always cleans up its own workspace regardless.
+    'workspace_ttl_seconds' => 86400,
+
+    // Root-cause fix (v1.4.2, npm process-tail on Windows): `npm ci`/`npm
+    // run build` can finish all of their visible work (including
+    // postinstall scripts) and still be a genuinely live OS process for a
+    // while afterward — Node's event loop doesn't empty (and the process
+    // doesn't exit) until npm's own registry-client keep-alive sockets
+    // and its background update-notifier check both wind down, confirmed
+    // by direct, instrumented testing (see LocalBuildRunner's own
+    // docblock). Rather than force-killing a build that already
+    // succeeded, the agent grants it this many EXTRA seconds — on top of
+    // the timeout already reached — to exit on its own, but ONLY when
+    // npm's own output already shows a genuine completion indicator; an
+    // actually-stuck build (no such indicator) is still killed
+    // immediately, exactly as before. Set to 0 to disable the grace
+    // period entirely and restore the original, unconditional
+    // kill-at-timeout behavior.
+    'npm_grace_period_seconds' => 120,
+
     // heartbeat-watchdog.php (its own Scheduled Task,
     // DeploymentLocalAgentWatchdog — see install.ps1) reads these three.
     // Minimum time between two watchdog-initiated restarts — restart-loop

@@ -69,6 +69,24 @@ namespace LocalAgent;
  * which will trigger exactly that lazy rebuild using the REAL `.env`
  * this local build deliberately never has. That's the more correct
  * place for it to happen anyway.
+ *
+ * Root-cause fix (v1.4.2, npm process-tail on Windows): a real,
+ * empirically-verified problem distinct from everything above — `npm ci`/
+ * `npm run build` can finish ALL of their user-visible work (dependency
+ * install, postinstall scripts) and still be a genuinely live OS process
+ * for a long tail afterward (registry-client keep-alive sockets and the
+ * update-notifier check both delay Node's event loop from emptying — see
+ * GitManager's own docblock for the full, instrumented audit). Two
+ * independent mitigations, both scoped to npm only:
+ * 1. `--no-audit --no-fund --no-update-notifier` on every npm invocation
+ *    — removes two of the known contributors to that tail outright
+ *    (measured to shrink it, not just theorized).
+ * 2. A configurable grace period ($npmGracePeriodSeconds): if the
+ *    ORIGINAL timeout is reached but npm's own output already shows a
+ *    genuine completion indicator (see npmLikelySucceeded()), the
+ *    process is given up to that many MORE seconds to exit on its own
+ *    before being force-killed — never masking an actually-hung/failed
+ *    npm (no completion indicator ⇒ immediate kill, exactly as before).
  */
 final class LocalBuildRunner
 {
@@ -88,7 +106,25 @@ final class LocalBuildRunner
      *     assertPlatformRequirementsSatisfied(). Ignored for (a) when
      *     $composerCommand is already a full [php_binary, composer.phar]
      *     pair, which is self-contained.
+     * @param Logger|null $logger optional — only ever used to surface the
+     *     three npm process-tail events (entering the graceful wait,
+     *     exiting naturally during it, the eventual force-kill) as they
+     *     happen. Every other method on this class is unaffected by
+     *     whether one is given.
+     * @param int $npmGracePeriodSeconds see this class's own docblock —
+     *     0 disables the grace period entirely (npm reverts to the
+     *     original, unconditional kill-at-timeout behavior).
      */
+    /**
+     * Appended to every npm invocation. `--no-update-notifier` applies
+     * globally (any npm subcommand can trigger the background version
+     * check); `--no-audit`/`--no-fund` are install-specific config keys
+     * that npm silently ignores for `run` — harmless to include on both,
+     * confirmed by direct testing (`npm run build --no-audit --no-fund
+     * --no-update-notifier` exits 0, unaffected).
+     */
+    private const NPM_QUIET_FLAGS = ['--no-audit', '--no-fund', '--no-update-notifier'];
+
     public function __construct(
         private readonly GitManager $runner,
         private readonly array $composerCommand = ['composer'],
@@ -98,6 +134,8 @@ final class LocalBuildRunner
         private readonly int $npmInstallTimeoutSeconds = 600,
         private readonly int $npmBuildTimeoutSeconds = 600,
         private readonly int $platformCheckTimeoutSeconds = 60,
+        private readonly ?Logger $logger = null,
+        private readonly int $npmGracePeriodSeconds = 120,
     ) {
     }
 
@@ -132,9 +170,17 @@ final class LocalBuildRunner
         }
 
         if (is_file("{$repositoryPath}/package.json")) {
-            $installCommand = array_merge($this->resolvedNpmCommand(), ['ci', '--include=dev']);
+            $installCommand = array_merge($this->resolvedNpmCommand(), ['ci', '--include=dev', ...self::NPM_QUIET_FLAGS]);
             $log[] = self::describe($installCommand);
-            $installResult = $this->runner->run($installCommand, $repositoryPath, $this->npmInstallTimeoutSeconds, $onTick);
+            $installResult = $this->runner->run(
+                $installCommand,
+                $repositoryPath,
+                $this->npmInstallTimeoutSeconds,
+                $onTick,
+                $this->npmGracePeriodSeconds,
+                static fn (string $output): bool => self::npmLikelySucceeded($output, isInstallCommand: true),
+                $this->npmLogSink('npm ci'),
+            );
 
             if ($installResult['exitCode'] !== 0) {
                 throw new LocalBuildFailedException(
@@ -145,9 +191,17 @@ final class LocalBuildRunner
             $ranNpmInstall = true;
 
             if (self::hasBuildScript($repositoryPath)) {
-                $buildCommand = array_merge($this->resolvedNpmCommand(), ['run', 'build']);
+                $buildCommand = array_merge($this->resolvedNpmCommand(), ['run', 'build', ...self::NPM_QUIET_FLAGS]);
                 $log[] = self::describe($buildCommand);
-                $buildResult = $this->runner->run($buildCommand, $repositoryPath, $this->npmBuildTimeoutSeconds, $onTick);
+                $buildResult = $this->runner->run(
+                    $buildCommand,
+                    $repositoryPath,
+                    $this->npmBuildTimeoutSeconds,
+                    $onTick,
+                    $this->npmGracePeriodSeconds,
+                    static fn (string $output): bool => self::npmLikelySucceeded($output, isInstallCommand: false),
+                    $this->npmLogSink('npm run build'),
+                );
 
                 if ($buildResult['exitCode'] !== 0) {
                     throw new LocalBuildFailedException(
@@ -323,6 +377,67 @@ final class LocalBuildRunner
         $command = array_values(array_filter($this->npmCommand, static fn (mixed $v): bool => is_string($v) && $v !== ''));
 
         return $command === [] ? ['npm'] : $command;
+    }
+
+    /**
+     * `null` (no-op) when no Logger was given — every existing caller
+     * that constructs this class without one (every test fixture prior
+     * to this fix, and any future caller that doesn't need this) is
+     * completely unaffected.
+     */
+    private function npmLogSink(string $label): ?\Closure
+    {
+        if ($this->logger === null) {
+            return null;
+        }
+
+        return function (string $message) use ($label): void {
+            $this->logger->info("[{$label}] {$message}");
+        };
+    }
+
+    /**
+     * Root-cause fix (npm process-tail, see this class's and
+     * GitManager's own docblocks): whether npm's ACCUMULATED output
+     * already shows a genuine completion indicator — consulted only once
+     * the configured timeout has already been reached, to decide between
+     * an immediate kill (unchanged, original behavior) and a bounded
+     * grace period.
+     *
+     * A real `npm error`/`npm ERR!` line always disqualifies — that's
+     * evidence of an actual failure, never "done and just lingering",
+     * and the original, immediate-kill behavior is the right one for it.
+     *
+     * For `npm ci`/`npm install`, npm prints one fixed, well-known final
+     * summary line ("added N packages in Xs", "up to date in Xs",
+     * "changed N packages in Xs", ...) only once dependency resolution
+     * AND every lifecycle script (postinstall included) have genuinely
+     * finished — confirmed against real npm output captured during this
+     * fix's own audit. Its presence is strong, specific evidence.
+     *
+     * `npm run <script>` has no such universal marker — it depends
+     * entirely on whatever build tool the script invokes. Non-empty
+     * output with no npm error, this deep into the configured timeout,
+     * is treated as weaker but still meaningful evidence of the same
+     * tail-lifetime pattern rather than a genuine hang — bounded by the
+     * grace period either way, so a wrong guess here costs at most
+     * $npmGracePeriodSeconds of extra wait, never a silently-accepted
+     * failure (a truly stuck build is still killed once grace elapses).
+     */
+    private static function npmLikelySucceeded(string $output, bool $isInstallCommand): bool
+    {
+        if (preg_match('/\bnpm (?:error|ERR!)\b/i', $output) === 1) {
+            return false;
+        }
+
+        if ($isInstallCommand) {
+            return preg_match(
+                '/\b(?:added|removed|changed)\s+\d+\s+packages?\b[\s\S]*?\bin\s+[\d.]+m?s\b|\bup to date\b[\s\S]*?\bin\s+[\d.]+m?s\b/i',
+                $output,
+            ) === 1;
+        }
+
+        return trim($output) !== '';
     }
 
     /**
