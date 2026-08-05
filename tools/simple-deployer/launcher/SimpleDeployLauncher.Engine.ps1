@@ -34,44 +34,55 @@ $script:LauncherLibFiles = @(
     'lib\SimpleDeploy.Orchestration.ps1',
     'launcher\SimpleDeployLauncher.Status.ps1',
     'launcher\SimpleDeployLauncher.GitFlow.ps1',
-    'launcher\SimpleDeployLauncher.Log.ps1'
+    'launcher\SimpleDeployLauncher.Log.ps1',
+    # Invoke-LauncherDeployFlow (used by the "ارسال به Git و سرور" -Operation
+    # scriptblock, which runs entirely inside the background runspace) is
+    # defined in THIS file, but this file was never listed in its own
+    # dot-source set -- so the background runspace never had it, and any
+    # Deploy run hit "The term 'Invoke-LauncherDeployFlow' is not
+    # recognized...". Git-only worked because Invoke-LauncherGitOnlyFlow
+    # lives in GitFlow.ps1, which WAS already listed above.
+    'launcher\SimpleDeployLauncher.Engine.ps1'
 )
+
+# Set-StrictMode -Version Latest (below) throws on reading a never-yet-set
+# variable, so these need an explicit $null initializer here rather than
+# relying on PowerShell's usual "unset variable reads as $null" default.
+$script:SharedRunspace = $null
+$script:SharedRunspaceWarmupPs = $null
+$script:SharedRunspaceWarmupHostRunspace = $null
+$script:SharedRunspaceWarmupResult = $null
 
 <#
 .SYNOPSIS
-    Starts $Operation (a scriptblock) asynchronously in a brand-new
-    Runspace that has every SimpleDeploy library dot-sourced and its own
+    Creates ONE Runspace with every SimpleDeploy library dot-sourced and
     Write-Step/Write-Info/Write-Success/Write-Warn/Write-ErrorFa
-    redefined to push onto $OutputQueue instead of the console — the
-    ONLY change made to those functions' behavior; their call SITES
-    throughout lib/*.ps1 are completely untouched.
+    redefined to push onto whatever $OutputQueue is currently set in that
+    runspace's own scope — the ONLY change made to those functions'
+    behavior; their call SITES throughout lib/*.ps1 are completely
+    untouched.
 
-.PARAMETER Variables
-    Hashtable of name -> value injected into the runspace's own scope
-    before $Operation runs (e.g. @{ ProjectInfo = $projectInfo }).
-
-.OUTPUTS
-    A handle object to pass to Test-LauncherOperationComplete /
-    Complete-LauncherOperation / Stop-LauncherOperation.
+.NOTES
+    Measured at ~400-900ms (Runspace creation + dot-sourcing 11 files).
+    Start-LauncherOperation used to pay this cost on the UI thread EVERY
+    single time any operation started; for "بررسی همه پروژه‌ها" across N
+    projects that meant N x ~400-900ms of real UI-thread blocking even
+    though each individual git command is fast — the actual root cause of
+    the reported Refresh/Check freeze. Get-LauncherRunspace below now
+    creates this ONCE and Start-LauncherOperation reuses it for the rest
+    of the window's lifetime (safe because the whole GUI already only
+    ever runs one operation at a time — buttons are disabled for the
+    duration of every tracked operation, and "بررسی همه پروژه‌ها" is
+    strictly sequential by its own design).
 #>
-function Start-LauncherOperation {
-    param(
-        [Parameter(Mandatory = $true)][string]$ToolRoot,
-        [Parameter(Mandatory = $true)][scriptblock]$Operation,
-        [Parameter(Mandatory = $false)][hashtable]$Variables = @{}
-    )
-
-    $outputQueue = New-Object System.Collections.Concurrent.ConcurrentQueue[object]
+function New-LauncherRunspace {
+    param([Parameter(Mandatory = $true)][string]$ToolRoot)
 
     $rs = [runspacefactory]::CreateRunspace()
     $rs.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
     $rs.Open()
     $rs.SessionStateProxy.SetVariable('ToolRoot', $ToolRoot)
-    $rs.SessionStateProxy.SetVariable('OutputQueue', $outputQueue)
     $rs.SessionStateProxy.SetVariable('LauncherLibFiles', $script:LauncherLibFiles)
-    foreach ($key in $Variables.Keys) {
-        $rs.SessionStateProxy.SetVariable($key, $Variables[$key])
-    }
 
     $initPs = [powershell]::Create()
     $initPs.Runspace = $rs
@@ -93,6 +104,120 @@ function Start-LauncherOperation {
         throw "راه‌اندازی Runspace با خطا مواجه شد: $errText"
     }
     $initPs.Dispose()
+    return $rs
+}
+
+<#
+.SYNOPSIS
+    Kicks off New-LauncherRunspace on a background operation of its own
+    (a throwaway Runspace + BeginInvoke, exactly the same async mechanism
+    every real operation already uses in this file) so the ~400-900ms
+    cost is paid while the Launcher window is first appearing — never on
+    the UI thread, never on the user's first click. Call once, right when
+    Show-SimpleDeployLauncher starts building the window.
+#>
+function Start-LauncherRunspaceWarmup {
+    param([Parameter(Mandatory = $true)][string]$ToolRoot)
+    if ($script:SharedRunspace -or $script:SharedRunspaceWarmupPs) { return }
+
+    $hostRs = [runspacefactory]::CreateRunspace()
+    $hostRs.Open()
+    $hostRs.SessionStateProxy.SetVariable('ToolRoot', $ToolRoot)
+    $hostRs.SessionStateProxy.SetVariable('LauncherEngineFile', (Join-Path $ToolRoot 'launcher\SimpleDeployLauncher.Engine.ps1'))
+
+    $ps = [powershell]::Create()
+    $ps.Runspace = $hostRs
+    [void]$ps.AddScript({
+        . $LauncherEngineFile
+        return New-LauncherRunspace -ToolRoot $ToolRoot
+    })
+    $script:SharedRunspaceWarmupPs = $ps
+    $script:SharedRunspaceWarmupHostRunspace = $hostRs
+    $script:SharedRunspaceWarmupResult = $ps.BeginInvoke()
+}
+
+<#
+.SYNOPSIS
+    Returns the shared, already-dot-sourced Runspace, waiting on the
+    background warm-up if it hasn't finished yet (only possible if the
+    user's very first click happens before warm-up completes — bounded by
+    the same ~400-900ms it always took before, and it can only ever
+    happen once per window, never once-per-project like before).
+#>
+function Get-LauncherRunspace {
+    param([Parameter(Mandatory = $true)][string]$ToolRoot)
+
+    if ($script:SharedRunspace -and $script:SharedRunspace.RunspaceStateInfo.State -eq 'Opened') {
+        return $script:SharedRunspace
+    }
+    if ($script:SharedRunspaceWarmupPs) {
+        $result = $script:SharedRunspaceWarmupPs.EndInvoke($script:SharedRunspaceWarmupResult)
+        try { $script:SharedRunspaceWarmupPs.Dispose() } catch {}
+        try { $script:SharedRunspaceWarmupHostRunspace.Close(); $script:SharedRunspaceWarmupHostRunspace.Dispose() } catch {}
+        $script:SharedRunspaceWarmupPs = $null
+        $script:SharedRunspaceWarmupHostRunspace = $null
+        $script:SharedRunspace = $result[0]
+        return $script:SharedRunspace
+    }
+    $script:SharedRunspace = New-LauncherRunspace -ToolRoot $ToolRoot
+    return $script:SharedRunspace
+}
+
+<#
+.SYNOPSIS
+    Closes the shared Runspace (and, if warm-up was still in flight,
+    waits for and closes that too). Call exactly once, when the Launcher
+    window itself is closing — never between individual operations, since
+    the whole point is reusing this same Runspace across all of them.
+#>
+function Close-LauncherRunspace {
+    if ($script:SharedRunspaceWarmupPs) {
+        try { $script:SharedRunspaceWarmupPs.Stop() } catch {}
+        try {
+            $result = $script:SharedRunspaceWarmupPs.EndInvoke($script:SharedRunspaceWarmupResult)
+            if ($result -and $result[0]) {
+                try { $result[0].Close(); $result[0].Dispose() } catch {}
+            }
+        } catch {}
+        try { $script:SharedRunspaceWarmupPs.Dispose() } catch {}
+        try { $script:SharedRunspaceWarmupHostRunspace.Close(); $script:SharedRunspaceWarmupHostRunspace.Dispose() } catch {}
+        $script:SharedRunspaceWarmupPs = $null
+        $script:SharedRunspaceWarmupHostRunspace = $null
+    }
+    if ($script:SharedRunspace) {
+        try { $script:SharedRunspace.Close() } catch {}
+        try { $script:SharedRunspace.Dispose() } catch {}
+        $script:SharedRunspace = $null
+    }
+}
+
+<#
+.SYNOPSIS
+    Starts $Operation (a scriptblock) asynchronously on the shared,
+    already-initialized Runspace (see Get-LauncherRunspace) — never
+    creates a new one per call.
+
+.PARAMETER Variables
+    Hashtable of name -> value injected into the runspace's own scope
+    before $Operation runs (e.g. @{ ProjectInfo = $projectInfo }).
+
+.OUTPUTS
+    A handle object to pass to Test-LauncherOperationComplete /
+    Complete-LauncherOperation / Stop-LauncherOperation.
+#>
+function Start-LauncherOperation {
+    param(
+        [Parameter(Mandatory = $true)][string]$ToolRoot,
+        [Parameter(Mandatory = $true)][scriptblock]$Operation,
+        [Parameter(Mandatory = $false)][hashtable]$Variables = @{}
+    )
+
+    $outputQueue = New-Object System.Collections.Concurrent.ConcurrentQueue[object]
+    $rs = Get-LauncherRunspace -ToolRoot $ToolRoot
+    $rs.SessionStateProxy.SetVariable('OutputQueue', $outputQueue)
+    foreach ($key in $Variables.Keys) {
+        $rs.SessionStateProxy.SetVariable($key, $Variables[$key])
+    }
 
     $ps = [powershell]::Create()
     $ps.Runspace = $rs
@@ -158,9 +283,10 @@ function Complete-LauncherOperation {
     } catch {
         return @{ Success = $false; Cancelled = [bool]$Handle.CancelRequested; Result = $null; Error = $_.Exception.Message }
     } finally {
+        # $Handle.Runspace is the SHARED runspace (see Get-LauncherRunspace)
+        # and stays open/reused for the next operation — only Close-LauncherRunspace,
+        # called once when the Launcher window itself closes, ever closes it.
         try { $Handle.PowerShell.Dispose() } catch {}
-        try { $Handle.Runspace.Close() } catch {}
-        try { $Handle.Runspace.Dispose() } catch {}
     }
 }
 

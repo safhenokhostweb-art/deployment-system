@@ -106,6 +106,34 @@ function Get-LauncherStatusColor {
     singleton lock the SimpleDeploy.ps1 CLI uses (Enter-SimpleDeployLock,
     Global\SimpleDeployerSingleInstance) so the two entry points can never
     run a deploy at the same time either.
+
+.NOTES
+    Every per-window helper below (Append-Log, Set-RowStatus,
+    Invoke-GitOnlyAction, ...) is a SCRIPTBLOCK-VALUED LOCAL VARIABLE
+    ($Name = { ... }), never a nested `function Name { ... }` statement.
+    This is a deliberate, empirically-forced choice, not a style
+    preference: `.Add_Click({ ... }.GetNewClosure())` is required so a
+    button's handler correctly captures its own per-row $row/$Row
+    variable — but .GetNewClosure() detaches the scriptblock into a new,
+    independent session state that copies only the VARIABLE table from
+    the enclosing scope, never the FUNCTION table. A nested function
+    defined via `function Name { ... }` inside THIS function's body lives
+    only in this function's own local Function: scope, which a detached
+    closure can never see — calling it later (e.g. on a real button
+    click, dispatched through Application.Run's message loop) fails with
+    "The term 'Name' is not recognized...". A plain scriptblock-valued
+    VARIABLE does not have this problem: GetNewClosure() captures it like
+    any other variable, and PowerShell scriptblocks inherently carry a
+    reference to the lexical scope they were written in, so one
+    scriptblock variable calling another via `& $Other` (neither one
+    itself needing its own GetNewClosure()) resolves correctly as long as
+    the top-level handler that started the chain was captured. Top-level,
+    non-nested functions (Show-LauncherError, Get-DeploymentServiceDisplayStatus,
+    Invoke-LauncherGitOnlyFlow, ...) are unaffected by any of this — they
+    live in the session's global function table, which IS visible from a
+    detached closure; only THIS function's own nested nested-function
+    pattern needed to change. Confirmed empirically against this exact
+    PowerShell 5.1 host before applying.
 #>
 function Show-SimpleDeployLauncher {
     param(
@@ -122,6 +150,12 @@ function Show-SimpleDeployLauncher {
         Show-LauncherError -Text 'یک نمونه دیگر از SimpleDeploy (رابط گرافیکی یا خط فرمان) در حال اجراست. برای جلوگیری از تداخل، این اجرا متوقف می‌شود.'
         return
     }
+
+    # Pays the ~400-900ms Runspace-creation/library-dot-source cost now,
+    # on a background operation, while the window is first appearing --
+    # see the .NOTES on New-LauncherRunspace in Engine.ps1 for why this
+    # used to happen on the UI thread on every click instead.
+    Start-LauncherRunspaceWarmup -ToolRoot $ToolRoot
 
     try {
         # ============================================================
@@ -158,6 +192,12 @@ function Show-SimpleDeployLauncher {
         $serviceStatusLabel.Text = 'Deployment Service: —'
         $serviceStatusLabel.SetBounds(12, 70, 350, 22)
         $topPanel.Controls.Add($serviceStatusLabel)
+
+        $checkAllProgressLabel = New-Object System.Windows.Forms.Label
+        $checkAllProgressLabel.Text = ''
+        $checkAllProgressLabel.ForeColor = [System.Drawing.Color]::SteelBlue
+        $checkAllProgressLabel.SetBounds(370, 70, 500, 22)
+        $topPanel.Controls.Add($checkAllProgressLabel)
 
         $checkAllButton = New-Object System.Windows.Forms.Button
         $checkAllButton.Text = 'بررسی همه پروژه‌ها'
@@ -203,21 +243,62 @@ function Show-SimpleDeployLauncher {
         $projectsPanel.BringToFront()
 
         # ============================================================
-        # Shared mutable state (closures below capture these by reference
-        # via script-scope variables, since WinForms event handlers run
-        # later, on the same UI thread, after this function's own local
-        # scope would otherwise have been torn down)
+        # Shared mutable state -- ONE Hashtable (a reference type), never
+        # $script:-prefixed scalars. This is not a style choice: every
+        # button/timer handler below is registered via
+        # `.Add_Click({...}.GetNewClosure())`, and EACH separate
+        # .GetNewClosure() call detaches its scriptblock into its OWN,
+        # independent session state -- which turns out to include its own
+        # independent SCRIPT scope, not just its own function table (the
+        # function-table half of this was already known; the script-scope
+        # half was discovered while diagnosing the "بررسی همه پروژه‌ها"
+        # freeze). Concretely: `$GuiState.CurrentHandle = ...` written
+        # inside checkButton's closure is INVISIBLE to pollTimer's own,
+        # separately-created closure -- pollTimer would keep reading its
+        # own copy's original $null forever and never detect ANY operation
+        # as started, regardless of how fast the underlying git command
+        # runs. Confirmed empirically against this exact PowerShell 5.1
+        # host before applying (see repro-script-scope-closure.ps1 /
+        # repro-hashtable-crossclosure.ps1 in the accompanying diagnosis).
+        # A Hashtable sidesteps this entirely: GetNewClosure() DOES
+        # correctly copy a LOCAL variable's value into each closure's
+        # table (proven all along by $row/$logBox/$cancelButton working),
+        # and for a reference type that copied value is a pointer to the
+        # SAME underlying object -- so `$GuiState.CurrentHandle = ...`
+        # mutates the one real object every closure points at, regardless
+        # of which closure's detached scope is currently executing.
         # ============================================================
-        $script:GuiConfig = $null
-        $script:GuiProjects = @()
-        $script:GuiRows = @{}
-        $script:CurrentHandle = $null
-        $script:CurrentRunLog = $null
-        $script:CurrentProjectKey = $null
-        $script:PausedByThisRun = $false
-        $script:PausedTaskNamesThisRun = @()
+        $GuiState = @{
+            GuiConfig               = $null
+            GuiProjects              = @()
+            GuiRows                  = @{}
+            CurrentHandle            = $null
+            CurrentOnOutput          = $null
+            CurrentOnComplete        = $null
+            CurrentRunLog            = $null
+            CurrentProjectKey        = $null
+            PausedByThisRun          = $false
+            PausedTaskNamesThisRun   = @()
+            # "بررسی همه پروژه‌ها" batch state: a non-blocking queue
+            # advanced one project at a time by the SAME pollTimer tick
+            # that already detects single-operation completion -- never a
+            # UI-thread wait loop. See the .NOTES on $AdvanceCheckAll
+            # below for why the previous DoEvents()-based wait loop caused
+            # the reported freeze.
+            CheckAllQueue            = $null
+            CheckAllTotal            = 0
+            CheckAllCancelled        = $false
+            PollTickBusy             = $false
+        }
 
-        function Append-Log {
+        # ============================================================
+        # Per-window helpers — scriptblock-valued LOCAL variables, not
+        # nested `function` statements. See the .NOTES on this function
+        # for why (a nested function is unreachable from a
+        # GetNewClosure()'d event handler; a scriptblock variable is not).
+        # ============================================================
+
+        $AppendLog = {
             param([string]$Text, [string]$ColorName = 'Gray')
             $logBox.SelectionStart = $logBox.TextLength
             $logBox.SelectionLength = 0
@@ -226,17 +307,17 @@ function Show-SimpleDeployLauncher {
             $logBox.ScrollToCaret()
         }
 
-        function Update-ServiceStatusLabel {
-            if (-not $script:GuiConfig) { return }
-            $info = Get-DeploymentServiceDisplayStatus -DeploymentServiceCfg $script:GuiConfig.deployment_service -PausedByThisRun $script:PausedByThisRun
+        $UpdateServiceStatusLabel = {
+            if (-not $GuiState.GuiConfig) { return }
+            $info = Get-DeploymentServiceDisplayStatus -DeploymentServiceCfg $GuiState.GuiConfig.deployment_service -PausedByThisRun $GuiState.PausedByThisRun
             $serviceStatusLabel.Text = "Deployment Service: $($info.Text)"
             $serviceStatusLabel.ForeColor = Get-LauncherStatusColor -ColorName $info.Color
         }
 
-        function Set-RowStatus {
+        $SetRowStatus = {
             param([string]$ProjectKey, [string]$StatusKey, [string]$ExtraText = $null)
-            if (-not $script:GuiRows.ContainsKey($ProjectKey)) { return }
-            $row = $script:GuiRows[$ProjectKey]
+            if (-not $GuiState.GuiRows.ContainsKey($ProjectKey)) { return }
+            $row = $GuiState.GuiRows[$ProjectKey]
             $info = Get-LauncherStatusInfo -StatusKey $StatusKey
             $text = $info.Text
             if ($ExtraText) { $text = "$text — $ExtraText" }
@@ -244,10 +325,10 @@ function Show-SimpleDeployLauncher {
             $row.StatusValueLabel.ForeColor = Get-LauncherStatusColor -ColorName $info.Color
         }
 
-        function Set-RowsEnabled {
+        $SetRowsEnabled = {
             param([bool]$Enabled)
-            foreach ($key in $script:GuiRows.Keys) {
-                $row = $script:GuiRows[$key]
+            foreach ($key in $GuiState.GuiRows.Keys) {
+                $row = $GuiState.GuiRows[$key]
                 $row.CheckButton.Enabled = $Enabled
                 $row.GitButton.Enabled = $Enabled
                 $row.DeployButton.Enabled = $Enabled -and $row.ProjectInfo.IsDeployable
@@ -262,7 +343,7 @@ function Show-SimpleDeployLauncher {
             to route its output/completion. $OnComplete receives the
             Complete-LauncherOperation hashtable.
         #>
-        function Start-Tracked {
+        $StartTracked = {
             param(
                 [scriptblock]$Operation,
                 [hashtable]$Variables = @{},
@@ -270,59 +351,157 @@ function Show-SimpleDeployLauncher {
                 [scriptblock]$OnOutput,
                 [scriptblock]$OnComplete
             )
-            $script:CurrentProjectKey = $ProjectKey
-            $script:CurrentHandle = Start-LauncherOperation -ToolRoot $ToolRoot -Operation $Operation -Variables $Variables
-            $script:CurrentOnOutput = $OnOutput
-            $script:CurrentOnComplete = $OnComplete
+            $GuiState.CurrentProjectKey = $ProjectKey
+            $GuiState.CurrentHandle = Start-LauncherOperation -ToolRoot $ToolRoot -Operation $Operation -Variables $Variables
+            $GuiState.CurrentOnOutput = $OnOutput
+            $GuiState.CurrentOnComplete = $OnComplete
             $cancelButton.Enabled = $true
-            Set-RowsEnabled -Enabled $false
+            & $SetRowsEnabled -Enabled $false
+        }
+
+        <#
+        .SYNOPSIS
+            Advances the "بررسی همه پروژه‌ها" batch by exactly one project,
+            then returns immediately -- never waits or loops. Called once
+            when the batch starts ($InvokeCheckAllAction) and once more
+            from pollTimer's own completion branch after EVERY single
+            check finishes, so the whole batch is driven entirely by the
+            polling Timer that already exists, with no UI-thread wait loop
+            of any kind. The previous Application.DoEvents() +
+            Start-Sleep busy-wait loop here was the root cause of the
+            reported Refresh/Check freeze -- nested DoEvents() re-entering
+            the WinForms message loop from inside a Click handler is
+            unsafe and was stalling the UI even though each individual
+            project's git check itself completed quickly.
+        #>
+        $AdvanceCheckAll = {
+            if (-not $GuiState.CheckAllQueue) { return }
+            if ($GuiState.CheckAllCancelled -or $GuiState.CheckAllQueue.Count -eq 0) {
+                $wasCancelled = $GuiState.CheckAllCancelled
+                $GuiState.CheckAllQueue = $null
+                $GuiState.CheckAllCancelled = $false
+                $checkAllProgressLabel.Text = ''
+                & $AppendLog -Text $(if ($wasCancelled) { 'بررسی همه پروژه‌ها لغو شد.' } else { 'بررسی همه پروژه‌ها کامل شد.' }) -ColorName 'Gray'
+                return
+            }
+            $nextKey = $GuiState.CheckAllQueue.Dequeue()
+            $doneCount = $GuiState.CheckAllTotal - $GuiState.CheckAllQueue.Count
+            $checkAllProgressLabel.Text = "بررسی همه: $doneCount از $($GuiState.CheckAllTotal) ($nextKey)"
+            & $InvokeCheckAction -Row $GuiState.GuiRows[$nextKey]
         }
 
         $pollTimer = New-Object System.Windows.Forms.Timer
         $pollTimer.Interval = 150
         $pollTimer.Add_Tick({
-            if (-not $script:CurrentHandle) { return }
-            $items = Receive-LauncherOperationOutput -Handle $script:CurrentHandle
-            foreach ($item in $items) {
-                if ($script:CurrentOnOutput) { & $script:CurrentOnOutput $item }
-                $color = switch ($item.Type) {
-                    'Error'   { 'Red' }
-                    'Warn'    { 'Yellow' }
-                    'Success' { 'Green' }
-                    'Step'    { 'Blue' }
-                    default   { 'Gray' }
+            # Reentrancy guard. Show-LauncherConfirm/New-LauncherInputDialog
+            # (called from deep inside an -OnComplete callback, e.g. the
+            # Git-only and Deploy flows) block via MessageBox.Show()/
+            # ShowDialog() -- but Windows' modal message pump STILL
+            # services this SAME thread's WM_TIMER messages while blocked,
+            # so pollTimer's own Tick can fire again, re-entrantly, nested
+            # inside its own still-running (paused) invocation.
+            # PowerShell scriptblock invocation is not safe against that
+            # kind of true reentrancy: a nested invocation corrupts the
+            # outer, still-paused invocation's own parameter/local scope.
+            # Confirmed empirically -- this produced exactly "The variable
+            # '$key' cannot be retrieved because it has not been set."
+            # (thrown from inside the OUTER invocation once the nested one
+            # returns and it resumes) and, separately, "Invoke-
+            # LauncherDeployFlow is not recognized" style symptoms reported
+            # for the Deploy flow; Git-only has the identical exposure,
+            # just less likely to be hit depending on click timing.
+            # Skipping any re-entrant tick outright is correct and
+            # lossless: the SAME 150ms timer ticks again right after the
+            # modal dialog closes and the outer invocation finishes, so no
+            # output/completion is ever missed, only delayed by at most
+            # one interval.
+            if ($GuiState.PollTickBusy) { return }
+            $GuiState.PollTickBusy = $true
+            try {
+                if (-not $GuiState.CurrentHandle) { return }
+                $items = Receive-LauncherOperationOutput -Handle $GuiState.CurrentHandle
+                foreach ($item in $items) {
+                    if ($GuiState.CurrentOnOutput) { & $GuiState.CurrentOnOutput $item }
+                    $color = switch ($item.Type) {
+                        'Error'   { 'Red' }
+                        'Warn'    { 'Yellow' }
+                        'Success' { 'Green' }
+                        'Step'    { 'Blue' }
+                        default   { 'Gray' }
+                    }
+                    & $AppendLog -Text $item.Text -ColorName $color
                 }
-                Append-Log -Text $item.Text -ColorName $color
+                if (Test-LauncherOperationComplete -Handle $GuiState.CurrentHandle) {
+                    $completion = Complete-LauncherOperation -Handle $GuiState.CurrentHandle
+                    $handledProjectKey = $GuiState.CurrentProjectKey
+                    $onComplete = $GuiState.CurrentOnComplete
+                    $GuiState.CurrentHandle = $null
+                    $GuiState.CurrentOnOutput = $null
+                    $GuiState.CurrentOnComplete = $null
+                    $GuiState.CurrentProjectKey = $null
+                    $cancelButton.Enabled = $false
+                    & $SetRowsEnabled -Enabled $true
+                    if ($onComplete) {
+                        # Genuinely STOP the Timer (not just the
+                        # PollTickBusy flag above) for the duration of the
+                        # callback. Show-LauncherConfirm/New-LauncherInputDialog
+                        # inside the Git-only/Deploy -OnComplete blocks show
+                        # a real modal MessageBox.Show()/ShowDialog(), and
+                        # Windows' modal message pump keeps dispatching
+                        # this SAME thread's WM_TIMER while blocked. The
+                        # PollTickBusy flag alone was NOT sufficient --
+                        # confirmed empirically that a truly re-entrant
+                        # invocation of this SAME closure instance can
+                        # still corrupt the outer, paused invocation's own
+                        # scope (that produced "The variable '$key' cannot
+                        # be retrieved...") even with the flag set,
+                        # because the corruption isn't limited to skipping
+                        # logic -- it's PowerShell's scriptblock execution
+                        # itself not being safe against true reentrancy.
+                        # Stopping the Timer at the WinForms/OS level
+                        # prevents WM_TIMER from being raised for
+                        # pollTimer at all during this window, so this
+                        # exact Tick handler can never be entered a second
+                        # time nested inside itself -- not "handled
+                        # gracefully if it happens", genuinely prevented.
+                        $pollTimer.Stop()
+                        try {
+                            & $onComplete $completion $handledProjectKey
+                        } finally {
+                            $pollTimer.Start()
+                        }
+                    }
+                    if ($GuiState.CheckAllQueue) { & $AdvanceCheckAll }
+                }
+            } finally {
+                $GuiState.PollTickBusy = $false
             }
-            if (Test-LauncherOperationComplete -Handle $script:CurrentHandle) {
-                $completion = Complete-LauncherOperation -Handle $script:CurrentHandle
-                $handledProjectKey = $script:CurrentProjectKey
-                $onComplete = $script:CurrentOnComplete
-                $script:CurrentHandle = $null
-                $script:CurrentOnOutput = $null
-                $script:CurrentOnComplete = $null
-                $script:CurrentProjectKey = $null
-                $cancelButton.Enabled = $false
-                Set-RowsEnabled -Enabled $true
-                if ($onComplete) { & $onComplete $completion $handledProjectKey }
-            }
-        })
+        }.GetNewClosure())
         $pollTimer.Start()
 
         $cancelButton.Add_Click({
-            if ($script:CurrentHandle) {
-                if (Show-LauncherConfirm -Text 'آیا عملیات جاری لغو شود؟ عملیات Git/شبکه‌ای که همین الان در حال اجراست تا پایان طبیعی خودش ادامه می‌یابد و فقط مرحله بعدی شروع نمی‌شود.') {
-                    Stop-LauncherOperation -Handle $script:CurrentHandle
-                    Append-Log -Text 'درخواست لغو ارسال شد...' -ColorName 'Yellow'
+            if ($GuiState.CurrentHandle) {
+                $confirmText = if ($GuiState.CheckAllQueue) {
+                    'آیا بررسی همه پروژه‌ها لغو شود؟ پروژه‌ای که همین الان در حال بررسی است تا پایان طبیعی خودش ادامه می‌یابد؛ پروژه‌های باقی‌مانده در صف بررسی نخواهند شد.'
+                } else {
+                    'آیا عملیات جاری لغو شود؟ عملیات Git/شبکه‌ای که همین الان در حال اجراست تا پایان طبیعی خودش ادامه می‌یابد و فقط مرحله بعدی شروع نمی‌شود.'
+                }
+                if (Show-LauncherConfirm -Text $confirmText) {
+                    if ($GuiState.CheckAllQueue) {
+                        $GuiState.CheckAllCancelled = $true
+                        $GuiState.CheckAllQueue.Clear()
+                    }
+                    Stop-LauncherOperation -Handle $GuiState.CurrentHandle
+                    & $AppendLog -Text 'درخواست لغو ارسال شد...' -ColorName 'Yellow'
                 }
             }
-        })
+        }.GetNewClosure())
 
         # ============================================================
         # Project row construction
         # ============================================================
-        function New-ProjectRow {
-            param($ProjectInfo)
+        $NewProjectRow = {
+            param($ProjectInfo, $InvokeCheckAction, $InvokeGitOnlyAction, $InvokeDeployAction, $InvokeViewLogAction)
 
             $cfg = $ProjectInfo.Config
             $card = New-Object System.Windows.Forms.Panel
@@ -407,78 +586,77 @@ function Show-SimpleDeployLauncher {
                 ViewLogButton    = $viewLogButton
             }
 
-            $checkButton.Add_Click({ Invoke-CheckAction -Row $row }.GetNewClosure())
-            $gitButton.Add_Click({ Invoke-GitOnlyAction -Row $row }.GetNewClosure())
-            $deployButton.Add_Click({ Invoke-DeployAction -Row $row }.GetNewClosure())
-            $viewLogButton.Add_Click({ Invoke-ViewLogAction -Row $row }.GetNewClosure())
+            $checkButton.Add_Click({ & $InvokeCheckAction -Row $row }.GetNewClosure())
+            $gitButton.Add_Click({ & $InvokeGitOnlyAction -Row $row }.GetNewClosure())
+            $deployButton.Add_Click({ & $InvokeDeployAction -Row $row }.GetNewClosure())
+            $viewLogButton.Add_Click({ & $InvokeViewLogAction -Row $row }.GetNewClosure())
 
             return $row
         }
 
-        function Invoke-CheckAction {
+        $InvokeCheckAction = {
             param($Row)
             $projectInfo = $Row.ProjectInfo
-            Set-RowStatus -ProjectKey $projectInfo.Key -StatusKey 'Checking'
-            Append-Log -Text "بررسی پروژه '$($projectInfo.Key)'..." -ColorName 'Blue'
-            Start-Tracked -ProjectKey $projectInfo.Key -Variables @{ ProjectInfo = $projectInfo } -Operation {
+            & $SetRowStatus -ProjectKey $projectInfo.Key -StatusKey 'Checking'
+            & $AppendLog -Text "بررسی پروژه '$($projectInfo.Key)'..." -ColorName 'Blue'
+            & $StartTracked -ProjectKey $projectInfo.Key -Variables @{ ProjectInfo = $projectInfo } -Operation {
                 $check = Get-ProjectCheckResult -ProjectInfo $ProjectInfo
                 $connectivity = if ($check.RemoteExists) { Test-GitConnectivity -RepositoryPath $ProjectInfo.Config.local_path -RemoteName $ProjectInfo.Config.remote -TimeoutSeconds 10 } else { $null }
                 return [PSCustomObject]@{ Check = $check; Connectivity = $connectivity }
             } -OnComplete {
                 param($completion, $key)
                 if (-not $completion.Success) {
-                    Set-RowStatus -ProjectKey $key -StatusKey 'Failed' -ExtraText $completion.Error
+                    & $SetRowStatus -ProjectKey $key -StatusKey 'Failed' -ExtraText $completion.Error
                     return
                 }
                 $data = $completion.Result
                 $check = $data.Check
                 if (-not $check.IsGitRepo -or -not $check.BranchMatches -or -not $check.RemoteExists) {
-                    Set-RowStatus -ProjectKey $key -StatusKey 'Failed' -ExtraText $check.FailureReason
+                    & $SetRowStatus -ProjectKey $key -StatusKey 'Failed' -ExtraText $check.FailureReason
                 } else {
-                    Set-RowStatus -ProjectKey $key -StatusKey $check.StatusKey
+                    & $SetRowStatus -ProjectKey $key -StatusKey $check.StatusKey
                 }
                 if ($data.Connectivity -and -not $data.Connectivity.Ok) {
-                    Append-Log -Text "اتصال Git برای '$key' ناموفق بود ($($data.Connectivity.Category)): $($data.Connectivity.Message)" -ColorName 'Red'
+                    & $AppendLog -Text "اتصال Git برای '$key' ناموفق بود ($($data.Connectivity.Category)): $($data.Connectivity.Message)" -ColorName 'Red'
                 } elseif ($data.Connectivity -and $data.Connectivity.Ok) {
-                    Append-Log -Text "اتصال Git برای '$key' موفق بود." -ColorName 'Green'
+                    & $AppendLog -Text "اتصال Git برای '$key' موفق بود." -ColorName 'Green'
                 }
-                Append-Log -Text "بررسی '$key' کامل شد." -ColorName 'Gray'
+                & $AppendLog -Text "بررسی '$key' کامل شد." -ColorName 'Gray'
             }
         }
 
-        function Invoke-GitOnlyAction {
+        $InvokeGitOnlyAction = {
             param($Row)
             $projectInfo = $Row.ProjectInfo
-            Append-Log -Text "در حال بررسی پروژه '$($projectInfo.Key)' قبل از ارسال..." -ColorName 'Blue'
+            & $AppendLog -Text "در حال بررسی پروژه '$($projectInfo.Key)' قبل از ارسال..." -ColorName 'Blue'
 
             # The check itself is fast (local git only) — but still run it
             # off the UI thread so a slow disk/antivirus scan can never
             # freeze the window, matching "پنجره اصلی Freeze نشود" for
             # every operation, not just the visibly slow ones.
-            Start-Tracked -ProjectKey $projectInfo.Key -Variables @{ ProjectInfo = $projectInfo } -Operation {
+            & $StartTracked -ProjectKey $projectInfo.Key -Variables @{ ProjectInfo = $projectInfo } -Operation {
                 return Get-ProjectCheckResult -ProjectInfo $ProjectInfo
             } -OnComplete {
                 param($completion, $key)
                 if (-not $completion.Success) {
                     Show-LauncherError -Text "بررسی پروژه با خطا مواجه شد: $($completion.Error)"
-                    Set-RowStatus -ProjectKey $key -StatusKey 'Failed' -ExtraText $completion.Error
+                    & $SetRowStatus -ProjectKey $key -StatusKey 'Failed' -ExtraText $completion.Error
                     return
                 }
                 $check = $completion.Result
                 if (-not $check.IsGitRepo -or -not $check.BranchMatches -or -not $check.RemoteExists) {
                     Show-LauncherError -Text "Preflight ناموفق بود: $($check.FailureReason)"
-                    Set-RowStatus -ProjectKey $key -StatusKey 'Failed' -ExtraText $check.FailureReason
+                    & $SetRowStatus -ProjectKey $key -StatusKey 'Failed' -ExtraText $check.FailureReason
                     return
                 }
                 if (-not $check.HasUncommittedChanges -and -not $check.HasUnpushedCommit) {
-                    Set-RowStatus -ProjectKey $key -StatusKey 'NoChanges'
+                    & $SetRowStatus -ProjectKey $key -StatusKey 'NoChanges'
                     Show-LauncherInfo -Text "پروژه '$key' هیچ تغییری برای ارسال ندارد."
                     return
                 }
-
                 $commitMessage = $null
                 if ($check.HasUncommittedChanges) {
-                    $sensitive = Test-SensitiveFiles -RepositoryPath $Row.ProjectInfo.Config.local_path -StatusLines $check.StatusLines
+                    $sensitive = Test-SensitiveFiles -RepositoryPath $GuiState.GuiRows[$key].ProjectInfo.Config.local_path -StatusLines $check.StatusLines
                     if (@($sensitive.BlockedFiles).Count -gt 0) {
                         Show-LauncherError -Text "فایل حساس/مسدود پیدا شد و ارسال متوقف شد:`n$($sensitive.BlockedFiles -join "`n")"
                         return
@@ -495,9 +673,9 @@ function Show-SimpleDeployLauncher {
                 }
 
                 $runLog = New-LauncherRunLog -ProjectKey $key -LogsRootDir $logsRootDir
-                $script:CurrentRunLog = $runLog
+                $GuiState.CurrentRunLog = $runLog
 
-                Start-Tracked -ProjectKey $key -Variables @{ ProjectInfo = $Row.ProjectInfo; Check = $check; CommitMessage = $commitMessage } -Operation {
+                & $StartTracked -ProjectKey $key -Variables @{ ProjectInfo = $GuiState.GuiRows[$key].ProjectInfo; Check = $check; CommitMessage = $commitMessage } -Operation {
                     return Invoke-LauncherGitOnlyFlow -ProjectInfo $ProjectInfo -Check $Check -CommitMessage $CommitMessage -ProgressCallback {
                         param($statusKey) $OutputQueue.Enqueue(@{ Type = 'StatusChange'; Text = $statusKey })
                     } -RetryNoticeCallback {
@@ -506,32 +684,32 @@ function Show-SimpleDeployLauncher {
                 } -OnOutput {
                     param($item)
                     if ($item.Type -eq 'StatusChange') {
-                        Set-RowStatus -ProjectKey $key -StatusKey $item.Text
+                        & $SetRowStatus -ProjectKey $key -StatusKey $item.Text
                     }
                 } -OnComplete {
                     param($completion, $completedKey)
                     if ($completion.Success) {
                         $flowResult = $completion.Result
                         if ($flowResult.Status -eq 'Succeeded') {
-                            Set-RowStatus -ProjectKey $completedKey -StatusKey 'Completed'
-                            $Row.LastResultLabel.Text = "آخرین نتیجه: Push موفق ($((Get-Date).ToString('HH:mm:ss'))) — commit $($flowResult.CommitSha.Substring(0,12))"
-                            Complete-LauncherRunLog -RunLog $script:CurrentRunLog -Outcome 'Succeeded' -CommitSha $flowResult.CommitSha | Out-Null
+                            & $SetRowStatus -ProjectKey $completedKey -StatusKey 'Completed'
+                            $GuiState.GuiRows[$completedKey].LastResultLabel.Text = "آخرین نتیجه: Push موفق ($((Get-Date).ToString('HH:mm:ss'))) — commit $($flowResult.CommitSha.Substring(0,12))"
+                            Complete-LauncherRunLog -RunLog $GuiState.CurrentRunLog -Outcome 'Succeeded' -CommitSha $flowResult.CommitSha | Out-Null
                         } else {
-                            Set-RowStatus -ProjectKey $completedKey -StatusKey 'NoChanges'
-                            Complete-LauncherRunLog -RunLog $script:CurrentRunLog -Outcome $flowResult.Status | Out-Null
+                            & $SetRowStatus -ProjectKey $completedKey -StatusKey 'NoChanges'
+                            Complete-LauncherRunLog -RunLog $GuiState.CurrentRunLog -Outcome $flowResult.Status | Out-Null
                         }
                     } else {
-                        Set-RowStatus -ProjectKey $completedKey -StatusKey 'Failed' -ExtraText $completion.Error
-                        $Row.LastResultLabel.Text = "آخرین نتیجه: ناموفق ($((Get-Date).ToString('HH:mm:ss')))"
-                        Complete-LauncherRunLog -RunLog $script:CurrentRunLog -Outcome 'Failed' -ErrorText $completion.Error | Out-Null
+                        & $SetRowStatus -ProjectKey $completedKey -StatusKey 'Failed' -ExtraText $completion.Error
+                        $GuiState.GuiRows[$completedKey].LastResultLabel.Text = "آخرین نتیجه: ناموفق ($((Get-Date).ToString('HH:mm:ss')))"
+                        Complete-LauncherRunLog -RunLog $GuiState.CurrentRunLog -Outcome 'Failed' -ErrorText $completion.Error | Out-Null
                         Show-LauncherError -Text "ارسال به Git برای '$completedKey' ناموفق بود:`n$($completion.Error)"
                     }
-                    $script:CurrentRunLog = $null
+                    $GuiState.CurrentRunLog = $null
                 }
             }
         }
 
-        function Invoke-DeployAction {
+        $InvokeDeployAction = {
             param($Row)
             $projectInfo = $Row.ProjectInfo
             if (-not $projectInfo.IsDeployable) {
@@ -547,13 +725,13 @@ function Show-SimpleDeployLauncher {
             if ($null -eq $commitMessage) { return }
 
             $runLog = New-LauncherRunLog -ProjectKey $projectInfo.Key -LogsRootDir $logsRootDir
-            $script:CurrentRunLog = $runLog
-            $script:PausedByThisRun = $true
-            Update-ServiceStatusLabel
+            $GuiState.CurrentRunLog = $runLog
+            $GuiState.PausedByThisRun = $true
+            & $UpdateServiceStatusLabel
 
-            Start-Tracked -ProjectKey $projectInfo.Key -Variables @{
+            & $StartTracked -ProjectKey $projectInfo.Key -Variables @{
                 ProjectInfo   = $projectInfo
-                Config        = $script:GuiConfig
+                Config        = $GuiState.GuiConfig
                 ToolRoot      = $ToolRoot
                 StateDir      = $stateDir
                 CommitMessage = $commitMessage
@@ -561,38 +739,38 @@ function Show-SimpleDeployLauncher {
                 return Invoke-LauncherDeployFlow -ProjectInfo $ProjectInfo -Config $Config -ToolRoot $ToolRoot -StateDir $StateDir -CommitMessage $CommitMessage
             } -OnComplete {
                 param($completion, $key)
-                $script:PausedByThisRun = $false
-                Update-ServiceStatusLabel
+                $GuiState.PausedByThisRun = $false
+                & $UpdateServiceStatusLabel
                 if ($completion.Success) {
                     $deployResult = $completion.Result
                     switch ($deployResult.Status) {
                         'Succeeded' {
-                            Set-RowStatus -ProjectKey $key -StatusKey 'Completed'
-                            $Row.LastResultLabel.Text = "آخرین نتیجه: موفق ($((Get-Date).ToString('HH:mm:ss')))" + $(if ($deployResult.CommitSha) { " — commit $($deployResult.CommitSha.Substring(0,12))" } else { '' })
-                            Complete-LauncherRunLog -RunLog $script:CurrentRunLog -Outcome 'Succeeded' -CommitSha $deployResult.CommitSha | Out-Null
+                            & $SetRowStatus -ProjectKey $key -StatusKey 'Completed'
+                            $GuiState.GuiRows[$key].LastResultLabel.Text = "آخرین نتیجه: موفق ($((Get-Date).ToString('HH:mm:ss')))" + $(if ($deployResult.CommitSha) { " — commit $($deployResult.CommitSha.Substring(0,12))" } else { '' })
+                            Complete-LauncherRunLog -RunLog $GuiState.CurrentRunLog -Outcome 'Succeeded' -CommitSha $deployResult.CommitSha | Out-Null
                         }
                         'Skipped' {
-                            Set-RowStatus -ProjectKey $key -StatusKey 'NoChanges' -ExtraText $deployResult.Reason
-                            Complete-LauncherRunLog -RunLog $script:CurrentRunLog -Outcome 'Skipped' | Out-Null
+                            & $SetRowStatus -ProjectKey $key -StatusKey 'NoChanges' -ExtraText $deployResult.Reason
+                            Complete-LauncherRunLog -RunLog $GuiState.CurrentRunLog -Outcome 'Skipped' | Out-Null
                         }
                         default {
-                            Set-RowStatus -ProjectKey $key -StatusKey 'Failed' -ExtraText $deployResult.Reason
-                            $Row.LastResultLabel.Text = "آخرین نتیجه: ناموفق ($((Get-Date).ToString('HH:mm:ss')))"
-                            Complete-LauncherRunLog -RunLog $script:CurrentRunLog -Outcome 'Failed' -ErrorText $deployResult.Reason | Out-Null
+                            & $SetRowStatus -ProjectKey $key -StatusKey 'Failed' -ExtraText $deployResult.Reason
+                            $GuiState.GuiRows[$key].LastResultLabel.Text = "آخرین نتیجه: ناموفق ($((Get-Date).ToString('HH:mm:ss')))"
+                            Complete-LauncherRunLog -RunLog $GuiState.CurrentRunLog -Outcome 'Failed' -ErrorText $deployResult.Reason | Out-Null
                             Show-LauncherError -Text "Deploy برای '$key' ناموفق بود: $($deployResult.Reason)"
                         }
                     }
                 } else {
-                    Set-RowStatus -ProjectKey $key -StatusKey 'Failed' -ExtraText $completion.Error
-                    $Row.LastResultLabel.Text = "آخرین نتیجه: ناموفق ($((Get-Date).ToString('HH:mm:ss')))"
-                    Complete-LauncherRunLog -RunLog $script:CurrentRunLog -Outcome 'Failed' -ErrorText $completion.Error | Out-Null
+                    & $SetRowStatus -ProjectKey $key -StatusKey 'Failed' -ExtraText $completion.Error
+                    $GuiState.GuiRows[$key].LastResultLabel.Text = "آخرین نتیجه: ناموفق ($((Get-Date).ToString('HH:mm:ss')))"
+                    Complete-LauncherRunLog -RunLog $GuiState.CurrentRunLog -Outcome 'Failed' -ErrorText $completion.Error | Out-Null
                     Show-LauncherError -Text "Deploy برای '$key' ناموفق بود:`n$($completion.Error)"
                 }
-                $script:CurrentRunLog = $null
+                $GuiState.CurrentRunLog = $null
             }
         }
 
-        function Invoke-ViewLogAction {
+        $InvokeViewLogAction = {
             param($Row)
             $key = $Row.ProjectInfo.Key
             if (-not (Test-Path -LiteralPath $logsRootDir)) {
@@ -608,62 +786,71 @@ function Show-SimpleDeployLauncher {
             Start-Process -FilePath 'notepad.exe' -ArgumentList @("`"$($latest.FullName)`"")
         }
 
-        function Invoke-CheckAllAction {
-            foreach ($key in $script:GuiRows.Keys) {
-                Invoke-CheckAction -Row $script:GuiRows[$key]
-                # Sequential: wait for this project's check to finish
-                # before starting the next, so status updates stay legible
-                # and only one background operation is ever active.
-                while ($script:CurrentHandle) {
-                    [System.Windows.Forms.Application]::DoEvents()
-                    Start-Sleep -Milliseconds 50
-                }
-            }
+        $InvokeCheckAllAction = {
+            $keys = @($GuiState.GuiRows.Keys)
+            if ($keys.Count -eq 0) { return }
+            # Sequential by design (status updates stay legible and only
+            # one background operation is ever active) -- but driven by
+            # $AdvanceCheckAll/pollTimer, never a UI-thread wait loop. This
+            # call only enqueues the batch and starts project #1; every
+            # subsequent project is started later, from pollTimer's own
+            # completion branch.
+            $GuiState.CheckAllQueue = New-Object System.Collections.Generic.Queue[string]
+            foreach ($k in $keys) { $GuiState.CheckAllQueue.Enqueue($k) }
+            $GuiState.CheckAllTotal = $keys.Count
+            $GuiState.CheckAllCancelled = $false
+            & $AdvanceCheckAll
         }
 
-        function Build-ProjectRows {
+        $BuildProjectRows = {
             $projectsPanel.Controls.Clear()
-            $script:GuiRows = @{}
-            $script:GuiConfig = Get-SimpleDeployConfig -ConfigPath $ConfigPath
-            $script:GuiProjects = Get-EnabledProjects -Config $script:GuiConfig
-            foreach ($projectInfo in $script:GuiProjects) {
-                $row = New-ProjectRow -ProjectInfo $projectInfo
-                $script:GuiRows[$projectInfo.Key] = $row
+            $GuiState.GuiRows = @{}
+            $GuiState.GuiConfig = Get-SimpleDeployConfig -ConfigPath $ConfigPath
+            $GuiState.GuiProjects = Get-EnabledProjects -Config $GuiState.GuiConfig
+            foreach ($projectInfo in $GuiState.GuiProjects) {
+                $row = & $NewProjectRow -ProjectInfo $projectInfo -InvokeCheckAction $InvokeCheckAction -InvokeGitOnlyAction $InvokeGitOnlyAction -InvokeDeployAction $InvokeDeployAction -InvokeViewLogAction $InvokeViewLogAction
+                $GuiState.GuiRows[$projectInfo.Key] = $row
                 $projectsPanel.Controls.Add($row.Card)
             }
-            Update-ServiceStatusLabel
+            & $UpdateServiceStatusLabel
         }
 
-        $checkAllButton.Add_Click({ Invoke-CheckAllAction })
+        $checkAllButton.Add_Click({ & $InvokeCheckAllAction }.GetNewClosure())
         $reloadButton.Add_Click({
-            Build-ProjectRows
-            Append-Log -Text 'فهرست پروژه‌ها از config.json دوباره بارگذاری شد.' -ColorName 'Gray'
-        })
+            & $BuildProjectRows
+            & $AppendLog -Text 'فهرست پروژه‌ها از config.json دوباره بارگذاری شد.' -ColorName 'Gray'
+        }.GetNewClosure())
 
         $form.Add_FormClosing({
             param($sender, $e)
-            if ($script:CurrentHandle) {
+            if ($GuiState.CurrentHandle) {
                 $proceed = Show-LauncherConfirm -Text 'یک عملیات هنوز در حال اجراست. بستن برنامه صبر می‌کند تا مرحله فعلی به‌صورت امن به پایان برسد و سرویس Deployment بازگردانده شود. ادامه می‌دهید؟'
                 if (-not $proceed) { $e.Cancel = $true; return }
-                Stop-LauncherOperation -Handle $script:CurrentHandle
+                Stop-LauncherOperation -Handle $GuiState.CurrentHandle
+                # Bounded (max 60s) and only reached on this one rare path
+                # (closing while an operation is active) -- DoEvents() here
+                # keeps the window repainting/responsive during the wait
+                # instead of appearing hung, same reasoning as everywhere
+                # else in this file that a wait is unavoidable.
                 $waitDeadline = (Get-Date).AddSeconds(60)
-                while (-not (Test-LauncherOperationComplete -Handle $script:CurrentHandle) -and (Get-Date) -lt $waitDeadline) {
+                while (-not (Test-LauncherOperationComplete -Handle $GuiState.CurrentHandle) -and (Get-Date) -lt $waitDeadline) {
+                    [System.Windows.Forms.Application]::DoEvents()
                     Start-Sleep -Milliseconds 100
                 }
-                if ($script:CurrentHandle) {
-                    Complete-LauncherOperation -Handle $script:CurrentHandle | Out-Null
-                    $script:CurrentHandle = $null
+                if ($GuiState.CurrentHandle) {
+                    Complete-LauncherOperation -Handle $GuiState.CurrentHandle | Out-Null
+                    $GuiState.CurrentHandle = $null
                 }
             }
-        })
+        }.GetNewClosure())
 
         try {
-            Build-ProjectRows
+            & $BuildProjectRows
         } catch {
             Show-LauncherError -Text "بارگذاری اولیه پیکربندی با خطا مواجه شد:`n$($_.Exception.Message)"
             return
         }
-        Append-Log -Text 'SimpleDeploy Launcher آماده است.' -ColorName 'Gray'
+        & $AppendLog -Text 'SimpleDeploy Launcher آماده است.' -ColorName 'Gray'
 
         # The .bat launcher starts powershell.exe with -WindowStyle Hidden
         # so the console never flashes — but that hidden show-state is
@@ -678,6 +865,7 @@ function Show-SimpleDeployLauncher {
 
         [System.Windows.Forms.Application]::Run($form)
     } finally {
+        Close-LauncherRunspace
         Exit-SimpleDeployLock -Mutex $lockMutex
     }
 }
