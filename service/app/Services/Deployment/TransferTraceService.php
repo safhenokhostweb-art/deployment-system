@@ -79,13 +79,17 @@ class TransferTraceService
         if ($dirty) return 'WORKTREE_DIRTY';
         if ($local !== null && $remote !== null && $local !== $remote) return 'LOCAL_ONLY';
         if ($publish !== null && in_array($publish->status, [PublishJob::STATUS_QUEUED, PublishJob::STATUS_AWAITING_APPROVAL, PublishJob::STATUS_APPROVED, PublishJob::STATUS_RUNNING], true)) return 'PUBLISH_PENDING';
+        if ($artifact?->status === Artifact::STATUS_FAILED) return 'ARTIFACT_FAILED';
+        if ($deployment?->status === Deployment::STATUS_FAILED) return 'DEPLOY_FAILED';
+        if ($published = ($publish?->status === PublishJob::STATUS_SUCCEEDED ? $publish->result_commit_hash : null)) {
+            if ($artifact === null || $artifact->commit_hash !== $published) return 'PUBLISHED_NO_ARTIFACT';
+        }
         if ($artifact?->status === Artifact::STATUS_UPLOADING) return 'ARTIFACT_BUILDING';
         if ($deployment !== null && $deployment->isInProgress()) return 'DEPLOYING';
         if ($deployment !== null && in_array($deployment->status, [Deployment::STATUS_QUEUED, Deployment::STATUS_PENDING_APPROVAL], true)) return 'DEPLOY_PENDING';
-        if ($deployment?->status === Deployment::STATUS_FAILED || $artifact?->status === Artifact::STATUS_FAILED) return 'FAILED';
         if ($artifact?->isAvailable() && ($deployment === null || $deployment->deployed_at === null)) return 'ARTIFACT_AVAILABLE';
+        if ($production !== null && $remote !== null && $production !== $remote) return 'PRODUCTION_BEHIND';
         if ($production !== null && ($remote === null || $production === $remote)) return 'DEPLOYED';
-        if ($production !== null && $remote !== null && $production !== $remote) return 'DRIFTED';
         return 'UNKNOWN';
     }
 
@@ -94,7 +98,7 @@ class TransferTraceService
         $warnings = [];
         if ($dirty) $warnings[] = 'WORKTREE_DIRTY';
         if ($local !== null && $remote !== null && $local !== $remote) $warnings[] = 'LOCAL_NOT_PUSHED';
-        if ($published !== null && $artifact === null) $warnings[] = 'PUSHED_BUT_NOT_PUBLISHED';
+        if ($published !== null && $artifact === null) $warnings[] = 'PUBLISHED_NO_ARTIFACT';
         if ($artifact !== null && ($deployment === null || $deployment->commit_hash !== $artifact || $deployment->deployed_at === null)) $warnings[] = 'ARTIFACT_READY_BUT_NOT_DEPLOYED';
         if ($deployment?->status === Deployment::STATUS_FAILED) $warnings[] = 'DEPLOYMENT_FAILED';
         if ($published !== null && $production !== null && $published !== $production) $warnings[] = 'PRODUCTION_BEHIND_REMOTE';

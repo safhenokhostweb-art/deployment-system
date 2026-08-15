@@ -72,4 +72,33 @@ class TransferTraceServiceTest extends TestCase
         $this->assertSame($remote, $trace['remote_tracking_sha']);
         $this->assertContains('LOCAL_NOT_PUSHED', $trace['warnings']);
     }
+
+    public function test_it_distinguishes_published_without_artifact_and_artifact_failure(): void
+    {
+        $project = Project::factory()->create();
+        $sha = str_repeat('c', 40);
+        PublishJob::factory()->create(['project_id' => $project->id, 'action' => PublishJob::ACTION_PUBLISH, 'status' => PublishJob::STATUS_SUCCEEDED, 'result_commit_hash' => $sha]);
+
+        $trace = app(TransferTraceService::class)->forProject($project);
+        $this->assertSame('PUBLISHED_NO_ARTIFACT', $trace['state']);
+        $this->assertContains('PUBLISHED_NO_ARTIFACT', $trace['warnings']);
+
+        Artifact::factory()->create(['project_id' => $project->id, 'commit_hash' => $sha, 'status' => Artifact::STATUS_FAILED]);
+        $trace = app(TransferTraceService::class)->forProject($project);
+        $this->assertSame('ARTIFACT_FAILED', $trace['state']);
+    }
+
+    public function test_it_distinguishes_deployment_failure_and_production_behind_remote(): void
+    {
+        $project = Project::factory()->create();
+        $old = str_repeat('d', 40);
+        $remote = str_repeat('e', 40);
+        LocalProjectMapping::factory()->create(['project_id' => $project->id, 'local_agent_id' => LocalAgent::factory()->approved(), 'local_head_sha' => $remote, 'remote_tracking_sha' => $remote, 'working_tree_dirty' => false, 'reported_at' => now()]);
+        Deployment::factory()->create(['project_id' => $project->id, 'server_id' => $project->server_id, 'commit_hash' => $old, 'status' => Deployment::STATUS_SUCCEEDED, 'deployed_at' => now()]);
+
+        $this->assertSame('PRODUCTION_BEHIND', app(TransferTraceService::class)->forProject($project)['state']);
+
+        Deployment::factory()->create(['project_id' => $project->id, 'server_id' => $project->server_id, 'commit_hash' => $remote, 'status' => Deployment::STATUS_FAILED]);
+        $this->assertSame('DEPLOY_FAILED', app(TransferTraceService::class)->forProject($project)['state']);
+    }
 }
