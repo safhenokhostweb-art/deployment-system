@@ -60,13 +60,14 @@ class ArtifactService
         $diskPath = "{$project->project_key}/{$commitHash}.zip";
 
         return DB::transaction(function () use ($project, $commitHash, $branch, $claimedChecksum, $claimedSizeBytes, $uploadedBy, $diskPath) {
-            // Upsert: a retried upload for the same commit (an earlier
-            // attempt failed partway) replaces the old row/file instead of
-            // violating the (project_id, commit_hash) unique index.
             $existing = Artifact::where('project_id', $project->id)->where('commit_hash', $commitHash)->lockForUpdate()->first();
             if ($existing !== null) {
-                Storage::disk('artifacts')->delete($existing->disk_path);
-                $existing->delete();
+                abort_if($existing->checksum_sha256 !== $claimedChecksum, 409, 'artifact_checksum_conflict: this project and commit already have an artifact with a different checksum.');
+
+                // Same canonical identity: preserve both the public ID and
+                // an already-verified file. This is safe for a lost create
+                // response and for concurrent retry callers.
+                return $existing;
             }
 
             $artifact = Artifact::create([
@@ -115,6 +116,12 @@ class ArtifactService
      */
     public function finalizeUpload(Artifact $artifact, string $rawBytes, int $retentionCount): Artifact
     {
+        if ($artifact->status === Artifact::STATUS_AVAILABLE) {
+            $actualChecksum = hash('sha256', $rawBytes);
+            abort_if($actualChecksum !== $artifact->checksum_sha256, 409, 'artifact_checksum_conflict: uploaded bytes differ from the available artifact.');
+
+            return $artifact;
+        }
         abort_unless($artifact->status === Artifact::STATUS_UPLOADING, 409, "Artifact is not awaiting upload (status: {$artifact->status}).");
         abort_if(strlen($rawBytes) > $this->maxSizeBytes(), 422, 'Artifact exceeds the maximum allowed size of ' . (int) ($this->maxSizeBytes() / 1024 / 1024) . 'MB.');
 

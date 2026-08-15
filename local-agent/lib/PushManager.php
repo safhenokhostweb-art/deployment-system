@@ -14,19 +14,35 @@ final class PushManager
 {
     public function __construct(
         private readonly GitManager $git,
+        private readonly ?RetryPolicy $retryPolicy = null,
+        /** @var \Closure(string,string,string,?callable):array{exitCode:int,output:string,timedOut:bool}|null */
+        ?callable $attemptRunner = null,
     ) {
+        $this->attemptRunner = $attemptRunner === null ? null : \Closure::fromCallable($attemptRunner);
     }
+
+    /** @var \Closure(string,string,string,?callable):array{exitCode:int,output:string,timedOut:bool}|null */
+    private readonly ?\Closure $attemptRunner;
 
     public function push(string $repositoryPath, string $remoteName, string $branch, ?callable $onTick = null): string
     {
-        $result = $this->git->run(['git', 'push', $remoteName, $branch], $repositoryPath, $this->git->timeoutFor('push'), $onTick);
+        $commitHash = $this->git->lastCommitHash($repositoryPath);
+        $policy = $this->retryPolicy ?? new RetryPolicy();
 
-        if ($result['exitCode'] !== 0) {
+        return $policy->run(function () use ($repositoryPath, $remoteName, $branch, $onTick, $commitHash): string {
+            if ($this->git->lastCommitHash($repositoryPath) !== $commitHash) {
+                throw new GitCommandException('Refusing to retry git push because HEAD changed during the push operation.');
+            }
+            $result = $this->attemptRunner !== null
+                ? ($this->attemptRunner)($repositoryPath, $remoteName, $branch, $onTick)
+                : $this->git->run(['git', 'push', $remoteName, $branch], $repositoryPath, $this->git->timeoutFor('push'), $onTick);
+            if ($result['exitCode'] === 0) return $result['output'];
+            $message = trim($result['output']);
+            if (GitPushFailureClassifier::isRetryable($message)) {
+                throw new RetryableOperationException('transient git push transport failure');
+            }
             $reason = $result['timedOut'] ? 'timed out' : 'failed';
-
-            throw new GitCommandException("git push {$reason} in {$repositoryPath}: " . trim($result['output']), $result['timedOut']);
-        }
-
-        return $result['output'];
+            throw new GitCommandException("git push {$reason} in {$repositoryPath}: {$message}", $result['timedOut']);
+        });
     }
 }

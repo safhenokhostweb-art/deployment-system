@@ -36,6 +36,8 @@ require __DIR__ . '/lib/Client.php';
 require __DIR__ . '/lib/GitCommandException.php';
 require __DIR__ . '/lib/JobMaxRuntimeExceededException.php';
 require __DIR__ . '/lib/GitManager.php';
+require __DIR__ . '/lib/RetryPolicy.php';
+require __DIR__ . '/lib/GitPushFailureClassifier.php';
 require __DIR__ . '/lib/CommitManager.php';
 require __DIR__ . '/lib/PushManager.php';
 require __DIR__ . '/lib/IgnoreRules.php';

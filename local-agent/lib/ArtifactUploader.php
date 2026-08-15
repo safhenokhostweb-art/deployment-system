@@ -38,6 +38,7 @@ final class ArtifactUploader
         private readonly Logger $logger,
         private readonly string $workspaceBaseDir,
         private readonly int $workspaceTtlSeconds = 86400,
+        private readonly ?RetryPolicy $retryPolicy = null,
     ) {
     }
 
@@ -61,13 +62,13 @@ final class ArtifactUploader
             $archive = $this->builder->build($workspace->projectDir(), $workspace->root(), $prepared['commitTimestamp'], $buildResult);
             $archivePath = $archive['path'];
 
-            $createResponse = $this->client->request('POST', '/api/local-agent/artifacts', [
+            $createResponse = $this->retryHub(fn () => $this->client->request('POST', '/api/local-agent/artifacts', [
                 'project_key' => $projectKey,
                 'commit_hash' => $commitHash,
                 'branch' => $branch,
                 'checksum_sha256' => $archive['checksum'],
                 'size_bytes' => $archive['size'],
-            ]);
+            ]));
 
             if ($createResponse['status'] !== 201) {
                 $message = $createResponse['body']['message'] ?? "HTTP {$createResponse['status']}";
@@ -85,7 +86,7 @@ final class ArtifactUploader
                 return ['succeeded' => false, 'message' => "Could not read the assembled artifact back from {$archivePath}.", 'failureCode' => 'artifact_build_failed'];
             }
 
-            $uploadResponse = $this->client->uploadRawBody('POST', "/api/local-agent/artifacts/{$artifactId}/content", $contents);
+            $uploadResponse = $this->retryHub(fn () => $this->client->uploadRawBody('POST', "/api/local-agent/artifacts/{$artifactId}/content", $contents));
 
             if ($uploadResponse['status'] !== 200) {
                 $message = $uploadResponse['body']['message'] ?? "HTTP {$uploadResponse['status']}";
@@ -120,5 +121,16 @@ final class ArtifactUploader
                 @unlink($archivePath);
             }
         }
+    }
+
+    /** @return array{status:int, body:array<string,mixed>} */
+    private function retryHub(callable $operation): array
+    {
+        $policy = $this->retryPolicy ?? new RetryPolicy();
+        return $policy->run(function () use ($operation): array {
+            try { $response = $operation(); } catch (\RuntimeException $e) { throw new RetryableHubException('transient transport failure'); }
+            if (RetryPolicy::isRetryableStatus($response['status'])) throw new RetryableHubException('HTTP ' . $response['status']);
+            return $response;
+        });
     }
 }

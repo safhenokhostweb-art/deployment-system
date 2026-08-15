@@ -101,6 +101,24 @@ class LocalAgentArtifactFlowTest extends TestCase
         $this->postJson($path, $body, $headers)->assertStatus(403);
     }
 
+    public function test_create_is_idempotent_and_preserves_available_artifact_on_conflict(): void
+    {
+        [$agent, $project] = $this->mappedAgentAndProject();
+        $content = $this->buildZipBytes(['index.php' => 'idempotent']);
+        $body = ['project_key' => $project->project_key, 'commit_hash' => str_repeat('e', 40), 'branch' => 'main', 'checksum_sha256' => hash('sha256', $content), 'size_bytes' => strlen($content)];
+        $path = '/api/local-agent/artifacts';
+        $first = $this->postJson($path, $body, $this->headersFor($agent, 'POST', $path, json_encode($body)))->assertCreated()->json('artifact_id');
+        $second = $this->postJson($path, $body, $this->headersFor($agent, 'POST', $path, json_encode($body)))->assertCreated()->json('artifact_id');
+        $this->assertSame($first, $second);
+        $contentPath = "/api/local-agent/artifacts/{$first}/content";
+        $this->call('POST', $contentPath, [], [], [], array_merge($this->toRawServerVars($this->headersFor($agent, 'POST', $contentPath, $content)), ['CONTENT_TYPE' => 'application/octet-stream']), $content)->assertOk();
+        $this->postJson($path, $body, $this->headersFor($agent, 'POST', $path, json_encode($body)))->assertCreated()->assertJsonPath('artifact_id', $first);
+        $bad = $body; $bad['checksum_sha256'] = str_repeat('f', 64);
+        $this->postJson($path, $bad, $this->headersFor($agent, 'POST', $path, json_encode($bad)))->assertStatus(409);
+        $this->assertDatabaseHas('artifacts', ['public_id' => $first, 'status' => Artifact::STATUS_AVAILABLE]);
+        $this->assertSame($content, Storage::disk('artifacts')->get("{$project->project_key}/" . $body['commit_hash'] . '.zip'));
+    }
+
     public function test_create_rejects_an_unknown_project_key(): void
     {
         $agent = LocalAgent::factory()->approved()->create();
