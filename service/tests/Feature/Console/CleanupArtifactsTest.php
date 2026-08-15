@@ -3,6 +3,7 @@
 namespace Tests\Feature\Console;
 
 use App\Models\Artifact;
+use App\Models\Deployment;
 use App\Models\Project;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Storage;
@@ -47,6 +48,29 @@ class CleanupArtifactsTest extends TestCase
         $this->artisan('artifacts:cleanup')->assertSuccessful();
 
         $this->assertDatabaseHas('artifacts', ['id' => $artifact->id]);
+    }
+
+    public function test_preserves_an_expired_artifact_attached_to_deployment_history(): void
+    {
+        $project = Project::factory()->create();
+        $artifact = Artifact::factory()->create([
+            'project_id' => $project->id,
+            'status' => Artifact::STATUS_AVAILABLE,
+            'expires_at' => now()->subDay(),
+            'disk_path' => "{$project->project_key}/retained.zip",
+        ]);
+        Storage::disk('artifacts')->put($artifact->disk_path, 'historical-content');
+        Deployment::factory()->create([
+            'project_id' => $project->id,
+            'server_id' => $project->server_id,
+            'artifact_id' => $artifact->id,
+            'status' => Deployment::STATUS_SUCCEEDED,
+        ]);
+
+        $this->artisan('artifacts:cleanup')->assertSuccessful();
+
+        $this->assertDatabaseHas('artifacts', ['id' => $artifact->id]);
+        Storage::disk('artifacts')->assertExists($artifact->disk_path);
     }
 
     public function test_deletes_an_upload_abandoned_past_the_timeout(): void

@@ -31,6 +31,11 @@ class LocalProjectMapping extends Model
         'git_branch',
         'remote_name',
         'deployment_mode',
+        'local_head_sha',
+        'reported_branch',
+        'working_tree_dirty',
+        'remote_tracking_sha',
+        'reported_at',
     ];
 
     public function localAgent(): BelongsTo
@@ -53,5 +58,13 @@ class LocalProjectMapping extends Model
     public function effectiveBranch(): string
     {
         return $this->git_branch ?? $this->project->branch;
+    }
+
+    protected function casts(): array
+    {
+        return [
+            'working_tree_dirty' => 'boolean',
+            'reported_at' => 'datetime',
+        ];
     }
 }

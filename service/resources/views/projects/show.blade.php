@@ -40,6 +40,23 @@
     </table>
 </x-card>
 
+<x-card title="Transfer trace">
+    <table>
+        <tr><th>State</th><td>{{ $transferTrace['state'] }}</td></tr>
+        <tr><th>Local SHA</th><td><x-ltr><code>{{ $transferTrace['local_head_sha'] ?? 'not reported' }}</code></x-ltr></td></tr>
+        <tr><th>Remote SHA</th><td><x-ltr><code>{{ $transferTrace['remote_tracking_sha'] ?? 'not reported' }}</code></x-ltr></td></tr>
+        <tr><th>Pushed SHA</th><td><x-ltr><code>{{ $transferTrace['pushed_sha'] ?? 'unknown' }}</code></x-ltr></td></tr>
+        <tr><th>Artifact</th><td><x-ltr><code>{{ $transferTrace['artifact_sha'] ?? 'none' }}</code></x-ltr> — {{ $transferTrace['artifact_status'] ?? 'none' }}</td></tr>
+        <tr><th>Deployment</th><td><x-ltr><code>{{ $transferTrace['deployment_sha'] ?? 'none' }}</code></x-ltr> — {{ $transferTrace['deployment_status'] ?? 'none' }}</td></tr>
+        <tr><th>Production SHA</th><td><x-ltr><code>{{ $transferTrace['production_sha'] ?? 'unknown' }}</code></x-ltr></td></tr>
+        <tr><th>Pending SHA</th><td><x-ltr><code>{{ $transferTrace['pending_transfer_sha'] ?? 'none' }}</code></x-ltr></td></tr>
+        <tr><th>Failure stage</th><td>{{ $transferTrace['failure_stage'] ?? 'none' }} @if($transferTrace['deployment_failure_code']) — {{ $transferTrace['deployment_failure_code'] }} @endif</td></tr>
+    </table>
+    @if ($transferTrace['warnings'] !== [])
+        <p class="muted">{{ implode(' · ', $transferTrace['warnings']) }}</p>
+    @endif
+</x-card>
+
 @can('projects.manage-members')
 <x-card :title="__('ui.projects.members_title')">
     <p class="muted">{{ __('ui.projects.members_intro') }}</p>

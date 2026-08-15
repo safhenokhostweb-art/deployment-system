@@ -13,6 +13,7 @@ use App\Models\Server;
 use App\Models\User;
 use App\Services\Deployment\DeploymentDispatcher;
 use App\Services\Deployment\Recipe\RecipeValidator;
+use App\Services\Deployment\TransferTraceService;
 use App\Services\GitHub\GitHubApiException;
 use App\Services\GitHub\GitHubAppClient;
 use Illuminate\Http\RedirectResponse;
@@ -67,6 +68,7 @@ class ProjectController extends Controller
         private readonly DeploymentDispatcher $dispatcher,
         private readonly GitHubAppClient $github,
         private readonly RecipeValidator $recipeValidator,
+        private readonly TransferTraceService $transferTrace,
     ) {
     }
 
@@ -238,7 +240,9 @@ class ProjectController extends Controller
             ->latest('detected_at')
             ->first();
 
-        return view('projects.show', compact('project', 'deployments', 'webhookUrl', 'maskedWebhookSecret', 'availableServers', 'availableUsers', 'connectableGithubAccounts', 'openChangeDetection'));
+        $transferTrace = $this->transferTrace->forProject($project);
+
+        return view('projects.show', compact('project', 'deployments', 'webhookUrl', 'maskedWebhookSecret', 'availableServers', 'availableUsers', 'connectableGithubAccounts', 'openChangeDetection', 'transferTrace'));
     }
 
     public function rotateWebhookSecret(Request $request, Project $project): RedirectResponse

@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\LocalAgent;
+use App\Models\LocalProjectMapping;
 use App\Models\PublishJob;
 use App\Services\Publish\PublishJobService;
 use Illuminate\Http\Request;
@@ -34,6 +35,12 @@ class LocalAgentJobController extends Controller
             'operating_system' => 'nullable|string|max:100',
             'capabilities' => 'nullable|array',
             'agent_version' => 'nullable|string|max:50',
+            'project_states' => 'nullable|array|max:100',
+            'project_states.*.project_key' => 'required|string|max:255',
+            'project_states.*.local_head_sha' => 'nullable|string|regex:/^[0-9a-f]{40}$/',
+            'project_states.*.branch' => 'nullable|string|max:255',
+            'project_states.*.working_tree_dirty' => 'required|boolean',
+            'project_states.*.remote_tracking_sha' => 'nullable|string|regex:/^[0-9a-f]{40}$/',
         ]);
 
         $agent->forceFill([
@@ -42,6 +49,22 @@ class LocalAgentJobController extends Controller
             'capabilities' => $validated['capabilities'] ?? $agent->capabilities,
             'agent_version' => $validated['agent_version'] ?? $agent->agent_version,
         ])->save();
+
+        foreach ($validated['project_states'] ?? [] as $state) {
+            $mapping = LocalProjectMapping::query()
+                ->where('local_agent_id', $agent->id)
+                ->whereHas('project', fn ($query) => $query->where('project_key', $state['project_key']))
+                ->first();
+            abort_if($mapping === null, 422, 'Heartbeat reported a project that is not mapped to this Local Agent.');
+
+            $mapping->update([
+                'local_head_sha' => $state['local_head_sha'] ?? null,
+                'reported_branch' => $state['branch'] ?? null,
+                'working_tree_dirty' => $state['working_tree_dirty'],
+                'remote_tracking_sha' => $state['remote_tracking_sha'] ?? null,
+                'reported_at' => now(),
+            ]);
+        }
 
         // Phase 5.3: check-and-notify only — the agent decides for itself
         // whether to log this, nothing here ever triggers a download.

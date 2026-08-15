@@ -40,6 +40,7 @@ class CleanupArtifacts extends Command
         $expired = Artifact::where('status', Artifact::STATUS_AVAILABLE)
             ->whereNotNull('expires_at')
             ->where('expires_at', '<', now())
+            ->whereDoesntHave('deployments')
             ->get();
 
         foreach ($expired as $artifact) {

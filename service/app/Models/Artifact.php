@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Str;
 
 /**
@@ -55,6 +56,15 @@ class Artifact extends Model
     public function project(): BelongsTo
     {
         return $this->belongsTo(Project::class);
+    }
+
+    /**
+     * An available artifact attached to a Deployment is part of its
+     * forensic/rollback trail and must not be removed by retention.
+     */
+    public function deployments(): HasMany
+    {
+        return $this->hasMany(Deployment::class);
     }
 
     public function isAvailable(): bool

@@ -48,6 +48,7 @@ require __DIR__ . '/lib/InvalidProjectCacheException.php';
 require __DIR__ . '/lib/ProjectConfigCache.php';
 require __DIR__ . '/lib/ProjectConfigResolver.php';
 require __DIR__ . '/lib/ProjectConfigSyncScheduler.php';
+require __DIR__ . '/lib/LocalProjectStateReporter.php';
 require __DIR__ . '/lib/SafeFilesystem.php';
 require __DIR__ . '/lib/BuildWorkspace.php';
 require __DIR__ . '/lib/WorkspaceSourcePreparer.php';
@@ -67,6 +68,7 @@ use LocalAgent\JobMaxRuntimeExceededException;
 use LocalAgent\LocalBuildRunner;
 use LocalAgent\Logger;
 use LocalAgent\LogTail;
+use LocalAgent\LocalProjectStateReporter;
 use LocalAgent\ProjectConfigCache;
 use LocalAgent\ProjectConfigResolver;
 use LocalAgent\ProjectConfigSyncScheduler;
@@ -197,6 +199,7 @@ $lastSyncedAt = null;
 $knownConfigVersion = null;
 $reloadRequested = false;
 $projects = [];
+$projectStateReporter = new LocalProjectStateReporter();
 
 $runOnce = in_array('--once', $argv, true);
 
@@ -222,7 +225,7 @@ do {
     // Heartbeat first (not after sync, as before) so this cycle's
     // config_version is known before deciding whether to sync — see
     // ProjectConfigSyncScheduler::shouldSync().
-    $heartbeat = sendHeartbeat($client, $logger);
+    $heartbeat = sendHeartbeat($client, $logger, $projectStateReporter->collect($git, $projects, $logger));
 
     if ($syncScheduler->shouldSync($lastSyncedAt, $knownConfigVersion, $heartbeat['project_config_version'], $reloadRequested, time())) {
         $syncResult = syncProjectConfig($client, $cache, $projectConfigResolver, $logger, $legacyProjects);
@@ -683,7 +686,7 @@ function syncProjectConfig(Client $client, ProjectConfigCache $cache, ProjectCon
 /**
  * @return array{project_config_version: string|null}
  */
-function sendHeartbeat(Client $client, Logger $logger): array
+function sendHeartbeat(Client $client, Logger $logger, array $projectStates = []): array
 {
     try {
         $response = $client->request('POST', '/api/local-agent/heartbeat', [
@@ -691,6 +694,7 @@ function sendHeartbeat(Client $client, Logger $logger): array
             'operating_system' => PHP_OS_FAMILY,
             'agent_version' => LOCAL_AGENT_VERSION,
             'capabilities' => ['git' => true, 'php' => PHP_VERSION],
+            'project_states' => $projectStates,
         ]);
 
         $latestVersion = $response['body']['latest_version'] ?? null;
