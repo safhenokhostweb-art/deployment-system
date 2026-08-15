@@ -61,7 +61,7 @@ class AgentTaskClaimTest extends TestCase
         $headers = $this->agentHeaders('GET', '/api/agent/jobs/next', '', $agent->public_id, AgentFactory::$lastPlainToken, AgentFactory::$lastPlainSecret);
         $response = $this->get('/api/agent/jobs/next', $headers)->assertOk();
 
-        $response->assertJsonPath('job.project_key', 'web-01'); // DeploymentTarget name, same wire field as legacy project_key
+        $response->assertJsonPath('job.project_key', $ctx['project']->project_key);
         $this->assertSame(DeploymentTask::STATUS_RUNNING, $ctx['task']->fresh()->status);
         $this->assertCount(1, $ctx['task']->fresh()->agentJobs);
 

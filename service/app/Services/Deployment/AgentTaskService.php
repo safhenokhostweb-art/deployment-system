@@ -145,12 +145,11 @@ class AgentTaskService
 
         // Same wire shape as the legacy job payload — including the
         // "project_key" field name — so the existing, unmodified agent
-        // code (which only ever knows how to read that field to resolve
-        // its local working directory) needs no changes to run a
-        // new-domain job. The DeploymentTarget's name fills that role.
+        // code resolves its configured local working directory by the
+        // Project's canonical key, never by a human-facing target name.
         $job = [
             'id' => $agentJob->public_id,
-            'project_key' => $task->deploymentTarget->name,
+            'project_key' => $task->deployment->project->project_key,
             'action' => $task->deployment->action,
             'commit_hash' => $task->deployment->commit_hash,
             'previous_commit_hash' => $task->deployment->previous_commit_hash,
