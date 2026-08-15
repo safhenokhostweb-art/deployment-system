@@ -71,6 +71,7 @@ return [
         //     'local_path' => 'C:\\laragon\\www\\example-project',
         //     'remote_name' => 'origin',
         //     'branch' => 'main',
+        //     'application_root' => '.', // relative deployable app root
         // ],
     ],
 

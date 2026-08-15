@@ -39,7 +39,7 @@ final class ArtifactBuilder
 {
     /**
      * @param array{ranComposer: bool, ranNpmBuild: bool} $buildResult what LocalBuildRunner reported — determines which validations below actually apply
-     * @return array{path: string, checksum: string, size: int}
+     * @return array{path: string, checksum: string, size: int, requiredPaths: array<int, string>}
      * @throws LocalBuildFailedException
      */
     public function build(string $projectDir, string $workspaceRoot, int $commitTimestamp, array $buildResult): array
@@ -60,7 +60,7 @@ final class ArtifactBuilder
                 throw new LocalBuildFailedException('artifact_build_failed', 'Could not compute a checksum for the assembled artifact.');
             }
 
-            return ['path' => $finalZipPath, 'checksum' => $checksum, 'size' => $size];
+            return ['path' => $finalZipPath, 'checksum' => $checksum, 'size' => $size, 'requiredPaths' => $this->requiredPaths($projectDir, $buildResult)];
         } catch (\Throwable $e) {
             if ($finalZipPath !== null) {
                 @unlink($finalZipPath);
@@ -80,8 +80,8 @@ final class ArtifactBuilder
             throw new LocalBuildFailedException('artifact_build_failed', 'The assembled artifact workspace is empty.');
         }
 
-        if ($buildResult['ranComposer'] && !is_file("{$projectDir}/vendor/autoload.php")) {
-            throw new LocalBuildFailedException('artifact_missing_vendor', 'composer install succeeded but vendor/autoload.php is missing from the assembled artifact.');
+        if (is_file("{$projectDir}/composer.json") && !is_file("{$projectDir}/vendor/autoload.php")) {
+            throw new LocalBuildFailedException('artifact_missing_vendor', 'composer.json exists but vendor/autoload.php is missing from the assembled artifact.');
         }
 
         // The Laravel + Vite convention this codebase's own presets use
@@ -93,6 +93,22 @@ final class ArtifactBuilder
         if ($buildResult['ranNpmBuild'] && !is_file("{$projectDir}/public/build/manifest.json")) {
             throw new LocalBuildFailedException('artifact_missing_build', 'npm run build succeeded but public/build/manifest.json is missing from the assembled artifact.');
         }
+    }
+
+    /** @return array<int, string> */
+    private function requiredPaths(string $projectDir, array $buildResult): array
+    {
+        $paths = [];
+        if (is_file("{$projectDir}/composer.json")) {
+            $paths = ['composer.json', 'vendor/autoload.php'];
+            if (is_file("{$projectDir}/artisan")) {
+                $paths = [...$paths, 'artisan', 'bootstrap/app.php', 'public/index.php'];
+            }
+        }
+        if ($buildResult['ranNpmBuild']) {
+            $paths[] = 'public/build/manifest.json';
+        }
+        return $paths;
     }
 
     /**

@@ -168,6 +168,7 @@ class AgentTaskService
                 'public_id' => $task->deployment->artifact->public_id,
                 'checksum_sha256' => $task->deployment->artifact->checksum_sha256,
                 'size_bytes' => $task->deployment->artifact->size_bytes,
+                'required_paths' => $task->deployment->artifact->required_paths ?? [],
             ] : null,
             'issued_at' => now()->timestamp,
         ];

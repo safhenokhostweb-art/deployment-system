@@ -51,7 +51,7 @@ class ArtifactService
      * a normal signed JSON request. No file bytes exist yet — status
      * stays `uploading` until finalizeUpload() succeeds.
      */
-    public function createPending(Project $project, string $commitHash, string $branch, string $claimedChecksum, int $claimedSizeBytes, ?string $uploadedBy): Artifact
+    public function createPending(Project $project, string $commitHash, string $branch, string $claimedChecksum, int $claimedSizeBytes, ?string $uploadedBy, array $requiredPaths = []): Artifact
     {
         abort_unless(preg_match('/^[0-9a-f]{40}$/', $commitHash) === 1, 422, 'commit_hash must be a 40-character hex SHA.');
         abort_unless(preg_match('/^[0-9a-f]{64}$/', $claimedChecksum) === 1, 422, 'checksum must be a 64-character hex SHA-256.');
@@ -59,7 +59,7 @@ class ArtifactService
 
         $diskPath = "{$project->project_key}/{$commitHash}.zip";
 
-        return DB::transaction(function () use ($project, $commitHash, $branch, $claimedChecksum, $claimedSizeBytes, $uploadedBy, $diskPath) {
+        return DB::transaction(function () use ($project, $commitHash, $branch, $claimedChecksum, $claimedSizeBytes, $uploadedBy, $requiredPaths, $diskPath) {
             $existing = Artifact::where('project_id', $project->id)->where('commit_hash', $commitHash)->lockForUpdate()->first();
             if ($existing !== null) {
                 abort_if($existing->checksum_sha256 !== $claimedChecksum, 409, 'artifact_checksum_conflict: this project and commit already have an artifact with a different checksum.');
@@ -76,6 +76,7 @@ class ArtifactService
                 'branch' => $branch,
                 'checksum_sha256' => $claimedChecksum,
                 'size_bytes' => $claimedSizeBytes,
+                'required_paths' => array_values(array_unique($requiredPaths)),
                 'disk_path' => $diskPath,
                 'status' => Artifact::STATUS_UPLOADING,
                 'uploaded_by' => $uploadedBy,
@@ -271,7 +272,7 @@ class ArtifactService
      * which is Hub-internal storage detail, not something the Server
      * Agent needs or should see.
      *
-     * @return array{public_id: string, checksum_sha256: string, size_bytes: int}
+     * @return array{public_id: string, checksum_sha256: string, size_bytes: int, required_paths: array<int,string>}
      */
     public function downloadDescriptor(Artifact $artifact): array
     {
@@ -279,6 +280,7 @@ class ArtifactService
             'public_id' => $artifact->public_id,
             'checksum_sha256' => $artifact->checksum_sha256,
             'size_bytes' => $artifact->size_bytes,
+            'required_paths' => $artifact->required_paths ?? [],
         ];
     }
 }

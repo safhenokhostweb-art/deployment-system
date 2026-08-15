@@ -23,6 +23,10 @@
         <label for="branch">{{ __('ui.common.branch') }}</label>
         <input type="text" id="branch" name="branch" value="{{ old('branch', $project->branch) }}" required>
 
+        <label for="application_root">Application root</label>
+        <input type="text" id="application_root" name="application_root" value="{{ old('application_root', $project->application_root ?? '.') }}" dir="ltr" style="text-align:left;">
+        <p class="muted">Relative to repository root. Use <code>.</code> for a repository-root application.</p>
+
         <label for="environment">{{ __('ui.common.environment') }}</label>
         <input type="text" id="environment" name="environment" value="{{ old('environment', $project->environment) }}" required>
 

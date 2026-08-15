@@ -81,6 +81,7 @@ class AgentTaskClaimTest extends TestCase
         $artifact = Artifact::factory()->create([
             'project_id' => $ctx['project']->id,
             'commit_hash' => $ctx['deployment']->commit_hash,
+            'required_paths' => ['artisan', 'vendor/autoload.php'],
         ]);
         $ctx['deployment']->update(['artifact_id' => $artifact->id]);
 
@@ -90,6 +91,7 @@ class AgentTaskClaimTest extends TestCase
         $response->assertJsonPath('job.artifact.public_id', $artifact->public_id);
         $response->assertJsonPath('job.artifact.checksum_sha256', $artifact->checksum_sha256);
         $response->assertJsonPath('job.artifact.size_bytes', $artifact->size_bytes);
+        $response->assertJsonPath('job.artifact.required_paths', ['artisan', 'vendor/autoload.php']);
     }
 
     public function test_legacy_job_is_preferred_over_a_new_domain_task_on_the_same_poll(): void

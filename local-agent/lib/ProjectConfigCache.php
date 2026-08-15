@@ -55,6 +55,7 @@ final class ProjectConfigCache
                 'local_path' => $entry['local_path'] ?? null,
                 'remote_name' => $entry['remote_name'] ?? 'origin',
                 'branch' => $entry['branch'] ?? null,
+                'application_root' => $entry['application_root'] ?? '.',
             ];
         }
 
@@ -84,6 +85,7 @@ final class ProjectConfigCache
                 || !is_string($entry['local_path'] ?? null) || $entry['local_path'] === ''
                 || !is_string($entry['remote_name'] ?? null) || $entry['remote_name'] === ''
                 || !is_string($entry['branch'] ?? null) || $entry['branch'] === ''
+                || !is_string($entry['application_root'] ?? '.')
             ) {
                 throw new \InvalidArgumentException("invalid configuration for project '{$key}' (local_path/remote_name/branch must be non-empty strings)");
             }

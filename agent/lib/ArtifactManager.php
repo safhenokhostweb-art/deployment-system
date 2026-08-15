@@ -81,6 +81,13 @@ final class ArtifactManager
 
                 return $this->failed('artifact_extract_failed', 'Extracted artifact is empty — refusing to activate it.');
             }
+
+            $missingPath = $this->firstMissingRequiredPath($stagingPath, $artifactDescriptor['required_paths'] ?? []);
+            if ($missingPath !== null) {
+                self::recursiveDelete($stagingPath);
+
+                return $this->failed('artifact_required_path_missing', "Artifact is incomplete: required runtime path '{$missingPath}' is missing. Live release was not changed.");
+            }
         } finally {
             @unlink($tempArchivePath);
         }
@@ -97,6 +104,21 @@ final class ArtifactManager
         $this->cleanupOldBackups($workingDirectory, $retentionCount);
 
         return ['status' => 'succeeded', 'message' => null, 'failureCode' => null];
+    }
+
+    /** @param array<int, mixed> $requiredPaths */
+    private function firstMissingRequiredPath(string $stagingPath, array $requiredPaths): ?string
+    {
+        foreach ($requiredPaths as $path) {
+            if (!is_string($path) || $path === '' || str_starts_with($path, '/') || str_contains($path, '..')) {
+                return '(invalid required path contract)';
+            }
+            if (!file_exists(rtrim($stagingPath, '/') . '/' . $path)) {
+                return $path;
+            }
+        }
+
+        return null;
     }
 
     /**

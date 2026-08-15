@@ -25,6 +25,7 @@ class Project extends Model
         'pipeline',
         'deployment_recipe',
         'artifact_preserve_paths',
+        'application_root',
         'auto_deploy',
         'github_webhook_secret',
         'is_active',

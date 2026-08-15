@@ -31,6 +31,7 @@ class Artifact extends Model
         'branch',
         'checksum_sha256',
         'size_bytes',
+        'required_paths',
         'disk_path',
         'status',
         'uploaded_by',
@@ -43,6 +44,7 @@ class Artifact extends Model
         return [
             'expires_at' => 'datetime',
             'size_bytes' => 'integer',
+            'required_paths' => 'array',
         ];
     }
 

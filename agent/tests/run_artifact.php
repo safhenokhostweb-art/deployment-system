@@ -175,6 +175,20 @@ check('first deploy succeeds', $resultA['status'] === 'succeeded', $failures, $p
 check('first deploy extracts index.php into working_directory', is_file("{$workingDirectory}/index.php"), $failures, $passCount);
 check('first deploy extracts app/Kernel.php into working_directory', is_file("{$workingDirectory}/app/Kernel.php"), $failures, $passCount);
 
+// Required runtime paths are verified in staging BEFORE the atomic swap.
+// This is the production safety gate for an artifact built from the wrong
+// repository wrapper (for example service/artisan instead of artisan).
+$incompleteFixture = buildFixtureZip($workspace, 'incomplete', 'incomplete');
+registerManifestEntry($hub['manifestPath'], 'artifact-incomplete', $incompleteFixture['path']);
+$incompleteResult = $manager->deploy(
+    ['public_id' => 'artifact-incomplete', 'checksum_sha256' => $incompleteFixture['checksum'], 'size_bytes' => $incompleteFixture['size'], 'required_paths' => ['artisan']],
+    $workingDirectory,
+    [],
+    3,
+);
+check('missing required runtime path fails before activation', $incompleteResult['failureCode'] === 'artifact_required_path_missing', $failures, $passCount);
+check('missing required runtime path leaves the live tree unchanged', str_contains((string) file_get_contents("{$workingDirectory}/index.php"), 'release A'), $failures, $passCount);
+
 // ============================================================
 // Preserve paths: seed .env + storage before a second deploy, confirm
 // they survive into the new release, and the previous release was

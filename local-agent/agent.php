@@ -55,6 +55,7 @@ require __DIR__ . '/lib/WorkspaceSourcePreparer.php';
 require __DIR__ . '/lib/ArtifactBuilder.php';
 require __DIR__ . '/lib/ArtifactUploader.php';
 require __DIR__ . '/lib/LocalBuildFailedException.php';
+require __DIR__ . '/lib/ApplicationRoot.php';
 require __DIR__ . '/lib/LocalBuildRunner.php';
 
 use LocalAgent\ArtifactBuilder;
@@ -381,7 +382,7 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
             // depends entirely on that artifact existing now that it can
             // never run composer/npm itself, so a broken build here is a
             // genuine publish failure, not a side note.
-            $artifactResult = $artifactUploader->buildAndUpload($projectKey, $repositoryPath, $commitHash, $branch, (string) $job['id'], $onTick);
+            $artifactResult = $artifactUploader->buildAndUpload($projectKey, $repositoryPath, $commitHash, $branch, (string) $job['id'], $onTick, $projectConfig['application_root'] ?? '.');
 
             if (!$artifactResult['succeeded']) {
                 $logger->error("Job {$job['id']}: publish failed at the artifact stage [{$artifactResult['failureCode']}]: {$artifactResult['message']}");

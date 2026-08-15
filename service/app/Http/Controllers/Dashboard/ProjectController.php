@@ -146,6 +146,7 @@ class ProjectController extends Controller
             'server_id' => $validated['server_id'],
             'pipeline' => $validated['pipeline'],
             'deployment_recipe' => $validated['deployment_recipe'],
+            'application_root' => $validated['application_root'],
             'auto_deploy' => $request->boolean('auto_deploy'),
             'github_webhook_secret' => $plainWebhookSecret,
         ]);
@@ -294,6 +295,7 @@ class ProjectController extends Controller
             'server_id' => $validated['server_id'],
             'pipeline' => $validated['pipeline'],
             'deployment_recipe' => $validated['deployment_recipe'],
+            'application_root' => $validated['application_root'],
             'auto_deploy' => $request->boolean('auto_deploy'),
             'is_active' => $request->boolean('is_active', true),
         ]);
@@ -386,6 +388,7 @@ class ProjectController extends Controller
             'server_id' => 'required|exists:servers,id',
             'pipeline' => 'required|string',
             'deployment_recipe' => 'nullable|string',
+            'application_root' => 'nullable|string|max:255|regex:/^(\.|[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*)$/',
             'environment_name' => 'nullable|string|max:255',
             'github_account_id' => 'nullable|exists:github_accounts,id',
         ]);
@@ -411,6 +414,7 @@ class ProjectController extends Controller
         $validated['deployment_recipe'] = $rawRecipe === ''
             ? null
             : $this->recipeValidator->validate(json_decode($rawRecipe, true));
+        $validated['application_root'] = $validated['application_root'] ?? $project?->application_root ?? '.';
 
         if ($project !== null) {
             $validated['project_key'] = $project->project_key;

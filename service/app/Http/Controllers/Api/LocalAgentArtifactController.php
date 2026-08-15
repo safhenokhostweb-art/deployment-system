@@ -41,6 +41,8 @@ class LocalAgentArtifactController extends Controller
             'branch' => 'required|string|max:255',
             'checksum_sha256' => 'required|string|size:64|regex:/^[0-9a-f]{64}$/',
             'size_bytes' => 'required|integer|min:1',
+            'required_paths' => 'nullable|array|max:20',
+            'required_paths.*' => 'string|max:500|regex:/^(?!.*(?:^|\\/)\\.\\.(?:\\/|$))[A-Za-z0-9._\\/-]+$/',
         ]);
 
         $project = $this->resolveMappedProject($agent, $validated['project_key']);
@@ -52,6 +54,7 @@ class LocalAgentArtifactController extends Controller
             claimedChecksum: $validated['checksum_sha256'],
             claimedSizeBytes: $validated['size_bytes'],
             uploadedBy: $agent->public_id,
+            requiredPaths: $validated['required_paths'] ?? [],
         );
 
         return response()->json(['status' => 'ok', 'artifact_id' => $artifact->public_id], 201);

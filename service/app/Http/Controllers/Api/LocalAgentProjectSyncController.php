@@ -35,6 +35,7 @@ class LocalAgentProjectSyncController extends Controller
                 'local_path' => $mapping->local_path,
                 'remote_name' => $mapping->remote_name,
                 'branch' => $mapping->effectiveBranch(),
+                'application_root' => $mapping->project->application_root ?? '.',
             ])
             ->values();
 

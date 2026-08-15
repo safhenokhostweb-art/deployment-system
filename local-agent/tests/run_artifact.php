@@ -30,6 +30,7 @@ require __DIR__ . '/../lib/Logger.php';
 require __DIR__ . '/../lib/Client.php';
 require __DIR__ . '/../lib/GitManager.php';
 require __DIR__ . '/../lib/LocalBuildFailedException.php';
+require __DIR__ . '/../lib/ApplicationRoot.php';
 require __DIR__ . '/../lib/LocalBuildRunner.php';
 require __DIR__ . '/../lib/SafeFilesystem.php';
 require __DIR__ . '/../lib/BuildWorkspace.php';
