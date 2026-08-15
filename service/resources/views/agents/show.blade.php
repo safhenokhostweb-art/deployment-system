@@ -19,12 +19,21 @@
 @if (session('generated_token'))
 <x-card style="border-color:#a41e1e;" :title="__('ui.agents.registration_once_title')">
     <p class="muted">{{ __('ui.agents.credentials_once_intro') }}</p>
-    <label>agent public_id (server_id)</label>
-    <div class="secret-box">{{ $agent->public_id }}</div>
+    <label>agent_id (use this value in <code>config.php</code>; do not use the Server public ID)</label>
+    <div class="secret-box">{{ session('generated_agent_identity', $agent->public_id) }}</div>
     <label>agent_token</label>
     <div class="secret-box">{{ session('generated_token') }}</div>
     <label>signing_secret</label>
     <div class="secret-box">{{ session('generated_secret') }}</div>
+    <p class="muted">Replace only the three credential fields in the installed Agent’s <code>config.php</code>, keep its existing Hub URL and local paths, then restart the service.</p>
+    <label>config.php credential template</label>
+    <pre class="secret-box"><code>return [
+    'hub_url' => '{{ config('app.url') }}',
+    'agent_id' => '{{ session('generated_agent_identity', $agent->public_id) }}',
+    'agent_token' => '{{ session('generated_token') }}',
+    'signing_secret' => '{{ session('generated_secret') }}',
+    // Preserve this installation's existing projects and allowed_services.
+];</code></pre>
 </x-card>
 @endif
 
@@ -78,6 +87,13 @@
             />
             @endcan
         @elseif ($agent->status === 'approved')
+            @can('agents.approve')
+            <form method="POST" action="{{ route('agents.reissue-credentials', $agent) }}" id="reissue-agent-credentials-form" style="display:inline">
+                @csrf
+            </form>
+            <button type="button" class="btn" onclick="document.getElementById('reissue-agent-credentials-dialog').showModal()">Reissue credentials</button>
+            <x-confirm-dialog id="reissue-agent-credentials-dialog" form-id="reissue-agent-credentials-form" title="Reissue Agent credentials" :body="'The previous credentials stop working immediately. Update the installed Agent configuration before restarting it.'" confirm-label="Reissue credentials" :danger="false" />
+            @endcan
             @can('agents.disable')
             <form method="POST" action="{{ route('agents.disable', $agent) }}" id="disable-agent-form" style="display:inline">
                 @csrf
@@ -92,6 +108,13 @@
             />
             @endcan
         @elseif ($agent->status === 'disabled')
+            @can('agents.approve')
+            <form method="POST" action="{{ route('agents.reissue-credentials', $agent) }}" id="reissue-agent-credentials-form" style="display:inline">
+                @csrf
+            </form>
+            <button type="button" class="btn" onclick="document.getElementById('reissue-agent-credentials-dialog').showModal()">Reissue credentials</button>
+            <x-confirm-dialog id="reissue-agent-credentials-dialog" form-id="reissue-agent-credentials-form" title="Reissue Agent credentials" :body="'The Agent remains disabled. The previous credentials stop working immediately; install the replacement credentials before re-enabling it.'" confirm-label="Reissue credentials" :danger="false" />
+            @endcan
             @can('agents.disable')
             <form method="POST" action="{{ route('agents.reenable', $agent) }}">
                 @csrf

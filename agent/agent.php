@@ -60,9 +60,14 @@ if (!is_file($configPath)) {
 $config = require $configPath;
 $logger = new Logger($config['log_dir']);
 
+$agentIdentity = $config['agent_id'] ?? $config['server_id'] ?? null;
+if (!is_string($agentIdentity) || $agentIdentity === '') {
+    fwrite(STDERR, "config.php requires agent_id (the approved Agent public_id).\n");
+    exit(1);
+}
 $client = new Client(
     baseUrl: $config['service_base_url'],
-    serverId: $config['server_id'],
+    serverId: $agentIdentity,
     agentToken: $config['agent_token'],
     signingSecret: $config['signing_secret'],
     timeoutSeconds: $config['request_timeout_seconds'],

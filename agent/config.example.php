@@ -16,7 +16,9 @@ return [
 
     // Identifier for this server, issued by the Deployment Service when
     // the server was registered in its dashboard.
-    'server_id' => 'CHANGE_ME_SERVER_ID',
+    // New Agent-authenticated installs use the approved Agent public_id.
+    // Legacy installs may keep server_id temporarily, but cannot claim DeploymentTasks.
+    'agent_id' => 'CHANGE_ME_AGENT_PUBLIC_ID',
 
     // Bearer token issued by the Deployment Service for this server.
     // Used for authentication (identifies the caller).

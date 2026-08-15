@@ -164,7 +164,7 @@ class AgentTaskClaimTest extends TestCase
         $this->postJson($statusPath, $statusBody, $otherHeaders)->assertStatus(403);
     }
 
-    public function test_legacy_server_credential_never_claims_a_new_domain_task(): void
+    public function test_legacy_server_credential_never_claims_a_new_domain_task_and_surfaces_the_protocol_mismatch(): void
     {
         // A bare legacy Server (no Agent row at all) whose server_id
         // happens to have an eligible new-domain task queued against it
@@ -184,6 +184,11 @@ class AgentTaskClaimTest extends TestCase
         $headers = $this->agentHeaders('GET', '/api/agent/jobs/next', '', $legacyServer->public_id, $legacyToken, $legacySecret);
         $this->get('/api/agent/jobs/next', $headers)->assertOk()->assertJson(['job' => null]);
 
-        $this->assertSame(DeploymentTask::STATUS_QUEUED, $ctx['task']->fresh()->status);
+        $this->assertSame(DeploymentTask::STATUS_FAILED, $ctx['task']->fresh()->status);
+        $this->assertSame(Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE, $ctx['deployment']->fresh()->failure_code);
+        $this->assertDatabaseHas('audit_log_entries', [
+            'action' => 'deployment_task.rejected_legacy_agent_protocol',
+            'subject_id' => $ctx['task']->id,
+        ]);
     }
 }

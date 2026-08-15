@@ -7,6 +7,8 @@ use App\Models\AgentJob;
 use App\Models\AgentJobLogEntry;
 use App\Models\AuditLogEntry;
 use App\Models\DeploymentTask;
+use App\Models\Deployment;
+use App\Models\Server;
 use App\Services\Security\JobPayloadSigner;
 use App\Services\Security\SecretRedactor;
 use Illuminate\Support\Facades\DB;
@@ -72,6 +74,48 @@ class AgentTaskService
             }
 
             return null;
+        });
+    }
+
+    /**
+     * A Server-authenticated legacy runtime can execute legacy Deployment
+     * rows, but cannot safely claim a DeploymentTask because there is no
+     * Agent identity to bind to the resulting AgentJob.  Fail the affected
+     * task explicitly instead of leaving a deployment silently queued. The
+     * normal Agent-authenticated path never reaches this method.
+     */
+    public function rejectLegacyTaskClaim(Server $server): ?DeploymentTask
+    {
+        return DB::transaction(function () use ($server) {
+            $task = DeploymentTask::query()
+                ->where('status', DeploymentTask::STATUS_QUEUED)
+                ->whereHas('deploymentTarget', fn ($query) => $query->where('server_id', $server->id))
+                ->oldest('created_at')
+                ->lockForUpdate()
+                ->with('deployment')
+                ->first();
+
+            if ($task === null) {
+                return null;
+            }
+
+            $task->update(['status' => DeploymentTask::STATUS_FAILED]);
+            $task->deployment->update([
+                'failure_code' => Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE,
+                'failure_message' => 'This deployment requires an Agent-authenticated runtime. Reissue the existing Agent credentials and update its config before retrying.',
+            ]);
+            $this->aggregator->recalculate($task->deployment);
+
+            AuditLogEntry::record(
+                actorType: AuditLogEntry::ACTOR_SYSTEM,
+                actorIdentifier: null,
+                action: 'deployment_task.rejected_legacy_agent_protocol',
+                subjectType: DeploymentTask::class,
+                subjectId: $task->id,
+                metadata: ['server_id' => $server->id],
+            );
+
+            return $task->fresh();
         });
     }
 

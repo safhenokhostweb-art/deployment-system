@@ -127,6 +127,36 @@ class AgentController extends Controller
             ->with('status', 'Agent approved. Copy the credentials below now — shown only once.');
     }
 
+    /** Rotate credentials for the same already-approved/disabled Agent identity. */
+    public function reissueCredentials(Request $request, Agent $agent): RedirectResponse
+    {
+        Gate::authorize('agents.approve');
+        abort_unless(in_array($agent->status, [Agent::STATUS_APPROVED, Agent::STATUS_DISABLED], true), 409, 'Credentials can only be reissued for an approved or disabled agent.');
+
+        $plainToken = $this->credentials->generateToken();
+        $plainSecret = $this->credentials->generateSigningSecret();
+        $agent->update([
+            'agent_token_hash' => $this->credentials->hashToken($plainToken),
+            'signing_secret' => $plainSecret,
+        ]);
+
+        AuditLogEntry::record(
+            actorType: AuditLogEntry::ACTOR_USER,
+            actorIdentifier: $request->user()->email,
+            action: 'agent.credentials_reissued',
+            subjectType: Agent::class,
+            subjectId: $agent->id,
+            metadata: ['server_id' => $agent->server_id],
+        );
+
+        return redirect()->route('agents.show', $agent)->with([
+            'generated_token' => $plainToken,
+            'generated_secret' => $plainSecret,
+            'generated_agent_identity' => $agent->public_id,
+            'status' => 'Agent credentials reissued. Replace the existing Agent credentials immediately; they are shown only once.',
+        ]);
+    }
+
     public function reject(Request $request, Agent $agent): RedirectResponse
     {
         Gate::authorize('agents.approve');

@@ -113,6 +113,11 @@ class AgentJobController extends Controller
             if ($claimedTask !== null) {
                 return response()->json($claimedTask);
             }
+        } else {
+            // A legacy runtime cannot claim a DeploymentTask. Surface the
+            // protocol mismatch on the deployment instead of silently
+            // leaving its queued task stranded forever.
+            $this->tasks->rejectLegacyTaskClaim($server);
         }
 
         return response()->json(['job' => null]);
