@@ -28,7 +28,7 @@
     <p class="muted">Replace only the three credential fields in the installed Agent’s <code>config.php</code>, keep its existing Hub URL and local paths, then restart the service.</p>
     <label>config.php credential template</label>
     <pre class="secret-box"><code>return [
-    'hub_url' => '{{ config('app.url') }}',
+    'service_base_url' => '{{ config('app.url') }}',
     'agent_id' => '{{ session('generated_agent_identity', $agent->public_id) }}',
     'agent_token' => '{{ session('generated_token') }}',
     'signing_secret' => '{{ session('generated_secret') }}',
