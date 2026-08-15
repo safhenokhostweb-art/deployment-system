@@ -13,6 +13,20 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+# Must run before ANY WinForms Control is created on this thread (.NET
+# throws "Thread exception mode cannot be changed once any Controls are
+# created on the thread" otherwise) -- this file-level dot-source point,
+# immediately after EnableVisualStyles() and before any function here
+# has been invoked, is the earliest safe place. Pairs with the
+# Application.ThreadException handler registered inside
+# Show-SimpleDeployLauncher itself (registering the event handler has no
+# such early-only restriction, only this mode switch does) -- together
+# they are the last-resort safety net so no exception raised on the UI
+# thread can ever surface as WinForms' own unhandled-exception crash
+# dialog; every call site that can realistically throw already has its
+# own try/catch, this only catches what those miss.
+[System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::CatchException)
+
 $script:LauncherFontFamily = 'Tahoma'
 
 function New-LauncherInputDialog {
@@ -138,7 +152,16 @@ function Get-LauncherStatusColor {
 function Show-SimpleDeployLauncher {
     param(
         [Parameter(Mandatory = $true)][string]$ToolRoot,
-        [Parameter(Mandatory = $false)][string]$ConfigPath
+        [Parameter(Mandatory = $false)][string]$ConfigPath,
+        # Test-only hook, invoked with ($form, $GuiState) right before
+        # Application.Run($form) -- $null (the default) is the exact
+        # pre-existing behavior for the real .bat/shortcut launch path
+        # (SimpleDeployLauncher.ps1 never passes this). Exists so a real
+        # test can drive the REAL form/engine through Application.Run +
+        # PerformClick (its own Timer set up inside the hook clicks a
+        # button, waits for completion, then closes the form) instead of
+        # re-implementing a second, parallel GUI just for testing.
+        [Parameter(Mandatory = $false)][scriptblock]$TestAutomationHook = $null
     )
 
     if (-not $ConfigPath) { $ConfigPath = Join-Path $ToolRoot 'config.json' }
@@ -352,6 +375,7 @@ function Show-SimpleDeployLauncher {
                 [scriptblock]$OnComplete
             )
             $GuiState.CurrentProjectKey = $ProjectKey
+            Write-LauncherDebugLog -ToolRoot $ToolRoot -Marker 'RUNSPACE STARTED' -Detail "project=$ProjectKey"
             $GuiState.CurrentHandle = Start-LauncherOperation -ToolRoot $ToolRoot -Operation $Operation -Variables $Variables
             $GuiState.CurrentOnOutput = $OnOutput
             $GuiState.CurrentOnComplete = $OnComplete
@@ -421,7 +445,13 @@ function Show-SimpleDeployLauncher {
                 if (-not $GuiState.CurrentHandle) { return }
                 $items = Receive-LauncherOperationOutput -Handle $GuiState.CurrentHandle
                 foreach ($item in $items) {
-                    if ($GuiState.CurrentOnOutput) { & $GuiState.CurrentOnOutput $item }
+                    if ($GuiState.CurrentOnOutput) {
+                        try {
+                            & $GuiState.CurrentOnOutput $item
+                        } catch {
+                            Write-LauncherDebugLog -ToolRoot $ToolRoot -Marker 'ONOUTPUT ERROR' -Detail "project=$($GuiState.CurrentProjectKey) error=$($_.Exception.Message)"
+                        }
+                    }
                     $color = switch ($item.Type) {
                         'Error'   { 'Red' }
                         'Warn'    { 'Yellow' }
@@ -432,7 +462,8 @@ function Show-SimpleDeployLauncher {
                     & $AppendLog -Text $item.Text -ColorName $color
                 }
                 if (Test-LauncherOperationComplete -Handle $GuiState.CurrentHandle) {
-                    $completion = Complete-LauncherOperation -Handle $GuiState.CurrentHandle
+                    Write-LauncherDebugLog -ToolRoot $ToolRoot -Marker 'RUNSPACE COMPLETED' -Detail "project=$($GuiState.CurrentProjectKey)"
+                    $completion = Complete-LauncherOperation -Handle $GuiState.CurrentHandle -ToolRoot $ToolRoot
                     $handledProjectKey = $GuiState.CurrentProjectKey
                     $onComplete = $GuiState.CurrentOnComplete
                     $GuiState.CurrentHandle = $null
@@ -441,6 +472,7 @@ function Show-SimpleDeployLauncher {
                     $GuiState.CurrentProjectKey = $null
                     $cancelButton.Enabled = $false
                     & $SetRowsEnabled -Enabled $true
+                    Write-LauncherDebugLog -ToolRoot $ToolRoot -Marker 'GUI STATE RELEASED' -Detail "project=$handledProjectKey"
                     if ($onComplete) {
                         # Genuinely STOP the Timer (not just the
                         # PollTickBusy flag above) for the duration of the
@@ -466,7 +498,13 @@ function Show-SimpleDeployLauncher {
                         # gracefully if it happens", genuinely prevented.
                         $pollTimer.Stop()
                         try {
-                            & $onComplete $completion $handledProjectKey
+                            Write-LauncherDebugLog -ToolRoot $ToolRoot -Marker 'ONCOMPLETE CALLED' -Detail "project=$handledProjectKey"
+                            try {
+                                & $onComplete $completion $handledProjectKey
+                            } catch {
+                                Write-LauncherDebugLog -ToolRoot $ToolRoot -Marker 'ONCOMPLETE ERROR' -Detail "project=$handledProjectKey error=$($_.Exception.Message)"
+                                Show-LauncherError -Text "پردازش نتیجه عملیات برای '$handledProjectKey' با خطای غیرمنتظره مواجه شد:`n$($_.Exception.Message)"
+                            }
                         } finally {
                             $pollTimer.Start()
                         }
@@ -601,7 +639,20 @@ function Show-SimpleDeployLauncher {
             & $AppendLog -Text "بررسی پروژه '$($projectInfo.Key)'..." -ColorName 'Blue'
             & $StartTracked -ProjectKey $projectInfo.Key -Variables @{ ProjectInfo = $projectInfo } -Operation {
                 $check = Get-ProjectCheckResult -ProjectInfo $ProjectInfo
-                $connectivity = if ($check.RemoteExists) { Test-GitConnectivity -RepositoryPath $ProjectInfo.Config.local_path -RemoteName $ProjectInfo.Config.remote -TimeoutSeconds 10 } else { $null }
+                # 20s, not 10s -- a real, slowly-failing DNS lookup (e.g.
+                # the resolver retrying before giving up) can legitimately
+                # take longer than 10s to produce git's own classifiable
+                # "Could not resolve host" text (confirmed empirically:
+                # ~12.6s for a real unresolvable hostname on this network).
+                # Before the Invoke-ExternalCommand timeout-kill fix (see
+                # SimpleDeploy.Common.ps1), a too-short timeout here was
+                # silently masked (the process was never actually killed,
+                # so it always got the real complete error eventually,
+                # just slower than the nominal timeout suggested); now
+                # that timeouts are genuinely enforced, this value must be
+                # realistic or a slow-but-real DNS failure gets cut off
+                # before it can be classified correctly.
+                $connectivity = if ($check.RemoteExists) { Test-GitConnectivity -RepositoryPath $ProjectInfo.Config.local_path -RemoteName $ProjectInfo.Config.remote -TimeoutSeconds 20 } else { $null }
                 return [PSCustomObject]@{ Check = $check; Connectivity = $connectivity }
             } -OnComplete {
                 param($completion, $key)
@@ -682,9 +733,28 @@ function Show-SimpleDeployLauncher {
                         param($attempt, $delay, $category) $OutputQueue.Enqueue(@{ Type = 'Warn'; Text = "تلاش مجدد Push ($attempt) پس از $delay ثانیه — دسته خطا: $category" })
                     }
                 } -OnOutput {
+                    # $key (the FIRST -OnComplete's own param, above) must
+                    # NOT be referenced here: -OnOutput is stored via
+                    # $StartTracked into $GuiState.CurrentOnOutput and
+                    # invoked LATER, repeatedly, from pollTimer's own tick
+                    # handler ("& $GuiState.CurrentOnOutput $item") for as
+                    # long as this SECOND (push) operation keeps producing
+                    # output -- by which time the FIRST -OnComplete's own
+                    # invocation (the only thing that ever gave $key a
+                    # value) has already returned. Same root cause as the
+                    # earlier "$Row cannot be retrieved" bug, just in a
+                    # spot not yet audited then: -OnOutput is the ONLY
+                    # -OnOutput callback anywhere in this file (Deploy's
+                    # own & $StartTracked call never passes one), which is
+                    # exactly why only Git-only hit this, never Deploy.
+                    # $GuiState.CurrentProjectKey is already guaranteed
+                    # correct for as long as -OnOutput can possibly fire
+                    # (pollTimer only clears it once the operation is
+                    # detected complete, which is also the point -OnOutput
+                    # stops being called) -- no new parameter needed.
                     param($item)
                     if ($item.Type -eq 'StatusChange') {
-                        & $SetRowStatus -ProjectKey $key -StatusKey $item.Text
+                        & $SetRowStatus -ProjectKey $GuiState.CurrentProjectKey -StatusKey $item.Text
                     }
                 } -OnComplete {
                     param($completion, $completedKey)
@@ -862,6 +932,16 @@ function Show-SimpleDeployLauncher {
         $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
         $form.Show()
         $form.Activate()
+
+        [System.Windows.Forms.Application]::add_ThreadException({
+            param($sender, $e)
+            Write-LauncherDebugLog -ToolRoot $ToolRoot -Marker 'UNHANDLED THREAD EXCEPTION' -Detail "error=$($e.Exception.Message)"
+            Show-LauncherError -Text "یک خطای غیرمنتظره رخ داد و مدیریت شد (برنامه بسته نمی‌شود):`n$($e.Exception.Message)"
+        }.GetNewClosure())
+
+        if ($TestAutomationHook) {
+            & $TestAutomationHook $form $GuiState
+        }
 
         [System.Windows.Forms.Application]::Run($form)
     } finally {

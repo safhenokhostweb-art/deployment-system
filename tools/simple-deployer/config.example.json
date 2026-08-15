@@ -20,11 +20,25 @@
     "ssh": {
         "_comment": "Applies to every project unless a project overrides it. StrictHostKeyChecking is deliberately NOT configurable to 'no' anywhere in this tool — see README-FA.md.",
         "connect_timeout_seconds": 10,
-        "known_hosts_path": "%USERPROFILE%\\.ssh\\known_hosts"
+        "known_hosts_path": "%USERPROFILE%\\.ssh\\known_hosts",
+        "_transfer_comment": "Real-world SCP failure fix (see docs/scp-transfer-fix report): ConnectTimeout above only bounds the INITIAL handshake, never a long-running transfer — these six fields are all OPTIONAL, every one defaults to exactly the value shown here if omitted (so an existing config.json with none of these still behaves identically). server_alive_interval_seconds/server_alive_count_max/tcp_keepalive add SSH-level keepalive so a dead connection is detected within ~1 minute instead of hanging indefinitely. transfer_base_timeout_seconds/transfer_seconds_per_mb/transfer_max_timeout_seconds compute a size-proportional SCP timeout (max(base, size_MB * seconds_per_mb), capped at max) instead of one fixed number — transfer_seconds_per_mb=30 is calibrated to the WORST throughput actually observed in the field (~41KB/s on a real run), not an optimistic guess.",
+        "server_alive_interval_seconds": 15,
+        "server_alive_count_max": 4,
+        "tcp_keepalive": true,
+        "transfer_base_timeout_seconds": 300,
+        "transfer_seconds_per_mb": 30,
+        "transfer_max_timeout_seconds": 1800
     },
     "projects": {
         "customer-site": {
             "_audit": "local_path/branch/remote confirmed via `git remote -v` + `git branch --show-current` on the real checkout. server_path confirmed via customer-site's own DEPLOY-fa.md (`cd /var/www/customer-site`). Current real production layout is a FLAT working directory updated via `git pull` in place (NOT a releases/current symlink layout yet) — activation_mode is set to the compatible mode to match.",
+            "_artifact_validation_comment": "OPTIONAL (added for the general Artifact Validation Contract — every field below is illustrative for a Laravel project and has NO effect unless 'artifact_validation' is actually present on a real project entry; absent = no validation runs, exactly today's behavior). required_files/required_directories are checked against the artifact BEFORE it is zipped/transferred. forbidden_strings/required_strings are scanned across text-like build output (see lib/SimpleDeploy.ArtifactValidation.ps1's own default extension list) — this is what would have caught Sandogh's baked-in 'http://localhost:3000' in a Next.js production bundle before it ever reached the server.",
+            "artifact_validation": {
+                "required_files": ["artisan", "composer.json"],
+                "required_directories": ["app", "routes", "public"],
+                "forbidden_strings": [],
+                "required_strings": []
+            },
             "enabled": true,
             "local_path": "C:\\laragon\\www\\customer-site",
             "branch": "main",
@@ -86,6 +100,7 @@
             "branch": "master",
             "remote": "origin",
             "project_type": "laravel-monorepo",
+            "source_subdirectory": "service",
             "build_mode": "disabled",
             "activation_mode": "working_directory",
             "server_host": "CHANGE_ME_SERVER_HOST",

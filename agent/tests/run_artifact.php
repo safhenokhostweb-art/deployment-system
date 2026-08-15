@@ -175,6 +175,30 @@ check('first deploy succeeds', $resultA['status'] === 'succeeded', $failures, $p
 check('first deploy extracts index.php into working_directory', is_file("{$workingDirectory}/index.php"), $failures, $passCount);
 check('first deploy extracts app/Kernel.php into working_directory', is_file("{$workingDirectory}/app/Kernel.php"), $failures, $passCount);
 
+// Recipe source acquisition: the exact same verified artifact is extracted
+// into a brand-new immutable release directory. No activation occurs here;
+// ReleaseManager owns current/previous and rollback after recipe steps pass.
+$immutableRelease = $workspace . '/recipe/releases/deploy-from-artifact';
+$releaseResult = $manager->extractToRelease(
+    ['public_id' => 'artifact-a', 'checksum_sha256' => $fixtureA['checksum'], 'size_bytes' => $fixtureA['size']],
+    $immutableRelease,
+);
+check('recipe artifact extraction succeeds', $releaseResult['status'] === 'succeeded', $failures, $passCount);
+check('recipe artifact extraction materializes the exact artifact content in its immutable release directory', str_contains((string) @file_get_contents("{$immutableRelease}/index.php"), 'release A'), $failures, $passCount);
+$duplicateReleaseResult = $manager->extractToRelease(
+    ['public_id' => 'artifact-a', 'checksum_sha256' => $fixtureA['checksum'], 'size_bytes' => $fixtureA['size']],
+    $immutableRelease,
+);
+check('recipe artifact extraction never overwrites an existing immutable release directory', $duplicateReleaseResult['status'] === 'failed', $failures, $passCount);
+$incompleteRelease = $workspace . '/recipe/releases/incomplete-artifact';
+$incompleteResult = $manager->extractToRelease(
+    ['public_id' => 'artifact-a', 'checksum_sha256' => $fixtureA['checksum'], 'size_bytes' => $fixtureA['size']],
+    $incompleteRelease,
+    null,
+    ['missing/prebuilt/output.js'],
+);
+check('complete-artifact required paths are checked before an immutable release directory is created', $incompleteResult['failureCode'] === 'artifact_incomplete' && !is_dir($incompleteRelease), $failures, $passCount);
+
 // ============================================================
 // Preserve paths: seed .env + storage before a second deploy, confirm
 // they survive into the new release, and the previous release was
@@ -242,6 +266,13 @@ check('a checksum mismatch is reported as failed', $mismatchResult['status'] ===
 check('a checksum mismatch reports the correct failure code', $mismatchResult['failureCode'] === 'artifact_checksum_mismatch', $failures, $passCount);
 check('a checksum mismatch never touches the target directory', !is_dir($freshTarget), $failures, $passCount);
 
+$recipeMismatchTarget = $workspace . '/recipe/releases/checksum-mismatch';
+$recipeMismatchResult = $manager->extractToRelease(
+    ['public_id' => 'artifact-mismatch', 'checksum_sha256' => str_repeat('0', 64), 'size_bytes' => $fixtureMismatch['size']],
+    $recipeMismatchTarget,
+);
+check('recipe artifact checksum mismatch fails before a release directory is created', $recipeMismatchResult['failureCode'] === 'artifact_checksum_mismatch' && !is_dir($recipeMismatchTarget), $failures, $passCount);
+
 $notFoundTarget = $workspace . '/download-failure-site';
 $notFoundResult = $manager->deploy(
     ['public_id' => 'artifact-does-not-exist', 'checksum_sha256' => str_repeat('1', 64), 'size_bytes' => 1],
@@ -267,6 +298,13 @@ $corruptResult = $manager->deploy(
 check('a corrupt (non-zip) artifact is reported as failed', $corruptResult['status'] === 'failed', $failures, $passCount);
 check('a corrupt artifact reports the correct failure code', $corruptResult['failureCode'] === 'artifact_extract_failed', $failures, $passCount);
 check('a corrupt artifact never touches the target directory', !is_dir($corruptTarget), $failures, $passCount);
+
+$recipeCorruptTarget = $workspace . '/recipe/releases/corrupt';
+$recipeCorruptResult = $manager->extractToRelease(
+    ['public_id' => 'artifact-corrupt', 'checksum_sha256' => hash_file('sha256', $corruptPath), 'size_bytes' => strlen($corruptContent)],
+    $recipeCorruptTarget,
+);
+check('recipe corrupt artifact fails before activation and cleans its release directory', $recipeCorruptResult['failureCode'] === 'artifact_extract_failed' && !is_dir($recipeCorruptTarget), $failures, $passCount);
 
 stopFakeHub($hub);
 rrmdir($workspace);

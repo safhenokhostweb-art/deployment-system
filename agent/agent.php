@@ -75,8 +75,8 @@ $client = new Client(
 );
 
 $executor = new Executor();
-$recipeRunner = new RecipeStepRunner($executor, $client, $logger, new ReleaseManager());
 $artifactManager = new ArtifactManager($client);
+$recipeRunner = new RecipeStepRunner($executor, $client, $logger, new ReleaseManager(), $artifactManager);
 $pipelineExecutor = new PipelineExecutor($client, $executor, $artifactManager, $logger);
 $runOnce = in_array('--once', $argv, true);
 

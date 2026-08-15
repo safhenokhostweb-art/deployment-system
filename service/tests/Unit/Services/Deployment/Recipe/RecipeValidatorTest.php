@@ -238,4 +238,80 @@ class RecipeValidatorTest extends TestCase
 
         $this->assertCount(20, $result['steps']);
     }
+
+    public function test_complete_artifact_recipe_requires_explicit_prebuilt_contract_for_npm_ci_and_build(): void
+    {
+        $result = $this->validator->validate([
+            'steps' => [
+                ['type' => 'checkout_release', 'source_repository' => '/unused/in/artifact/mode'],
+                ['type' => 'install_dependencies', 'name' => 'npm ci', 'working_directory' => '{release_path}'],
+                ['type' => 'run_script', 'name' => 'npm build', 'working_directory' => '{release_path}', 'script' => 'build'],
+                ['type' => 'activate_release'],
+            ],
+            'artifact_contract' => [
+                'profile' => 'complete',
+                'prebuilt_steps' => [
+                    ['name' => 'npm ci', 'required_paths' => ['public/build/manifest.json']],
+                    ['name' => 'npm build', 'required_paths' => ['public/build/manifest.json']],
+                ],
+            ],
+        ], true);
+
+        $this->assertSame('complete', $result['artifact_contract']['profile']);
+        $this->assertCount(2, $result['artifact_contract']['prebuilt_steps']);
+    }
+
+    public function test_complete_artifact_recipe_rejects_undeclared_npm_ci_before_a_job_can_be_created(): void
+    {
+        $this->expectException(HttpException::class);
+
+        $this->validator->validate([
+            'steps' => [
+                ['type' => 'checkout_release', 'source_repository' => '/unused/in/artifact/mode'],
+                ['type' => 'install_dependencies', 'working_directory' => '{release_path}'],
+                ['type' => 'activate_release'],
+            ],
+        ], true);
+    }
+
+    public function test_complete_artifact_recipe_rejects_shell_including_composer_install(): void
+    {
+        $this->expectException(HttpException::class);
+
+        $this->validator->validate([
+            'steps' => [
+                ['type' => 'checkout_release', 'source_repository' => '/unused/in/artifact/mode'],
+                ['type' => 'shell', 'command' => 'composer install'],
+                ['type' => 'activate_release'],
+            ],
+        ], true);
+    }
+
+    public function test_legacy_recipe_keeps_build_steps_without_an_artifact_contract(): void
+    {
+        $result = $this->validator->validate([
+            ['type' => 'install_dependencies', 'working_directory' => '{release_path}'],
+            ['type' => 'run_script', 'working_directory' => '{release_path}', 'script' => 'build'],
+        ]);
+
+        $this->assertArrayNotHasKey('artifact_contract', $result);
+    }
+
+    public function test_complete_artifact_recipe_keeps_migration_activation_service_and_health_steps_runnable(): void
+    {
+        $result = $this->validator->validate([
+            'steps' => [
+                ['type' => 'checkout_release', 'source_repository' => '/unused/in/artifact/mode'],
+                ['type' => 'prisma_migrate', 'working_directory' => '{release_path}'],
+                ['type' => 'activate_release'],
+                ['type' => 'restart_service', 'service' => 'app.service'],
+                ['type' => 'verify_service_active', 'service' => 'app.service'],
+                ['type' => 'http_health_check', 'url' => 'https://example.test/health'],
+            ],
+        ], true);
+
+        $this->assertSame('prisma_migrate', $result['steps'][1]['type']);
+        $this->assertSame('activate_release', $result['steps'][2]['type']);
+        $this->assertSame('http_health_check', $result['steps'][5]['type']);
+    }
 }

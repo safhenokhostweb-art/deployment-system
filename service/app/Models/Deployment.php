@@ -66,9 +66,11 @@ class Deployment extends Model
     public const FAILURE_CODE_ARTIFACT_DOWNLOAD_FAILED = 'artifact_download_failed';
     public const FAILURE_CODE_ARTIFACT_CHECKSUM_MISMATCH = 'artifact_checksum_mismatch';
     public const FAILURE_CODE_ARTIFACT_EXTRACT_FAILED = 'artifact_extract_failed';
-
+    /** The Project is artifact-only, but no available artifact exists for this exact commit. */
+    public const FAILURE_CODE_REQUIRED_ARTIFACT_MISSING = 'required_artifact_missing';
     /** A legacy Server credential polled for a DeploymentTask that only an Agent identity can claim. */
     public const FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE = 'agent_protocol_incompatible';
+
     /** @var array<int, string> every status a deployment can be actively executing under — see isInProgress()/isLeaseExpired(). */
     public const IN_PROGRESS_STATUSES = [
         self::STATUS_RUNNING,

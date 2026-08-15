@@ -146,12 +146,62 @@ function Format-WindowsCommandLine {
     already-correct absolute path, or a genuinely missing tool — in
     which case the same clear "not found" error surfaces as before).
 #>
+
+# Every git/ssh/scp/composer/npm/... invocation in this whole tool goes
+# through Invoke-ExternalCommand -> Resolve-ExecutablePath, and a single
+# Deploy already runs 10+ external commands. Get-Command's PATH/PATHEXT
+# search is deterministic for a given executable name within one process
+# run (PATH doesn't change mid-run), so memoizing it here removes a real,
+# repeated cost with zero behavior change: the exact same resolved path
+# (or unresolved fallback) is returned every time, just without redoing
+# the search. Never shared across process runs (this is a plain
+# in-process hashtable, not a file), so a PATH change takes effect
+# normally on the next run.
+$script:ResolvedExecutablePathCache = @{}
+
 function Resolve-ExecutablePath {
     param([Parameter(Mandatory = $true)][string]$FilePath)
 
+    if ($script:ResolvedExecutablePathCache.ContainsKey($FilePath)) {
+        return $script:ResolvedExecutablePathCache[$FilePath]
+    }
+
     $resolved = Get-Command -Name $FilePath -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($resolved -and $resolved.Source) { return $resolved.Source }
-    return $FilePath
+    $result = if ($resolved -and $resolved.Source) { $resolved.Source } else { $FilePath }
+    $script:ResolvedExecutablePathCache[$FilePath] = $result
+    return $result
+}
+
+function Stop-ProcessTreeGuarded {
+    <#
+    .SYNOPSIS
+        Kills a process AND its descendants. `Process.Kill(Boolean
+        entireProcessTree)` looks like the obvious way to do this but
+        that overload DOES NOT EXIST on .NET Framework 4.8 (Windows
+        PowerShell 5.1's runtime) -- it was only added in .NET Core 3.0.
+        Confirmed empirically on this exact host: calling it throws
+        System.Management.Automation.MethodException ("Cannot find an
+        overload for 'Kill' and the argument count: '1'"). Every prior
+        call site that did `try { $process.Kill($true) } catch {}`
+        therefore silently did NOTHING on a timeout/cancel -- the
+        "killed" process kept running completely unsupervised, and the
+        caller's blocking wait on its output streams then waited for
+        that orphaned process's own eventual, unbounded, natural exit
+        instead. taskkill.exe /T /F is the standard, dependency-free,
+        already-a-Windows-built-in way to kill a real process tree on
+        .NET Framework; the plain no-argument Kill() (which DOES exist)
+        is called first as a fast, direct fallback in case taskkill
+        itself is ever unavailable.
+    #>
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    try {
+        Start-Process -FilePath 'taskkill.exe' -ArgumentList @('/PID', $ProcessId, '/T', '/F') `
+            -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue | Out-Null
+    } catch {}
+    try {
+        $stillThere = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+        if ($stillThere) { $stillThere.Kill() }
+    } catch {}
 }
 
 function Invoke-ExternalCommand {
@@ -160,7 +210,13 @@ function Invoke-ExternalCommand {
         [Parameter(Mandatory = $false)][string[]]$ArgumentList = @(),
         [Parameter(Mandatory = $false)][string]$WorkingDirectory = $null,
         [Parameter(Mandatory = $false)][int]$TimeoutSeconds = 0,
-        [Parameter(Mandatory = $false)][hashtable]$EnvironmentOverrides = $null
+        [Parameter(Mandatory = $false)][hashtable]$EnvironmentOverrides = $null,
+        # Optional -- polled every ~250ms while waiting for the process to
+        # exit; if it ever returns $true, the process (tree) is killed
+        # immediately and the result comes back with Cancelled=$true.
+        # $null (the default) is EXACTLY today's unchanged single blocking
+        # WaitForExit() behavior for every existing caller.
+        [Parameter(Mandatory = $false)][scriptblock]$CancellationCheck = $null
     )
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -204,10 +260,31 @@ function Invoke-ExternalCommand {
         $stderrTask = $process.StandardError.ReadToEndAsync()
 
         $timedOut = $false
-        if ($TimeoutSeconds -gt 0) {
-            if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-                $timedOut = $true
-                try { $process.Kill($true) } catch {}
+        $cancelled = $false
+        if ($CancellationCheck -or $TimeoutSeconds -gt 0) {
+            # Polling wait (250ms slices) instead of one single blocking
+            # WaitForExit(ms) call -- needed so -CancellationCheck can
+            # actually be noticed WHILE a command is still running, not
+            # only after it would have timed out anyway. Produces the
+            # exact same observable result as the old single-wait form
+            # for a plain -TimeoutSeconds caller with no
+            # -CancellationCheck (still returns once the process exits,
+            # or once the same total timeout has elapsed) -- only the
+            # wait MECHANISM changed, not the outcome.
+            $deadline = if ($TimeoutSeconds -gt 0) { (Get-Date).AddSeconds($TimeoutSeconds) } else { $null }
+            while ($true) {
+                if ($process.WaitForExit(250)) { break }
+                if ($CancellationCheck -and (& $CancellationCheck)) {
+                    $cancelled = $true
+                    break
+                }
+                if ($deadline -and (Get-Date) -ge $deadline) {
+                    $timedOut = $true
+                    break
+                }
+            }
+            if ($timedOut -or $cancelled) {
+                Stop-ProcessTreeGuarded -ProcessId $process.Id
                 $process.WaitForExit(5000) | Out-Null
             }
         } else {
@@ -218,13 +295,14 @@ function Invoke-ExternalCommand {
         # normally already complete by now; bound the wait defensively.
         [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 5000) | Out-Null
 
-        $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
+        $exitCode = if ($timedOut -or $cancelled) { 124 } else { $process.ExitCode }
 
         return @{
-            ExitCode = $exitCode
-            StdOut   = $stdoutTask.Result
-            StdErr   = $stderrTask.Result
-            TimedOut = $timedOut
+            ExitCode  = $exitCode
+            StdOut    = $stdoutTask.Result
+            StdErr    = $stderrTask.Result
+            TimedOut  = $timedOut
+            Cancelled = $cancelled
         }
     } finally {
         $process.Dispose()

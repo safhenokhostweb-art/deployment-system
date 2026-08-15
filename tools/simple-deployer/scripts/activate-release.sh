@@ -108,6 +108,11 @@ STAGING_DIR="${PROJECT_PATH%/}.staging-${RELEASE_ID}"
 
 rollback_performed=0
 release_activated=0
+# Set to 1 right before the health-check block begins (below) -- used
+# ONLY to choose which of the two print-only [STATE-MARK] rollback
+# labels post_swap_failure() prints; it does not change whether/when
+# post_swap_failure/perform_rollback run, nor their own behavior.
+health_check_started=0
 
 cleanup_staging() {
     if [ -d "$STAGING_DIR" ]; then
@@ -241,7 +246,19 @@ log "release جدید فعال شد: $LIVE_TARGET"
 
 post_swap_failure() {
     log "خطا پس از فعال‌سازی — شروع rollback خودکار."
+    # [STATE-MARK] lines below are purely additive (print-only, exactly
+    # like the [TIMING-MARK] lines elsewhere in this script) -- they
+    # change no decision, order, or outcome of perform_rollback() itself;
+    # they only let the Windows side (SimpleDeploy.DeploymentState.ps1's
+    # ConvertFrom-ActivationRollbackMarkers) know a rollback happened and
+    # which phase triggered it.
+    if [ "$health_check_started" = "1" ]; then
+        log "[STATE-MARK] HEALTHCHECK_ROLLBACK_STARTED"
+    else
+        log "[STATE-MARK] ACTIVATION_ROLLBACK_STARTED"
+    fi
     perform_rollback
+    log "[STATE-MARK] ROLLBACK_COMPLETED"
     fail "Deploy با خطا مواجه شد و به نسخه قبلی بازگردانده شد — به لاگ‌های بالا نگاه کنید."
 }
 
@@ -276,6 +293,15 @@ if [ -d "${LIVE_TARGET}/bootstrap/cache" ]; then
     chmod -R ug+rwX -- "${LIVE_TARGET}/bootstrap/cache" 2>/dev/null || log "هشدار: تنظیم permission روی bootstrap/cache کامل موفق نبود."
 fi
 
+# [TIMING-MARK] pair below is purely additive (print-only, like every
+# other `log` call in this script) — it changes no decision, order, or
+# outcome. It exists so the Windows side (which only sees this script's
+# combined stdout after the whole `ssh` command returns) can split its
+# own "SSH activation" timing-layer measurement into the part spent here
+# vs. the part spent on everything before health check. See
+# SimpleDeploy.Timing.ps1 / Invoke-ProjectDeploy for the reader.
+log "[TIMING-MARK] health_check_start_ms=$(date +%s%3N)"
+health_check_started=1
 if [ -n "$HEALTH_CHECK_URL" ]; then
     log "اجرای health check: $HEALTH_CHECK_URL"
     if command -v curl >/dev/null 2>&1; then
@@ -298,6 +324,7 @@ if [ -n "$HEALTH_CHECK_URL" ]; then
 else
     log "health_check_url تنظیم نشده — health check رد شد."
 fi
+log "[TIMING-MARK] health_check_end_ms=$(date +%s%3N)"
 
 # Success — cancel the rollback-on-error trap before retention cleanup,
 # which is a housekeeping step and must never itself trigger a rollback

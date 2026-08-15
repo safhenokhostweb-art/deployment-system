@@ -52,6 +52,7 @@ require __DIR__ . '/lib/LocalProjectStateReporter.php';
 require __DIR__ . '/lib/SafeFilesystem.php';
 require __DIR__ . '/lib/BuildWorkspace.php';
 require __DIR__ . '/lib/WorkspaceSourcePreparer.php';
+require __DIR__ . '/lib/BuildProfile.php';
 require __DIR__ . '/lib/ArtifactBuilder.php';
 require __DIR__ . '/lib/ArtifactUploader.php';
 require __DIR__ . '/lib/LocalBuildFailedException.php';
@@ -173,6 +174,7 @@ $artifactUploader = new ArtifactUploader(
     $logger,
     $workspaceBaseDir,
     $workspaceTtlSeconds,
+    is_array($config['build_profiles'] ?? null) ? $config['build_profiles'] : [],
 );
 $jobMaxRuntimeSeconds = (int) ($config['job_max_runtime_seconds'] ?? 600);
 

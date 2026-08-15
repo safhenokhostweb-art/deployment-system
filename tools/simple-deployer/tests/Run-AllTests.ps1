@@ -16,13 +16,16 @@ $testFiles = @(
     'Test-Git.ps1',
     'Test-Transfer.ps1',
     'Test-Build.ps1',
+    'Test-ArtifactValidation.ps1',
     'Test-ServiceControl.ps1',
     'Test-Preflight.ps1',
     'Test-ActivateRelease.ps1',
     'Test-Orchestration.ps1',
+    'Test-DeploymentState.ps1',
     'Test-LauncherGitFlow.ps1',
     'Test-LauncherEngine.ps1',
-    'Test-LauncherIntegration.ps1'
+    'Test-LauncherIntegration.ps1',
+    'Test-LauncherGuiFlow.ps1'
 )
 
 $overallPass = 0

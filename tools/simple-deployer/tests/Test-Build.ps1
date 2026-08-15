@@ -254,5 +254,112 @@ Assert-That 'git archive succeeds for a repository path containing spaces' (Test
 $spacedArtifact = New-DeploymentArtifact -WorkspaceProjectDir $spacedWorkspace.ProjectDir -OutputZipPath (Join-Path $spacedWorkspace.Root 'artifact.zip')
 Assert-That 'an artifact can be built from a workspace path containing spaces' ($spacedArtifact.SizeBytes -gt 0)
 
+# ============================================================
+# 7. Task 4B: -SourceSubdirectory on Export-GitArchiveToWorkspace — a
+#    real monorepo fixture (agent/, local-agent/, tools/, root files,
+#    and the real deployable app under service/), archived both ways.
+# ============================================================
+$monoBase = New-TestTempDirectory -Prefix 'sdtest-build-monorepo'
+$monoRepo = Join-Path $monoBase 'repo'
+Initialize-TestGitRepo -Path $monoRepo
+New-Item -ItemType Directory -Path (Join-Path $monoRepo 'service\app') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $monoRepo 'service\routes') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $monoRepo 'service\database') -Force | Out-Null
+'#!/usr/bin/env php' | Set-Content -LiteralPath (Join-Path $monoRepo 'service\artisan') -Encoding ASCII -NoNewline
+'{"name":"test/service"}' | Set-Content -LiteralPath (Join-Path $monoRepo 'service\composer.json') -Encoding ASCII -NoNewline
+'<?php // Kernel' | Set-Content -LiteralPath (Join-Path $monoRepo 'service\app\Kernel.php') -Encoding ASCII -NoNewline
+'<?php // web routes' | Set-Content -LiteralPath (Join-Path $monoRepo 'service\routes\web.php') -Encoding ASCII -NoNewline
+'-- migration' | Set-Content -LiteralPath (Join-Path $monoRepo 'service\database\migration.sql') -Encoding ASCII -NoNewline
+New-Item -ItemType Directory -Path (Join-Path $monoRepo 'agent') -Force | Out-Null
+'<?php // unrelated local agent source' | Set-Content -LiteralPath (Join-Path $monoRepo 'agent\Agent.php') -Encoding ASCII -NoNewline
+New-Item -ItemType Directory -Path (Join-Path $monoRepo 'local-agent') -Force | Out-Null
+'<?php // unrelated local-agent source' | Set-Content -LiteralPath (Join-Path $monoRepo 'local-agent\Watchdog.php') -Encoding ASCII -NoNewline
+New-Item -ItemType Directory -Path (Join-Path $monoRepo 'tools\simple-deployer') -Force | Out-Null
+'# this very tool -- must never end up in the app artifact' | Set-Content -LiteralPath (Join-Path $monoRepo 'tools\simple-deployer\README.md') -Encoding ASCII -NoNewline
+'# monorepo root readme' | Set-Content -LiteralPath (Join-Path $monoRepo 'README.md') -Encoding ASCII -NoNewline
+& git.exe -C $monoRepo add -A 2>&1 | Out-Null
+& git.exe -C $monoRepo commit -m 'monorepo fixture: service/ + agent/ + local-agent/ + tools/ + root files' --quiet 2>&1 | Out-Null
+$monoCommitSha = Get-LastCommitSha -RepositoryPath $monoRepo
+
+# --- Scenario 1: no -SourceSubdirectory at all (existing default) ---
+$monoWorkspaceFull = New-BuildWorkspace -BaseDir $workspaceBase -ProjectKey 'monorepo-full' -JobId 'job-007'
+Export-GitArchiveToWorkspace -RepositoryPath $monoRepo -CommitSha $monoCommitSha -DestinationDir $monoWorkspaceFull.ProjectDir
+Assert-That 'Scenario 1 (no source_subdirectory): the whole monorepo is archived, exactly as before Task 4B' (Test-Path -LiteralPath (Join-Path $monoWorkspaceFull.ProjectDir 'agent\Agent.php'))
+Assert-That 'Scenario 1: service/ is present too, still nested under service/ (unchanged/original layout)' (Test-Path -LiteralPath (Join-Path $monoWorkspaceFull.ProjectDir 'service\artisan'))
+Assert-That 'Scenario 1: the monorepo root README is present' (Test-Path -LiteralPath (Join-Path $monoWorkspaceFull.ProjectDir 'README.md'))
+
+# --- Scenario 4: -SourceSubdirectory explicitly $null / '' -- also backward compatible ---
+$monoWorkspaceExplicitNull = New-BuildWorkspace -BaseDir $workspaceBase -ProjectKey 'monorepo-explicit-null' -JobId 'job-008'
+Export-GitArchiveToWorkspace -RepositoryPath $monoRepo -CommitSha $monoCommitSha -DestinationDir $monoWorkspaceExplicitNull.ProjectDir -SourceSubdirectory $null
+Assert-That 'Scenario 4a (-SourceSubdirectory $null): identical to the no-parameter case' (Test-Path -LiteralPath (Join-Path $monoWorkspaceExplicitNull.ProjectDir 'agent\Agent.php'))
+
+$monoWorkspaceExplicitEmpty = New-BuildWorkspace -BaseDir $workspaceBase -ProjectKey 'monorepo-explicit-empty' -JobId 'job-009'
+Export-GitArchiveToWorkspace -RepositoryPath $monoRepo -CommitSha $monoCommitSha -DestinationDir $monoWorkspaceExplicitEmpty.ProjectDir -SourceSubdirectory ''
+Assert-That 'Scenario 4b (-SourceSubdirectory ''''): also identical to the no-parameter case (config.json fields left blank stay backward compatible)' (Test-Path -LiteralPath (Join-Path $monoWorkspaceExplicitEmpty.ProjectDir 'agent\Agent.php'))
+
+$monoWorkspaceWhitespace = New-BuildWorkspace -BaseDir $workspaceBase -ProjectKey 'monorepo-whitespace' -JobId 'job-011'
+Export-GitArchiveToWorkspace -RepositoryPath $monoRepo -CommitSha $monoCommitSha -DestinationDir $monoWorkspaceWhitespace.ProjectDir -SourceSubdirectory '   '
+Assert-That 'Scenario 4c (-SourceSubdirectory "   ", whitespace-only): also treated as "no subdirectory" — backward compatible, not rejected as unsafe' (Test-Path -LiteralPath (Join-Path $monoWorkspaceWhitespace.ProjectDir 'agent\Agent.php'))
+
+# --- Scenario 2: -SourceSubdirectory 'service' -- only service/ contents, flattened to the archive root ---
+$monoWorkspaceService = New-BuildWorkspace -BaseDir $workspaceBase -ProjectKey 'monorepo-service' -JobId 'job-010'
+Export-GitArchiveToWorkspace -RepositoryPath $monoRepo -CommitSha $monoCommitSha -DestinationDir $monoWorkspaceService.ProjectDir -SourceSubdirectory 'service'
+
+Assert-That 'Scenario 2: artisan lands directly at the artifact root (not service\artisan)' (Test-Path -LiteralPath (Join-Path $monoWorkspaceService.ProjectDir 'artisan'))
+Assert-That 'Scenario 2: composer.json lands directly at the artifact root' (Test-Path -LiteralPath (Join-Path $monoWorkspaceService.ProjectDir 'composer.json'))
+Assert-That 'Scenario 2: app/ lands directly at the artifact root' (Test-Path -LiteralPath (Join-Path $monoWorkspaceService.ProjectDir 'app\Kernel.php'))
+Assert-That 'Scenario 2: routes/ lands directly at the artifact root' (Test-Path -LiteralPath (Join-Path $monoWorkspaceService.ProjectDir 'routes\web.php'))
+Assert-That 'Scenario 2: database/ lands directly at the artifact root' (Test-Path -LiteralPath (Join-Path $monoWorkspaceService.ProjectDir 'database\migration.sql'))
+Assert-That 'Scenario 2: there is NO nested service\artisan (no leftover prefix — this is the exact "service/service/artisan" bug being prevented)' (-not (Test-Path -LiteralPath (Join-Path $monoWorkspaceService.ProjectDir 'service')))
+Assert-That 'Scenario 2: agent/ is completely absent from the artifact' (-not (Test-Path -LiteralPath (Join-Path $monoWorkspaceService.ProjectDir 'agent')))
+Assert-That 'Scenario 2: local-agent/ is completely absent from the artifact' (-not (Test-Path -LiteralPath (Join-Path $monoWorkspaceService.ProjectDir 'local-agent')))
+Assert-That 'Scenario 2: tools/ (this very tool''s own source) is completely absent from the artifact' (-not (Test-Path -LiteralPath (Join-Path $monoWorkspaceService.ProjectDir 'tools')))
+Assert-That 'Scenario 2: the monorepo root README.md is absent from the artifact' (-not (Test-Path -LiteralPath (Join-Path $monoWorkspaceService.ProjectDir 'README.md')))
+
+# The final packaged artifact.zip itself must reflect the same flattened,
+# scoped structure — proving New-DeploymentArtifact needed no changes at
+# all (Export-GitArchiveToWorkspace already handed it a correctly-rooted
+# workspace).
+$monoServiceArtifactPath = Join-Path $monoWorkspaceService.Root 'artifact.zip'
+$monoServiceArtifact = New-DeploymentArtifact -WorkspaceProjectDir $monoWorkspaceService.ProjectDir -OutputZipPath $monoServiceArtifactPath
+$monoServiceArchive = [System.IO.Compression.ZipFile]::OpenRead($monoServiceArtifactPath)
+$monoServiceEntryNames = @($monoServiceArchive.Entries | ForEach-Object { $_.FullName })
+$monoServiceArchive.Dispose()
+Assert-That 'the packaged artifact.zip contains artisan at its root' (@($monoServiceEntryNames) -contains 'artisan')
+Assert-That 'the packaged artifact.zip contains composer.json at its root' (@($monoServiceEntryNames) -contains 'composer.json')
+Assert-That 'the packaged artifact.zip contains NO entry under agent/, local-agent/, tools/, or a leftover service/ prefix' (
+    -not (@($monoServiceEntryNames) | Where-Object { $_ -match '^(agent|local-agent|tools|service)/' })
+)
+
+# --- Scenario 3: an unsafe -SourceSubdirectory value is rejected BEFORE git is ever invoked with it ---
+$unsafeValues = @('../invalid', '..\invalid', 'a/../../etc', 'C:\Windows', '/etc/passwd')
+foreach ($unsafeValue in $unsafeValues) {
+    $rejected = $false
+    $rejectionMessage = $null
+    try {
+        Export-GitArchiveToWorkspace -RepositoryPath $monoRepo -CommitSha $monoCommitSha `
+            -DestinationDir (Join-Path $monoBase "unsafe-check-$([Guid]::NewGuid().ToString('N').Substring(0,8))") `
+            -SourceSubdirectory $unsafeValue
+    } catch {
+        $rejected = $true
+        $rejectionMessage = $_.Exception.Message
+    }
+    Assert-That "Scenario 3: source_subdirectory='$unsafeValue' is rejected, never passed through to git" $rejected
+}
+
+# A subdirectory that is syntactically safe but genuinely does not exist
+# in that commit is also refused (via git's own real, distinct error),
+# never silently falls back to archiving the whole repo.
+$nonexistentRejected = $false
+try {
+    Export-GitArchiveToWorkspace -RepositoryPath $monoRepo -CommitSha $monoCommitSha `
+        -DestinationDir (Join-Path $monoBase 'nonexistent-check') -SourceSubdirectory 'this-directory-does-not-exist'
+} catch {
+    $nonexistentRejected = $true
+}
+Assert-That 'Scenario 3b: a syntactically-safe but nonexistent source_subdirectory is also refused, never silently archives the whole repo instead' $nonexistentRejected
+
+Remove-TestTempDirectory -Path $monoBase
+
 Remove-TestTempDirectory -Path $baseDir
 Write-TestSummaryAndExit -SuiteName 'Test-Build'

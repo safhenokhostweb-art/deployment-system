@@ -74,6 +74,29 @@ class AgentJobService
             );
 
             $project = $deployment->project;
+
+            // Defense in depth for the artifact-only policy. An artifact
+            // can be cleaned up after the deployment was queued; never
+            // degrade that race into the legacy production git path.
+            if ($project->requires_complete_artifact && $deployment->artifact === null) {
+                $deployment->update([
+                    'status' => Deployment::STATUS_FAILED,
+                    'finished_at' => now(),
+                    'failure_code' => Deployment::FAILURE_CODE_REQUIRED_ARTIFACT_MISSING,
+                    'failure_message' => 'The required artifact is no longer available for this deployment.',
+                ]);
+
+                AuditLogEntry::record(
+                    actorType: AuditLogEntry::ACTOR_SYSTEM,
+                    actorIdentifier: null,
+                    action: 'deployment.blocked_missing_required_artifact',
+                    subjectType: Deployment::class,
+                    subjectId: $deployment->id,
+                    metadata: ['project_id' => $project->id, 'commit_hash' => $deployment->commit_hash],
+                );
+
+                return null;
+            }
             $usesRecipe = $project->usesDeploymentRecipe();
 
             $job = [
@@ -106,6 +129,10 @@ class AgentJobService
                 // absent/false and RollbackService's legacy full-pipeline
                 // re-run behavior continues exactly as before.
                 'recipe_rollback' => $usesRecipe && $deployment->action === Deployment::ACTION_ROLLBACK,
+                // Carries the Project-level policy to the Server Agent so
+                // a malformed/stale stored recipe cannot silently regain a
+                // production dependency on Git or a package registry.
+                'requires_complete_artifact' => (bool) $project->requires_complete_artifact,
                 // Root-cause fix (customer-site direct-GitHub-dependency
                 // removal): present only when the Local Agent already
                 // uploaded a matching artifact for this exact commit (see

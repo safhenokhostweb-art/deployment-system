@@ -30,6 +30,9 @@ final class RecipeStepRunner
     private const FAILURE_ACTIVATION_FAILED = 'activation_failed';
     private const FAILURE_SERVICE_RESTART_FAILED = 'service_restart_failed';
     private const FAILURE_HEALTH_CHECK_FAILED = 'health_check_failed';
+    private const FAILURE_ARTIFACT_CONTRACT_FAILED = 'artifact_contract_failed';
+
+    private const ARTIFACT_PREBUILT_STEP_TYPES = ['install_dependencies', 'run_script', 'assemble_next_standalone'];
 
     private const PHASE_BY_STEP_TYPE = [
         'checkout_release' => 'building',
@@ -58,6 +61,7 @@ final class RecipeStepRunner
         private readonly Client $client,
         private readonly Logger $logger,
         private readonly ReleaseManager $releases,
+        private readonly ArtifactManager $artifacts,
     ) {
     }
 
@@ -75,6 +79,13 @@ final class RecipeStepRunner
 
         $jobId = $job['id'];
         $recipe = $job['deployment_recipe'];
+        $artifactPlan = $this->artifactPlan($recipe, (bool) ($job['requires_complete_artifact'] ?? false), $job['artifact'] ?? null);
+        if ($artifactPlan['failure'] !== null) {
+            $this->reportStatus($jobId, 'failed', $artifactPlan['failure'], self::FAILURE_ARTIFACT_CONTRACT_FAILED);
+            $this->logger->error("Recipe deployment {$jobId} rejected before release creation: {$artifactPlan['failure']}");
+
+            return;
+        }
         $releaseRoot = rtrim($projectConfig['working_directory'], '/');
         $releasePath = $this->releases->releasePath($releaseRoot, $jobId);
 
@@ -123,7 +134,11 @@ final class RecipeStepRunner
             }
 
             $stepTimeout = (int) max(1, min((int) $step['timeout_seconds'], (int) $remainingBudget));
-            $result = $this->executeStep($step, $tokens, $releaseRoot, $releasePath, $projectConfig, $stepTimeout, $onTick);
+            if (isset($artifactPlan['prebuilt'][$step['name']])) {
+                $result = $this->succeeded("Skipped prebuilt BUILD_TIME step '{$step['name']}' under the complete-artifact contract.");
+            } else {
+                $result = $this->executeStep($step, $tokens, $releaseRoot, $releasePath, $projectConfig, $stepTimeout, $onTick, $job['artifact'] ?? null, $artifactPlan['required_paths'], (bool) ($job['requires_complete_artifact'] ?? false));
+            }
 
             $this->reportLog($jobId, $sequence, $step['name'], $step['type'], $result);
 
@@ -294,19 +309,19 @@ final class RecipeStepRunner
      * @param array<string, mixed> $projectConfig
      * @return array{status: string, exitCode: ?int, output: string, durationMs: int, timedOut: bool, failureCode: ?string, message: ?string}
      */
-    private function executeStep(array $step, array $tokens, string $releaseRoot, string $releasePath, array $projectConfig, int $timeoutSeconds, callable $onTick): array
+    private function executeStep(array $step, array $tokens, string $releaseRoot, string $releasePath, array $projectConfig, int $timeoutSeconds, callable $onTick, ?array $artifact = null, array $artifactRequiredPaths = [], bool $completeArtifactMode = false): array
     {
         try {
             return match ($step['type']) {
                 'shell' => $this->runShell($step, $tokens, $releasePath, $timeoutSeconds, $onTick),
-                'checkout_release' => $this->runCheckoutRelease($step, $tokens, $releasePath, $timeoutSeconds, $onTick),
+                'checkout_release' => $this->runCheckoutRelease($step, $tokens, $releasePath, $timeoutSeconds, $onTick, $artifact, $artifactRequiredPaths),
                 'verify_runtime' => $this->runVerifyRuntime($step, $timeoutSeconds, $onTick),
                 'verify_disk_space' => $this->runVerifyDiskSpace($step, $tokens),
                 'verify_path_exists' => $this->runVerifyPathExists($step, $tokens),
                 'verify_file_not_contains' => $this->runVerifyFileNotContains($step, $tokens),
                 'install_dependencies' => $this->runInstallDependencies($step, $tokens, $timeoutSeconds, $onTick),
                 'run_script' => $this->runRunScript($step, $tokens, $timeoutSeconds, $onTick),
-                'prisma_migrate' => $this->runPrismaMigrate($step, $tokens, $timeoutSeconds, $onTick),
+                'prisma_migrate' => $this->runPrismaMigrate($step, $tokens, $timeoutSeconds, $onTick, $completeArtifactMode),
                 'assemble_next_standalone' => $this->runAssembleNextStandalone($step, $tokens),
                 'activate_release' => $this->runActivateRelease($releaseRoot, $releasePath, $projectConfig, $this->lastCheckoutSourceRepository ?? null),
                 'restart_service' => $this->runRestartService($step, $tokens, $projectConfig, $timeoutSeconds, $onTick),
@@ -331,8 +346,26 @@ final class RecipeStepRunner
         return $this->fromExecutorResult($result, self::FAILURE_BUILD_FAILED, $command);
     }
 
-    private function runCheckoutRelease(array $step, array $tokens, string $releasePath, int $timeoutSeconds, callable $onTick): array
+    private function runCheckoutRelease(array $step, array $tokens, string $releasePath, int $timeoutSeconds, callable $onTick, ?array $artifact, array $artifactRequiredPaths = []): array
     {
+        if ($artifact !== null) {
+            $startedAt = microtime(true);
+            // Null tells release cleanup there is no Git worktree to
+            // deregister: this immutable release came only from the Hub.
+            $this->lastCheckoutSourceRepository = null;
+            $result = $this->artifacts->extractToRelease($artifact, $releasePath, $onTick, $artifactRequiredPaths);
+
+            return [
+                'status' => $result['status'],
+                'exitCode' => $result['status'] === 'succeeded' ? 0 : 1,
+                'output' => $result['message'] ?? '',
+                'durationMs' => (int) round((microtime(true) - $startedAt) * 1000),
+                'timedOut' => false,
+                'failureCode' => $result['failureCode'],
+                'message' => $result['message'],
+            ];
+        }
+
         $sourceRepository = strtr($step['source_repository'], $tokens);
         $this->lastCheckoutSourceRepository = $sourceRepository;
         $commit = $tokens['{commit}'] ?? '';
@@ -341,6 +374,83 @@ final class RecipeStepRunner
         $result = $this->releases->checkout($this->executor, $sourceRepository, $releasePath, $branch, $commit, $timeoutSeconds, $onTick);
 
         return $this->fromExecutorResult($result, self::FAILURE_BUILD_FAILED, "checkout {$commit} (branch {$branch}) from {$sourceRepository} into {$releasePath}");
+    }
+
+    /**
+     * Validates the Hub-normalized complete-artifact contract again on the
+     * agent, before it downloads/extracts a release or executes a command.
+     * This protects old/stale stored JSON and makes it impossible for a
+     * BUILD_TIME step to fall through to npm/composer/Git on production.
+     *
+     * @return array{failure: ?string, prebuilt: array<string, true>, required_paths: array<int, string>}
+     */
+    private function artifactPlan(array $recipe, bool $requiresCompleteArtifact, mixed $artifact): array
+    {
+        $empty = ['failure' => null, 'prebuilt' => [], 'required_paths' => []];
+        if (!$requiresCompleteArtifact) {
+            return $empty;
+        }
+        if (!is_array($artifact)) {
+            return ['failure' => 'Complete-artifact deployment has no artifact descriptor.', 'prebuilt' => [], 'required_paths' => []];
+        }
+
+        $steps = $recipe['steps'] ?? null;
+        if (!is_array($steps)) {
+            return ['failure' => 'Complete-artifact deployment has an invalid recipe.', 'prebuilt' => [], 'required_paths' => []];
+        }
+        $byName = [];
+        $buildNames = [];
+        $checkoutIndex = null;
+        foreach ($steps as $index => $step) {
+            if (!is_array($step) || !is_string($step['name'] ?? null) || !is_string($step['type'] ?? null)) {
+                return ['failure' => 'Complete-artifact deployment has an invalid recipe step.', 'prebuilt' => [], 'required_paths' => []];
+            }
+            $byName[$step['name']] = $step['type'];
+            if ($step['type'] === 'checkout_release' && $checkoutIndex === null) {
+                $checkoutIndex = $index;
+            }
+            if ($step['type'] === 'shell') {
+                return ['failure' => 'Complete-artifact recipes cannot execute shell steps.', 'prebuilt' => [], 'required_paths' => []];
+            }
+            if (in_array($step['type'], self::ARTIFACT_PREBUILT_STEP_TYPES, true)) {
+                $buildNames[] = $step['name'];
+            }
+        }
+        if ($buildNames === []) {
+            return $empty;
+        }
+        if ($checkoutIndex === null) {
+            return ['failure' => 'Complete-artifact recipe has no checkout_release step to materialize the artifact.', 'prebuilt' => [], 'required_paths' => []];
+        }
+        foreach ($steps as $index => $step) {
+            if (in_array($step['type'], self::ARTIFACT_PREBUILT_STEP_TYPES, true) && $index < $checkoutIndex) {
+                return ['failure' => 'Complete-artifact BUILD_TIME steps must follow checkout_release.', 'prebuilt' => [], 'required_paths' => []];
+            }
+        }
+
+        $contract = $recipe['artifact_contract'] ?? null;
+        if (!is_array($contract) || ($contract['profile'] ?? null) !== 'complete' || !is_array($contract['prebuilt_steps'] ?? null)) {
+            return ['failure' => 'Complete-artifact recipe BUILD_TIME steps require an explicit complete artifact_contract.', 'prebuilt' => [], 'required_paths' => []];
+        }
+        $prebuilt = [];
+        $paths = [];
+        foreach ($contract['prebuilt_steps'] as $entry) {
+            if (!is_array($entry) || !is_string($entry['name'] ?? null) || !isset($byName[$entry['name']]) || !in_array($byName[$entry['name']], self::ARTIFACT_PREBUILT_STEP_TYPES, true) || isset($prebuilt[$entry['name']]) || !is_array($entry['required_paths'] ?? null) || $entry['required_paths'] === []) {
+                return ['failure' => 'Complete-artifact recipe has an invalid prebuilt_steps contract.', 'prebuilt' => [], 'required_paths' => []];
+            }
+            $prebuilt[$entry['name']] = true;
+            foreach ($entry['required_paths'] as $path) {
+                if (!is_string($path) || $path === '' || str_contains($path, "\0") || str_starts_with($path, '/') || preg_match('/^[A-Za-z]:[\\\\\/]/', $path) === 1 || in_array('..', preg_split('#[\\\\/]#', $path) ?: [], true)) {
+                    return ['failure' => 'Complete-artifact recipe has an unsafe required artifact path.', 'prebuilt' => [], 'required_paths' => []];
+                }
+                $paths[] = str_replace('\\', '/', $path);
+            }
+        }
+        if (array_diff($buildNames, array_keys($prebuilt)) !== []) {
+            return ['failure' => 'Complete-artifact recipe has BUILD_TIME steps that are not declared prebuilt.', 'prebuilt' => [], 'required_paths' => []];
+        }
+
+        return ['failure' => null, 'prebuilt' => $prebuilt, 'required_paths' => array_values(array_unique($paths))];
     }
 
     private function runVerifyRuntime(array $step, int $timeoutSeconds, callable $onTick): array
@@ -483,12 +593,18 @@ final class RecipeStepRunner
      * `allow_destructive: false` recipe from proceeding at all. Flagged
      * as a known limitation, not silently treated as exact.
      */
-    private function runPrismaMigrate(array $step, array $tokens, int $timeoutSeconds, callable $onTick): array
+    private function runPrismaMigrate(array $step, array $tokens, int $timeoutSeconds, callable $onTick, bool $completeArtifactMode = false): array
     {
         $cwd = strtr($step['working_directory'], $tokens);
+        // npx normally installs a missing Prisma CLI from the registry.
+        // That is useful for legacy Git recipes, but an impermissible
+        // hidden network fallback for a complete-artifact deployment.
+        $npx = $completeArtifactMode
+            ? ['node', $tokens['{release_path}'] . '/.deployment-runtime/prisma/node_modules/prisma/build/index.js']
+            : ['npx', 'prisma'];
 
         if ($step['mode'] === 'status') {
-            $result = $this->executor->runArgv(['npx', 'prisma', 'migrate', 'status'], $cwd, $timeoutSeconds, [], $onTick);
+            $result = $this->executor->runArgv([...$npx, 'migrate', 'status'], $cwd, $timeoutSeconds, [], $onTick);
 
             return $this->fromExecutorResult($result, self::FAILURE_MIGRATION_FAILED, "prisma migrate status in {$cwd}");
         }
@@ -508,7 +624,7 @@ final class RecipeStepRunner
             }
         }
 
-        $result = $this->executor->runArgv(['npx', 'prisma', 'migrate', 'deploy'], $cwd, $timeoutSeconds, [], $onTick);
+        $result = $this->executor->runArgv([...$npx, 'migrate', 'deploy'], $cwd, $timeoutSeconds, [], $onTick);
 
         return $this->fromExecutorResult($result, self::FAILURE_MIGRATION_FAILED, "prisma migrate deploy in {$cwd}");
     }

@@ -11,8 +11,11 @@ Set-StrictMode -Version Latest
 # Matches this project's own established list (.env/secrets/private keys/real
 # agent config) plus a large-file safety net.
 $script:SensitiveFilePatterns = @(
-    '(^|[\\/])\.env($|\.[^\\/]*$)',
-    '(^|[\\/])\.env\.[^\\/]*$',
+    # .env / .env.<anything> is blocked EXCEPT the well-known template
+    # suffixes (.example/.sample/.dist/.template) that every framework
+    # convention (Laravel, Node, ...) expects to be committed as-is —
+    # they hold placeholder keys, never a real secret.
+    '(^|[\\/])\.env($|\.(?!(example|sample|dist|template)$)[^\\/]*$)',
     'secret',
     'credential',
     '(^|[\\/])id_rsa($|\.)',
@@ -90,6 +93,31 @@ function Test-SensitiveFiles {
     }
 }
 
+<#
+.SYNOPSIS
+    Recognizes exactly the transient-network class of git/ssh failure —
+    a connection getting reset or timing out mid-handshake, never a real
+    rejection (bad credentials, stale branch, non-fast-forward, unknown
+    host key). Deliberately the SAME pattern already proven correct as
+    SimpleDeployLauncher.GitFlow.ps1's own Get-GitErrorCategory
+    "NetworkTransient" case (used there for the Launcher's separate
+    "ارسال به Git" button) — duplicated here as a small, local check
+    rather than a cross-file dependency, so this fix stays scoped to
+    exactly the one gap found: Invoke-GitCommitAndPush's own push step
+    (used by BOTH the CLI and the Launcher's "ارسال به Git و سرور"
+    Deploy button, via Invoke-ProjectDeploy) never retried at all,
+    unlike the git-only flow. Deliberately narrower than GitFlow's own
+    classifier — it also treats DNS-resolution failures as retryable,
+    which would retry (harmlessly, just slower) Test-Git.ps1's own
+    "push to a deliberately nonexistent/unresolvable remote must fail
+    cleanly" test; this function only covers the connection-reset/
+    timeout class the reported error actually was.
+#>
+function Test-GitPushErrorIsTransient {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$ErrorText)
+    return ($ErrorText -match '(?i)connection reset|connection timed out|timed out|operation timed out|broken pipe|network is unreachable|could not read from remote repository|kex_exchange_identification')
+}
+
 function Get-CurrentGitBranch {
     param([Parameter(Mandatory = $true)][string]$RepositoryPath)
     $result = Invoke-ExternalCommand -FilePath 'git.exe' -ArgumentList @('branch', '--show-current') -WorkingDirectory $RepositoryPath -TimeoutSeconds 15
@@ -143,12 +171,26 @@ function Invoke-GitCommitAndPush {
         [Parameter(Mandatory = $true)][string[]]$PathsToStage,
         [Parameter(Mandatory = $true)][string]$CommitMessage,
         [Parameter(Mandatory = $true)][string]$RemoteName,
-        [Parameter(Mandatory = $true)][string]$Branch
+        [Parameter(Mandatory = $true)][string]$Branch,
+        # Optional performance-timing hook (see SimpleDeploy.Timing.ps1) —
+        # $null (the default) here means EXACTLY what it always meant:
+        # every existing caller (GitFlow.ps1's git-only push, every test
+        # in Test-Git.ps1) is completely unaffected, no timing recorded,
+        # no behavior/output change of any kind.
+        [Parameter(Mandatory = $false)]$TimingReport = $null,
+        # Optional -- only used to also emit STAGE START/END markers to
+        # the internal launcher-debug.log (see Write-LauncherDebugLog);
+        # same $null-default, zero-impact-when-omitted contract as
+        # $TimingReport above.
+        [Parameter(Mandatory = $false)][string]$ToolRoot = $null
     )
 
     if ($PathsToStage.Count -eq 0) {
         throw 'فهرست فایل‌های آماده‌سازی (stage) خالی است — چیزی برای commit وجود ندارد.'
     }
+
+    if ($ToolRoot) { Write-DeployStageStartMarker -StageName 'Commit' -ToolRoot $ToolRoot }
+    $commitStopwatch = if ($TimingReport) { [System.Diagnostics.Stopwatch]::StartNew() } else { $null }
 
     $addArgs = @('add', '--') + $PathsToStage
     $addResult = Invoke-ExternalCommand -FilePath 'git.exe' -ArgumentList $addArgs -WorkingDirectory $RepositoryPath -TimeoutSeconds 120
@@ -160,16 +202,40 @@ function Invoke-GitCommitAndPush {
     if ($commitResult.ExitCode -ne 0) {
         throw "git commit در '$RepositoryPath' با خطا مواجه شد: $($commitResult.StdErr)$($commitResult.StdOut)"
     }
+    if ($TimingReport) { Add-DeployStageTiming -Report $TimingReport -StageName 'Commit' -Stopwatch $commitStopwatch -ToolRoot $ToolRoot }
 
     $sha = Get-LastCommitSha -RepositoryPath $RepositoryPath
+
+    if ($ToolRoot) { Write-DeployStageStartMarker -StageName 'Push' -ToolRoot $ToolRoot }
+    $pushStopwatch = if ($TimingReport) { [System.Diagnostics.Stopwatch]::StartNew() } else { $null }
 
     # Never --force, never --force-with-lease — a rejected push (e.g. the
     # remote moved) must surface as a real failure, not be silently
     # overwritten.
-    $pushResult = Invoke-ExternalCommand -FilePath 'git.exe' -ArgumentList @('push', $RemoteName, $Branch) -WorkingDirectory $RepositoryPath -TimeoutSeconds 180
-    if ($pushResult.ExitCode -ne 0) {
-        throw "git push به '$RemoteName/$Branch' با خطا مواجه شد — Deploy برای این پروژه متوقف می‌شود (commit محلی حفظ شده و push نشده باقی می‌ماند):`n$($pushResult.StdErr)"
+    #
+    # Retries ONLY a transient connection reset/timeout (see
+    # Test-GitPushErrorIsTransient) — never re-runs `git add`/`git
+    # commit` (already done, once, above); a genuine rejection (bad
+    # credentials, non-fast-forward, unknown host key) still throws on
+    # the very first attempt exactly as before. Same 5s/15s/30s backoff
+    # already proven for this exact error class by
+    # SimpleDeployLauncher.GitFlow.ps1's Invoke-GitPushWithRetry.
+    $pushDelaysSeconds = @(5, 15, 30)
+    $pushAttempt = 0
+    while ($true) {
+        $pushAttempt++
+        $pushResult = Invoke-ExternalCommand -FilePath 'git.exe' -ArgumentList @('push', $RemoteName, $Branch) -WorkingDirectory $RepositoryPath -TimeoutSeconds 180
+        if ($pushResult.ExitCode -eq 0) { break }
+
+        $isTransient = Test-GitPushErrorIsTransient -ErrorText $pushResult.StdErr
+        if (-not $isTransient -or $pushAttempt -gt $pushDelaysSeconds.Count) {
+            throw "git push به '$RemoteName/$Branch' با خطا مواجه شد — Deploy برای این پروژه متوقف می‌شود (commit محلی حفظ شده و push نشده باقی می‌ماند):`n$($pushResult.StdErr)"
+        }
+        $delay = $pushDelaysSeconds[$pushAttempt - 1]
+        Write-Warn "خطای شبکه‌ای گذرا در git push (تلاش $pushAttempt): $($pushResult.StdErr.Trim()) — تلاش مجدد پس از $delay ثانیه."
+        Start-Sleep -Seconds $delay
     }
+    if ($TimingReport) { Add-DeployStageTiming -Report $TimingReport -StageName 'Push' -Stopwatch $pushStopwatch -ToolRoot $ToolRoot }
 
     return @{ CommitSha = $sha }
 }

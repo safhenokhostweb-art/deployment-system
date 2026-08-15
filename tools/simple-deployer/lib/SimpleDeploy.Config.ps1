@@ -100,3 +100,112 @@ function Get-EnabledProjects {
     }
     return $result.ToArray()
 }
+
+<#
+.SYNOPSIS
+    Adapter: extracts the "Application" half (code/repository/build
+    settings) of one today's-flat project config entry into its own
+    object — see docs/SimpleDeploy-Architecture-Task3.md-equivalent
+    design (Task 3 report). config.json itself is NOT changed by this —
+    every existing flat entry is read exactly as it is today; this only
+    reshapes it in memory for the new Build/Deploy split in
+    SimpleDeploy.Orchestration.ps1.
+
+.NOTES
+    source_subdirectory is a NEW, OPTIONAL field (absent in every
+    existing config.json entry today, so it reads as $null everywhere
+    unless explicitly added) — purely preparatory per this Task: nothing
+    in SimpleDeploy.Build.ps1 reads or acts on it yet.
+#>
+function ConvertTo-ApplicationProfile {
+    param(
+        [Parameter(Mandatory = $true)][string]$ApplicationKey,
+        [Parameter(Mandatory = $true)]$ProjectConfig
+    )
+
+    return [PSCustomObject]@{
+        ApplicationKey     = $ApplicationKey
+        DisplayName        = $ApplicationKey
+        LocalPath          = $ProjectConfig.local_path
+        Branch             = $ProjectConfig.branch
+        Remote             = $ProjectConfig.remote
+        ProjectType        = if ($ProjectConfig.PSObject.Properties['project_type']) { $ProjectConfig.project_type } else { $null }
+        SourceSubdirectory = if ($ProjectConfig.PSObject.Properties['source_subdirectory']) { $ProjectConfig.source_subdirectory } else { $null }
+        BuildMode          = $ProjectConfig.build_mode
+        ActivationMode     = $ProjectConfig.activation_mode
+        ComposerCommand    = $ProjectConfig.composer_command
+        NpmCommand         = $ProjectConfig.npm_command
+        PhpBinary          = $ProjectConfig.php_binary
+        PreservePaths      = $ProjectConfig.preserve_paths
+        RetentionCount     = $ProjectConfig.retention_count
+        RunMigrations      = $ProjectConfig.run_migrations
+        DatabaseBackup     = $ProjectConfig.database_backup
+        ArtifactValidation = if ($ProjectConfig.PSObject.Properties['artifact_validation']) { $ProjectConfig.artifact_validation } else { $null }
+    }
+}
+
+<#
+.SYNOPSIS
+    Adapter: extracts the "Deployment Target" half (destination server)
+    of one today's-flat project config entry. Every existing real
+    project has EXACTLY ONE implied target today — this produces that
+    one target with -TargetKey defaulting to "<ApplicationKey>-default"
+    and -Source "legacy-flat-config" so it stays distinguishable from a
+    target genuinely added later through a real multi-target source
+    (e.g. a future Registry sync) — see Task 3 report Section 5's
+    "manual vs synced Target must stay distinguishable" requirement.
+#>
+function ConvertTo-DeploymentTarget {
+    param(
+        [Parameter(Mandatory = $true)][string]$ApplicationKey,
+        [Parameter(Mandatory = $true)]$ProjectConfig,
+        [Parameter(Mandatory = $false)][string]$TargetKey = $null
+    )
+
+    if (-not $TargetKey) { $TargetKey = "$ApplicationKey-default" }
+
+    $serverPort = if ($ProjectConfig.PSObject.Properties['server_port'] -and $ProjectConfig.server_port) { [int]$ProjectConfig.server_port } else { 22 }
+
+    return [PSCustomObject]@{
+        TargetKey         = $TargetKey
+        ApplicationKey    = $ApplicationKey
+        Domain            = $null
+        DisplayName       = $TargetKey
+        LifecycleStatus   = 'active'
+        DeploymentChannel = 'stable'
+        ServerHost        = $ProjectConfig.server_host
+        ServerPort        = $serverPort
+        ServerUser        = $ProjectConfig.server_user
+        ServerPath        = $ProjectConfig.server_path
+        SshKeyPath        = $ProjectConfig.ssh_key_path
+        HealthCheckUrl    = $ProjectConfig.health_check_url
+        RemotePhpBinary   = if ($ProjectConfig.PSObject.Properties['remote_php_binary']) { $ProjectConfig.remote_php_binary } else { $null }
+        Enabled           = $true
+        IsTestTarget      = $false
+        Source            = 'legacy-flat-config'
+    }
+}
+
+<#
+.SYNOPSIS
+    Convenience wrapper — one flat legacy project config entry in, one
+    ApplicationProfile + its one (default) Target out. Never called by
+    the existing Invoke-ProjectDeploy backward-compat path itself (which
+    still reads $cfg directly to stay as close as possible to its
+    already-proven-correct original code) — this exists for the NEW
+    multi-target path and for direct testing of the conversion itself.
+
+.OUTPUTS
+    Hashtable: @{ ApplicationProfile; Targets (array, currently always 1 element) }
+#>
+function ConvertFrom-LegacyProjectConfig {
+    param(
+        [Parameter(Mandatory = $true)][string]$ApplicationKey,
+        [Parameter(Mandatory = $true)]$ProjectConfig
+    )
+
+    return @{
+        ApplicationProfile = ConvertTo-ApplicationProfile -ApplicationKey $ApplicationKey -ProjectConfig $ProjectConfig
+        Targets            = @(ConvertTo-DeploymentTarget -ApplicationKey $ApplicationKey -ProjectConfig $ProjectConfig)
+    }
+}

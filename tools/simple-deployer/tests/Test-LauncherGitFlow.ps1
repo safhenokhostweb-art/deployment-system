@@ -203,7 +203,15 @@ $connOk = Test-GitConnectivity -RepositoryPath $repo5 -RemoteName 'origin' -Time
 Assert-That 'connectivity check against a real, reachable local bare repo succeeds' $connOk.Ok
 
 & git.exe -C $repo5 remote set-url origin 'https://this-host-does-not-exist.invalid.test/x.git' 2>&1 | Out-Null
-$connFail = Test-GitConnectivity -RepositoryPath $repo5 -RemoteName 'origin' -TimeoutSeconds 10
+# 20s, matching the real call site (SimpleDeployLauncher.Gui.ps1) --
+# confirmed empirically that a real unresolvable-host DNS failure can
+# take longer than 10s to naturally produce git's own classifiable
+# "Could not resolve host" error text (~12.6s observed on this
+# network); now that Invoke-ExternalCommand's timeout genuinely kills a
+# still-running process (see the Common.ps1 fix), a too-short timeout
+# here would cut the real error off before Get-GitErrorCategory ever
+# sees it, misclassifying a real DNS failure as "Unknown".
+$connFail = Test-GitConnectivity -RepositoryPath $repo5 -RemoteName 'origin' -TimeoutSeconds 20
 Assert-That 'connectivity check against an unresolvable host fails' (-not $connFail.Ok)
 Assert-That 'the failure is categorized as a DNS failure' ($connFail.Category -eq 'DnsFailure')
 Remove-TestTempDirectory -Path $base5
