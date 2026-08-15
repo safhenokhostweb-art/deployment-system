@@ -388,7 +388,11 @@ class ProjectController extends Controller
             'server_id' => 'required|exists:servers,id',
             'pipeline' => 'required|string',
             'deployment_recipe' => 'nullable|string',
-            'application_root' => 'nullable|string|max:255|regex:/^(\.|[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*)$/',
+            // Keep this as an array rule. The expression contains `|`, which
+            // Laravel treats as a rule separator when it is embedded in a
+            // pipe-delimited rule string, producing an invalid preg_match()
+            // pattern for every non-empty application_root.
+            'application_root' => ['nullable', 'string', 'max:255', 'regex:/^(\.|[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*)$/'],
             'environment_name' => 'nullable|string|max:255',
             'github_account_id' => 'nullable|exists:github_accounts,id',
         ]);
@@ -410,10 +414,18 @@ class ProjectController extends Controller
         // Optional and additive: an empty/omitted textarea leaves
         // deployment_recipe null, so this Project keeps deploying via
         // `pipeline` exactly as before — see Project::usesDeploymentRecipe().
-        $rawRecipe = trim((string) ($validated['deployment_recipe'] ?? ''));
-        $validated['deployment_recipe'] = $rawRecipe === ''
-            ? null
-            : $this->recipeValidator->validate(json_decode($rawRecipe, true));
+        // The existing edit form intentionally does not expose a recipe
+        // editor. Its absence must therefore preserve a configured recipe,
+        // rather than silently replacing it with null while saving another
+        // Project setting such as application_root.
+        if (! $request->has('deployment_recipe')) {
+            $validated['deployment_recipe'] = $project?->deployment_recipe;
+        } else {
+            $rawRecipe = trim((string) $validated['deployment_recipe']);
+            $validated['deployment_recipe'] = $rawRecipe === ''
+                ? null
+                : $this->recipeValidator->validate(json_decode($rawRecipe, true));
+        }
         $validated['application_root'] = $validated['application_root'] ?? $project?->application_root ?? '.';
 
         if ($project !== null) {
