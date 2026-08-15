@@ -169,42 +169,13 @@ class DeploymentDispatcher
      * omits `artifact` from the job payload and the agent runs the
      * exact legacy git-based pipeline, unchanged.
      */
-    private function attachArtifactIfAvailable(Deployment $deployment, Project $project, string $commitHash): bool
+    private function attachArtifactIfAvailable(Deployment $deployment, Project $project, string $commitHash): void
     {
         $artifact = $this->artifacts->findMatching($project, $commitHash);
 
         if ($artifact !== null) {
             $deployment->update(['artifact_id' => $artifact->id]);
-
-            return true;
         }
-
-        if (!$project->requires_complete_artifact) {
-            return true;
-        }
-
-        // An artifact-only Project must never silently hand an agent a
-        // null artifact and thereby fall back to git/composer/npm on the
-        // production server. Keep the failed Deployment as an auditable
-        // record of the requested commit, but make it terminal before the
-        // transaction commits so it can never be claimed.
-        $deployment->update([
-            'status' => Deployment::STATUS_FAILED,
-            'finished_at' => now(),
-            'failure_code' => Deployment::FAILURE_CODE_REQUIRED_ARTIFACT_MISSING,
-            'failure_message' => 'This project requires a complete artifact, but no available artifact exists for the requested commit.',
-        ]);
-
-        AuditLogEntry::record(
-            actorType: AuditLogEntry::ACTOR_SYSTEM,
-            actorIdentifier: null,
-            action: 'deployment.blocked_missing_required_artifact',
-            subjectType: Deployment::class,
-            subjectId: $deployment->id,
-            metadata: ['project_id' => $project->id, 'commit_hash' => $commitHash],
-        );
-
-        return false;
     }
 
     /**
@@ -237,7 +208,7 @@ class DeploymentDispatcher
                 'approved_at' => $project->auto_deploy ? now() : null,
             ]);
 
-            $hasRequiredArtifact = $this->attachArtifactIfAvailable($deployment, $project, $commitHash);
+            $this->attachArtifactIfAvailable($deployment, $project, $commitHash);
 
             AuditLogEntry::record(
                 actorType: AuditLogEntry::ACTOR_GITHUB,
@@ -248,7 +219,7 @@ class DeploymentDispatcher
                 metadata: ['project_id' => $project->id, 'commit_hash' => $commitHash, 'branch' => $branch],
             );
 
-            if ($hasRequiredArtifact && $deployment->status === Deployment::STATUS_QUEUED) {
+            if ($deployment->status === Deployment::STATUS_QUEUED) {
                 event(new DeploymentStarted($deployment));
             }
 
@@ -276,7 +247,7 @@ class DeploymentDispatcher
                 'queued_at' => now(),
             ]);
 
-            $hasRequiredArtifact = $this->attachArtifactIfAvailable($deployment, $project, $commitHash);
+            $this->attachArtifactIfAvailable($deployment, $project, $commitHash);
 
             AuditLogEntry::record(
                 actorType: AuditLogEntry::ACTOR_USER,
@@ -287,9 +258,7 @@ class DeploymentDispatcher
                 metadata: ['project_id' => $project->id, 'commit_hash' => $commitHash],
             );
 
-            if ($hasRequiredArtifact) {
-                event(new DeploymentStarted($deployment));
-            }
+            event(new DeploymentStarted($deployment));
 
             return $deployment;
         });
@@ -348,9 +317,9 @@ class DeploymentDispatcher
                 'approved_at' => $autoApprove ? now() : null,
             ]);
 
-            $hasRequiredArtifact = $this->attachArtifactIfAvailable($deployment, $project, $commitHash);
+            $this->attachArtifactIfAvailable($deployment, $project, $commitHash);
 
-            if ($autoApprove && $hasRequiredArtifact) {
+            if ($autoApprove) {
                 $this->createTasksForDeployment($deployment, $targets);
             }
 
@@ -363,7 +332,7 @@ class DeploymentDispatcher
                 metadata: ['project_id' => $project->id, 'commit_hash' => $commitHash, 'branch' => $branch, 'target_count' => count($targets)],
             );
 
-            if ($autoApprove && $hasRequiredArtifact) {
+            if ($autoApprove) {
                 event(new DeploymentStarted($deployment));
             }
 

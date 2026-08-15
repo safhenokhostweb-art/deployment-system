@@ -175,11 +175,6 @@
                 {{ __('ui.projects.auto_deploy_label') }}
             </label>
 
-            <label>
-                <input type="checkbox" name="requires_complete_artifact" value="1" style="width:auto;display:inline-block;" {{ old('requires_complete_artifact') ? 'checked' : '' }}>
-                Require a complete artifact for production deployment (never fall back to production Git, Composer, or npm).
-            </label>
-
             <button type="submit" class="btn btn-primary" style="margin-top:1.2rem;">{{ __('ui.wizard.create_button') }}</button>
         </x-card>
     </div>

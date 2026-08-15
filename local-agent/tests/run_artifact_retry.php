@@ -8,7 +8,6 @@ require __DIR__ . '/../lib/Logger.php';
 require __DIR__ . '/../lib/Client.php';
 require __DIR__ . '/../lib/GitManager.php';
 require __DIR__ . '/../lib/LocalBuildFailedException.php';
-require __DIR__ . '/../lib/BuildProfile.php';
 require __DIR__ . '/../lib/RetryPolicy.php';
 require __DIR__ . '/../lib/LocalBuildRunner.php';
 require __DIR__ . '/../lib/SafeFilesystem.php';

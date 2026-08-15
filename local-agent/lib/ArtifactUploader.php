@@ -38,7 +38,6 @@ final class ArtifactUploader
         private readonly Logger $logger,
         private readonly string $workspaceBaseDir,
         private readonly int $workspaceTtlSeconds = 86400,
-        private readonly array $buildProfiles = [],
         private readonly ?RetryPolicy $retryPolicy = null,
     ) {
     }
@@ -57,11 +56,10 @@ final class ArtifactUploader
             $workspace = BuildWorkspace::create($this->workspaceBaseDir, $projectKey, $jobId);
             $prepared = $this->sourcePreparer->prepare($workspace, $repositoryPath, $commitHash, $onTick);
 
-            $profile = BuildProfile::fromConfig($this->buildProfiles[$projectKey] ?? null);
-            $buildResult = $this->buildRunner->run($workspace->projectDir(), $onTick, $profile);
+            $buildResult = $this->buildRunner->run($workspace->projectDir(), $onTick);
             $this->logger->info("Local build for commit {$commitHash}: " . (empty($buildResult['log']) ? 'nothing to build' : implode(' && ', $buildResult['log'])));
 
-            $archive = $this->builder->build($workspace->projectDir(), $workspace->root(), $prepared['commitTimestamp'], $buildResult, $profile);
+            $archive = $this->builder->build($workspace->projectDir(), $workspace->root(), $prepared['commitTimestamp'], $buildResult);
             $archivePath = $archive['path'];
 
             $createResponse = $this->retryHub(fn () => $this->client->request('POST', '/api/local-agent/artifacts', [

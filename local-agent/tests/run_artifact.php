@@ -30,8 +30,6 @@ require __DIR__ . '/../lib/Logger.php';
 require __DIR__ . '/../lib/Client.php';
 require __DIR__ . '/../lib/GitManager.php';
 require __DIR__ . '/../lib/LocalBuildFailedException.php';
-require __DIR__ . '/../lib/BuildProfile.php';
-require __DIR__ . '/../lib/RetryPolicy.php';
 require __DIR__ . '/../lib/LocalBuildRunner.php';
 require __DIR__ . '/../lib/SafeFilesystem.php';
 require __DIR__ . '/../lib/BuildWorkspace.php';
@@ -49,23 +47,9 @@ use LocalAgent\LocalBuildRunner;
 use LocalAgent\Logger;
 use LocalAgent\SafeFilesystem;
 use LocalAgent\WorkspaceSourcePreparer;
-use LocalAgent\RetryPolicy;
-use LocalAgent\RetryableHubException;
 
 $failures = [];
 $passCount = 0;
-
-// Bounded retry is unit-tested without wall-clock sleeps. ArtifactUploader
-// injects this same policy around both create and raw upload requests.
-$delays = [];
-$policy = new RetryPolicy(static function (int $seconds) use (&$delays): void { $delays[] = $seconds; });
-$attempts = 0;
-$value = $policy->run(static function () use (&$attempts): string { $attempts++; if ($attempts < 3) throw new RetryableHubException('temporary'); return 'ok'; });
-check('RetryPolicy retries transient failures up to success', $value === 'ok' && $attempts === 3 && $delays === [2, 5], $failures, $passCount);
-check('RetryPolicy classifies only configured transient HTTP statuses', RetryPolicy::isRetryableStatus(429) && RetryPolicy::isRetryableStatus(500) && RetryPolicy::isRetryableStatus(504) && !RetryPolicy::isRetryableStatus(400) && !RetryPolicy::isRetryableStatus(401) && !RetryPolicy::isRetryableStatus(403) && !RetryPolicy::isRetryableStatus(409), $failures, $passCount);
-$exhausted = 0;
-try { $policy->run(static function () use (&$exhausted): never { $exhausted++; throw new RetryableHubException('reset'); }); } catch (RuntimeException $e) { }
-check('RetryPolicy bounds retry exhaustion at three attempts', $exhausted === 3, $failures, $passCount);
 
 function check(string $description, bool $condition, array &$failures, int &$passCount): void
 {
@@ -240,10 +224,7 @@ $workspace = makeWorkspace();
 $git = new GitManager();
 $fixture = buildFixtureRepo($git, $workspace);
 
-$phpBinary = 'C:\\laragon\\bin\\php\\php-8.3-Win32-vs16-x64\\php.exe';
-$composerCommand = [$phpBinary, 'C:\\laragon\\bin\\composer\\composer.phar'];
-$npmCommand = ['C:\\Program Files\\nodejs\\npm.cmd'];
-$runner = new LocalBuildRunner($git, $composerCommand, $npmCommand, $phpBinary);
+$runner = new LocalBuildRunner($git);
 $result = $runner->run($fixture['path']);
 
 check('LocalBuildRunner: composer.json present -> ranComposer', $result['ranComposer'] === true, $failures, $passCount);
@@ -261,11 +242,11 @@ $bareResult = $runner->run($bareRepo);
 check('LocalBuildRunner: a project with neither composer.json nor package.json skips both stages', $bareResult === ['ranComposer' => false, 'ranNpmInstall' => false, 'ranNpmBuild' => false, 'log' => []], $failures, $passCount);
 rrmdir($bareWorkspace);
 
-// composer install failure: malformed JSON fails locally; no registry access is needed.
+// composer install failure: a composer.json requiring a package that cannot possibly exist.
 $brokenComposerWorkspace = makeWorkspace();
 $brokenComposerRepo = $brokenComposerWorkspace . '/repo';
 mkdir($brokenComposerRepo, 0777, true);
-file_put_contents("{$brokenComposerRepo}/composer.json", '{ definitely-not-valid-json');
+file_put_contents("{$brokenComposerRepo}/composer.json", json_encode(['name' => 'fixture/broken', 'require' => ['this-vendor/this-package-does-not-exist-anywhere' => '^999.0']]));
 check('LocalBuildRunner: a composer install failure throws local_composer_failed', (function () use ($runner, $brokenComposerRepo) {
     try {
         $runner->run($brokenComposerRepo);
@@ -410,7 +391,7 @@ $client = new Client(
     timeoutSeconds: 10,
     logger: $logger,
 );
-$uploader = new ArtifactUploader(new LocalBuildRunner($git, $composerCommand, $npmCommand, $phpBinary), new WorkspaceSourcePreparer($git), new ArtifactBuilder(), $client, $logger, $uploaderWorkspaceBase);
+$uploader = new ArtifactUploader(new LocalBuildRunner($git), new WorkspaceSourcePreparer($git), new ArtifactBuilder(), $client, $logger, $uploaderWorkspaceBase);
 
 // A fresh repo for this section — the earlier $fixture['path'] already
 // has vendor/node_modules from the direct LocalBuildRunner test above,
@@ -449,7 +430,7 @@ mkdir($brokenComposerRepo2, 0777, true);
 runGit($git, ['init', '--quiet', '-b', 'main'], $brokenComposerRepo2);
 runGit($git, ['config', 'user.email', 'test@example.test'], $brokenComposerRepo2);
 runGit($git, ['config', 'user.name', 'Artifact Test'], $brokenComposerRepo2);
-file_put_contents("{$brokenComposerRepo2}/composer.json", '{ definitely-not-valid-json');
+file_put_contents("{$brokenComposerRepo2}/composer.json", json_encode(['name' => 'fixture/broken2', 'require' => ['nope/nope-xyz' => '^999.0']]));
 runGit($git, ['add', '-A'], $brokenComposerRepo2);
 runGit($git, ['commit', '--quiet', '-m', 'initial'], $brokenComposerRepo2);
 $brokenCommit = trim(runGit($git, ['rev-parse', 'HEAD'], $brokenComposerRepo2)['output']);
@@ -470,7 +451,7 @@ $deadClient = new Client(
     timeoutSeconds: 2,
     logger: $logger,
 );
-$deadUploader = new ArtifactUploader(new LocalBuildRunner($git, $composerCommand, $npmCommand, $phpBinary), new WorkspaceSourcePreparer($git), new ArtifactBuilder(), $deadClient, $logger, $uploaderWorkspaceBase);
+$deadUploader = new ArtifactUploader(new LocalBuildRunner($git), new WorkspaceSourcePreparer($git), new ArtifactBuilder(), $deadClient, $logger, $uploaderWorkspaceBase);
 $deadResult = $deadUploader->buildAndUpload('fixture-project', $uploadFixture['path'], $uploadFixture['commitHash'], 'main', 'job-3');
 check('ArtifactUploader: reports failure (not a thrown exception) when the Hub is unreachable', $deadResult['succeeded'] === false, $failures, $passCount);
 

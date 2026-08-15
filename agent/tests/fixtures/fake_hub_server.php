@@ -25,26 +25,5 @@ if ($logPath !== false && $logPath !== '') {
     file_put_contents($logPath, json_encode($entry) . "\n", FILE_APPEND | LOCK_EX);
 }
 
-// Optional artifact endpoint for the artifact-native Recipe scenario in
-// run_recipe.php. The fixture remains a permissive fake Hub; production
-// authorization and signing are covered by the Laravel feature tests.
-if (preg_match('#^/api/agent/artifacts/([^/]+)/download$#', $entry['path'], $matches) === 1) {
-    $manifestPath = getenv('ARTIFACT_MANIFEST_PATH');
-    $manifest = $manifestPath ? json_decode((string) @file_get_contents($manifestPath), true) : [];
-    $item = is_array($manifest) ? ($manifest[$matches[1]] ?? null) : null;
-
-    if (!is_array($item) || !isset($item['file']) || !is_file($item['file'])) {
-        http_response_code(404);
-        echo 'not found';
-
-        return;
-    }
-
-    header('Content-Type: application/octet-stream');
-    readfile($item['file']);
-
-    return;
-}
-
 header('Content-Type: application/json');
 echo json_encode(['status' => 'ok']);

@@ -30,10 +30,7 @@ $script:LauncherLibFiles = @(
     'lib\SimpleDeploy.Preflight.ps1',
     'lib\SimpleDeploy.Git.ps1',
     'lib\SimpleDeploy.Build.ps1',
-    'lib\SimpleDeploy.ArtifactValidation.ps1',
     'lib\SimpleDeploy.Transfer.ps1',
-    'lib\SimpleDeploy.Timing.ps1',
-    'lib\SimpleDeploy.DeploymentState.ps1',
     'lib\SimpleDeploy.Orchestration.ps1',
     'launcher\SimpleDeployLauncher.Status.ps1',
     'launcher\SimpleDeployLauncher.GitFlow.ps1',
@@ -154,38 +151,13 @@ function Get-LauncherRunspace {
         return $script:SharedRunspace
     }
     if ($script:SharedRunspaceWarmupPs) {
-        $warmupPs = $script:SharedRunspaceWarmupPs
-        # EndInvoke() on a background pipeline whose script hit a
-        # non-terminating error partway through (e.g. dot-sourcing one of
-        # the library files failed — a transient file-lock/AV scan, a
-        # missing/corrupted file) does NOT throw here and does NOT
-        # necessarily produce any output: `return New-LauncherRunspace
-        # ...` inside the warm-up scriptblock simply never runs (or never
-        # completes), so $result can legitimately come back EMPTY. Blindly
-        # indexing $result[0] in that case used to throw a bare, cryptic
-        # "Index was out of range" ArgumentOutOfRangeException straight
-        # out of a button's Click handler — confirmed empirically (a real
-        # WinForms Application.Run + PerformClick test reproduced this
-        # exact crash). Never surface that: fall back to building the
-        # Runspace synchronously right here instead, exactly the same
-        # thing this function already does below when warm-up hasn't even
-        # started yet — just reached a little later and a little slower.
-        $result = $warmupPs.EndInvoke($script:SharedRunspaceWarmupResult)
-        $warmupErrors = @($warmupPs.Streams.Error)
-        try { $warmupPs.Dispose() } catch {}
+        $result = $script:SharedRunspaceWarmupPs.EndInvoke($script:SharedRunspaceWarmupResult)
+        try { $script:SharedRunspaceWarmupPs.Dispose() } catch {}
         try { $script:SharedRunspaceWarmupHostRunspace.Close(); $script:SharedRunspaceWarmupHostRunspace.Dispose() } catch {}
         $script:SharedRunspaceWarmupPs = $null
         $script:SharedRunspaceWarmupHostRunspace = $null
-
-        if ($result -and @($result).Count -ge 1 -and $result[0]) {
-            $script:SharedRunspace = $result[0]
-            return $script:SharedRunspace
-        }
-
-        if (Get-Command Write-LauncherDebugLog -ErrorAction SilentlyContinue) {
-            $warmupErrorText = if ($warmupErrors.Count -gt 0) { $warmupErrors[0].Exception.Message } else { '(no error recorded, empty result)' }
-            Write-LauncherDebugLog -ToolRoot $ToolRoot -Marker 'RUNSPACE WARMUP FALLBACK' -Detail "warm-up produced no usable Runspace, retrying synchronously: $warmupErrorText"
-        }
+        $script:SharedRunspace = $result[0]
+        return $script:SharedRunspace
     }
     $script:SharedRunspace = New-LauncherRunspace -ToolRoot $ToolRoot
     return $script:SharedRunspace
@@ -282,17 +254,7 @@ function Test-LauncherOperationComplete {
     the exception message, which could vary across PowerShell versions).
 #>
 function Complete-LauncherOperation {
-    param(
-        [Parameter(Mandatory = $true)]$Handle,
-        # Optional -- only used for internal ENDINVOKE CALLED debug-log
-        # markers (see Write-LauncherDebugLog); $null (the default) is
-        # exactly the pre-existing, unchanged behavior for every caller
-        # that doesn't pass it (e.g. Test-LauncherEngine.ps1).
-        [Parameter(Mandatory = $false)][string]$ToolRoot = $null
-    )
-    if ($ToolRoot -and (Get-Command Write-LauncherDebugLog -ErrorAction SilentlyContinue)) {
-        Write-LauncherDebugLog -ToolRoot $ToolRoot -Marker 'ENDINVOKE CALLED'
-    }
+    param([Parameter(Mandatory = $true)]$Handle)
     try {
         # [powershell]::EndInvoke() always returns a PSDataCollection —
         # unlike a plain PowerShell `return` inside a script, it does NOT
@@ -391,10 +353,6 @@ function Invoke-LauncherDeployFlow {
         [Parameter(Mandatory = $false)][string]$CommitMessage
     )
 
-    if (Get-Command Write-LauncherDebugLog -ErrorAction SilentlyContinue) {
-        Write-LauncherDebugLog -ToolRoot $ToolRoot -Marker 'RUNSPACE STARTED' -Detail "project=$($ProjectInfo.Key) flow=Deploy"
-    }
-
     $deploymentServiceCfg = $Config.deployment_service
     $suspendResult = Suspend-DeploymentService `
         -TaskNames $deploymentServiceCfg.windows_scheduled_tasks `
@@ -409,9 +367,6 @@ function Invoke-LauncherDeployFlow {
             -DeploymentServiceCfg $deploymentServiceCfg -SshCfg $Config.ssh -ScriptRoot $ToolRoot
     } finally {
         Resume-DeploymentService -PausedTaskNames $suspendResult.PausedTaskNames -StateDir $StateDir
-        if (Get-Command Write-LauncherDebugLog -ErrorAction SilentlyContinue) {
-            Write-LauncherDebugLog -ToolRoot $ToolRoot -Marker 'RUNSPACE COMPLETED' -Detail "project=$($ProjectInfo.Key) flow=Deploy (Invoke-LauncherDeployFlow about to return)"
-        }
     }
 }
 

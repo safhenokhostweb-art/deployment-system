@@ -42,11 +42,9 @@ final class ArtifactBuilder
      * @return array{path: string, checksum: string, size: int}
      * @throws LocalBuildFailedException
      */
-    public function build(string $projectDir, string $workspaceRoot, int $commitTimestamp, array $buildResult, ?BuildProfile $profile = null): array
+    public function build(string $projectDir, string $workspaceRoot, int $commitTimestamp, array $buildResult): array
     {
-        if ($profile?->nextStandalone) $this->assembleNextStandalone($projectDir, $profile->nextAppPath);
-        if ($profile?->prismaGenerate) $this->bundlePrismaRuntime($projectDir);
-        $this->validateStaging($projectDir, $buildResult, $profile);
+        $this->validateStaging($projectDir, $buildResult);
 
         $finalZipPath = null;
         try {
@@ -76,7 +74,7 @@ final class ArtifactBuilder
      * @param array{ranComposer: bool, ranNpmBuild: bool} $buildResult
      * @throws LocalBuildFailedException
      */
-    private function validateStaging(string $projectDir, array $buildResult, ?BuildProfile $profile = null): void
+    private function validateStaging(string $projectDir, array $buildResult): void
     {
         if (SafeFilesystem::isEffectivelyEmpty($projectDir)) {
             throw new LocalBuildFailedException('artifact_build_failed', 'The assembled artifact workspace is empty.');
@@ -95,42 +93,6 @@ final class ArtifactBuilder
         if ($buildResult['ranNpmBuild'] && !is_file("{$projectDir}/public/build/manifest.json")) {
             throw new LocalBuildFailedException('artifact_missing_build', 'npm run build succeeded but public/build/manifest.json is missing from the assembled artifact.');
         }
-        foreach ($profile?->requiredPaths ?? [] as $path) if (!file_exists("{$projectDir}/{$path}")) throw new LocalBuildFailedException('artifact_missing_required_path', "Build profile required artifact path is missing: {$path}.");
-        if ($profile?->prismaGenerate && !is_file("{$projectDir}/node_modules/.bin/prisma") && !is_file("{$projectDir}/node_modules/.bin/prisma.cmd")) throw new LocalBuildFailedException('artifact_missing_prisma_cli', 'prisma_generate requires a locally installed Prisma CLI.');
-    }
-
-    private function assembleNextStandalone(string $projectDir, ?string $appPath): void
-    {
-        $appDir = rtrim($projectDir . '/' . $appPath, '/');
-        $standalone = "{$appDir}/.next/standalone" . ($appPath === '.' ? '' : "/{$appPath}");
-        if (!is_dir($standalone)) throw new LocalBuildFailedException('artifact_missing_next_standalone', "Next standalone output is missing at {$standalone}.");
-        foreach (['.next/static' => '.next/static', 'public' => 'public'] as $from => $to) {
-            if (!is_dir("{$appDir}/{$from}")) throw new LocalBuildFailedException('artifact_missing_next_runtime', "Next runtime input is missing: {$appDir}/{$from}.");
-            self::copyDirectory("{$appDir}/{$from}", "{$standalone}/{$to}");
-        }
-    }
-    private static function copyDirectory(string $from, string $to): void { if (!is_dir($to)) mkdir($to, 0755, true); foreach (array_diff(scandir($from) ?: [], ['.', '..']) as $entry) { $a="$from/$entry"; $b="$to/$entry"; is_dir($a) ? self::copyDirectory($a, $b) : copy($a, $b); } }
-
-    /** Bundle Prisma's declared runtime dependency closure, never all node_modules. */
-    private function bundlePrismaRuntime(string $projectDir): void
-    {
-        $sourceRoot = "{$projectDir}/node_modules";
-        if (!is_file("{$sourceRoot}/prisma/build/index.js")) throw new LocalBuildFailedException('artifact_missing_prisma_cli', 'Local Prisma CLI entrypoint is missing.');
-        $copied = [];
-        $this->copyNpmPackageClosure($sourceRoot, "{$projectDir}/.deployment-runtime/prisma/node_modules", 'prisma', $copied);
-    }
-    /** @param array<string, true> $copied */
-    private function copyNpmPackageClosure(string $sourceRoot, string $targetRoot, string $package, array &$copied): void
-    {
-        if (isset($copied[$package])) return;
-        $source = "{$sourceRoot}/{$package}";
-        $manifest = "{$source}/package.json";
-        if (!is_file($manifest)) throw new LocalBuildFailedException('artifact_missing_prisma_dependency', "Missing Prisma runtime dependency: {$package}.");
-        $copied[$package] = true;
-        $json = json_decode((string) file_get_contents($manifest), true);
-        if (!is_array($json)) throw new LocalBuildFailedException('artifact_missing_prisma_dependency', "Invalid package metadata: {$package}.");
-        foreach (array_keys($json['dependencies'] ?? []) as $dependency) if (is_string($dependency)) $this->copyNpmPackageClosure($sourceRoot, $targetRoot, $dependency, $copied);
-        self::copyDirectory($source, "{$targetRoot}/{$package}");
     }
 
     /**

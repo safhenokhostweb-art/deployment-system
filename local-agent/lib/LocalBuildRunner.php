@@ -143,18 +143,14 @@ final class LocalBuildRunner
      * @return array{ranComposer: bool, ranNpmInstall: bool, ranNpmBuild: bool, log: array<int, string>}
      * @throws LocalBuildFailedException
      */
-    public function run(string $repositoryPath, ?callable $onTick = null, ?BuildProfile $profile = null): array
+    public function run(string $repositoryPath, ?callable $onTick = null): array
     {
         $ranComposer = false;
         $ranNpmInstall = false;
         $ranNpmBuild = false;
         $log = [];
 
-        $runComposer = $profile?->composer ?? is_file("{$repositoryPath}/composer.json");
-        $runNpmInstall = $profile?->npmInstall ?? is_file("{$repositoryPath}/package.json");
-        $runNpmBuild = $profile?->npmBuild ?? ($runNpmInstall && self::hasBuildScript($repositoryPath));
-        if ($runComposer) {
-            if (!is_file("{$repositoryPath}/composer.json")) throw new LocalBuildFailedException('invalid_build_profile', 'composer:true requires composer.json.');
+        if (is_file("{$repositoryPath}/composer.json")) {
             $this->assertPlatformRequirementsSatisfied($repositoryPath);
 
             $command = array_merge(
@@ -173,8 +169,7 @@ final class LocalBuildRunner
             $ranComposer = true;
         }
 
-        if ($runNpmInstall) {
-            if (!is_file("{$repositoryPath}/package.json")) throw new LocalBuildFailedException('invalid_build_profile', 'npm_install:true requires package.json.');
+        if (is_file("{$repositoryPath}/package.json")) {
             $installCommand = array_merge($this->resolvedNpmCommand(), ['ci', '--include=dev', ...self::NPM_QUIET_FLAGS]);
             $log[] = self::describe($installCommand);
             $installResult = $this->runner->run(
@@ -195,8 +190,7 @@ final class LocalBuildRunner
             }
             $ranNpmInstall = true;
 
-            if ($runNpmBuild) {
-                if (!self::hasBuildScript($repositoryPath)) throw new LocalBuildFailedException('invalid_build_profile', 'npm_build:true requires package.json scripts.build.');
+            if (self::hasBuildScript($repositoryPath)) {
                 $buildCommand = array_merge($this->resolvedNpmCommand(), ['run', 'build', ...self::NPM_QUIET_FLAGS]);
                 $log[] = self::describe($buildCommand);
                 $buildResult = $this->runner->run(
@@ -216,12 +210,6 @@ final class LocalBuildRunner
                     );
                 }
                 $ranNpmBuild = true;
-            }
-            if ($profile?->prismaGenerate) {
-                $command = ['npx', '--no-install', 'prisma', 'generate'];
-                $log[] = implode(' ', $command);
-                $result = $this->runner->run($command, $repositoryPath, $this->npmBuildTimeoutSeconds, $onTick);
-                if ($result['exitCode'] !== 0) throw new LocalBuildFailedException('local_prisma_generate_failed', 'prisma generate failed (exit ' . $result['exitCode'] . '): ' . self::tail($result['output']));
             }
         }
 

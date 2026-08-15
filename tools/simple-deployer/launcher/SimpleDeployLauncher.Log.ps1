@@ -123,38 +123,3 @@ function Complete-LauncherRunLog {
     ($record | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $filePath -Encoding UTF8
     return $filePath
 }
-
-<#
-.SYNOPSIS
-    Internal-only lifecycle debug log — a plain, append-only text file at
-    state/launcher-debug.log, completely separate from the user-facing
-    "گزارش زنده" (live report, driven by Write-Step/Write-Info/...) and
-    from logs/*.json (the per-run result records written by
-    Complete-LauncherRunLog above). Exists purely so a real run that
-    doesn't return the Launcher to its Ready state can be diagnosed
-    after the fact — never shown to the user, never contains secrets
-    (only fixed lifecycle marker names, project keys, and stage names —
-    the same values already visible as config.json's own project keys;
-    never file contents, credentials, or .env values). Safe to call from
-    either the UI thread or the background runspace (plain file I/O, no
-    shared in-memory state).
-#>
-function Write-LauncherDebugLog {
-    param(
-        [Parameter(Mandatory = $true)][string]$ToolRoot,
-        [Parameter(Mandatory = $true)][string]$Marker,
-        [Parameter(Mandatory = $false)][string]$Detail = ''
-    )
-    try {
-        $stateDir = Join-Path $ToolRoot 'state'
-        if (-not (Test-Path -LiteralPath $stateDir)) {
-            New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
-        }
-        $logPath = Join-Path $stateDir 'launcher-debug.log'
-        $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')  $Marker" + $(if ($Detail) { "  $Detail" } else { '' })
-        Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
-    } catch {
-        # Debug logging must never be able to break a real operation --
-        # a locked/unwritable file here is silently ignored.
-    }
-}

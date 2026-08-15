@@ -27,11 +27,9 @@ require __DIR__ . '/../lib/Executor.php';
 require __DIR__ . '/../lib/ShellPlaceholders.php';
 require __DIR__ . '/../lib/ServiceAllowlist.php';
 require __DIR__ . '/../lib/ReleaseManager.php';
-require __DIR__ . '/../lib/ArtifactManager.php';
 require __DIR__ . '/../lib/RecipeStepRunner.php';
 
 use DeploymentAgent\Client;
-use DeploymentAgent\ArtifactManager;
 use DeploymentAgent\Executor;
 use DeploymentAgent\Logger;
 use DeploymentAgent\RecipeStepRunner;
@@ -192,14 +190,12 @@ function buildSourceRepo(string $workspace): array
 }
 
 /**
- * @return array{process: resource, port: int, logPath: string, manifestPath: string}
+ * @return array{process: resource, port: int, logPath: string}
  */
 function startFakeHub(): array
 {
     $port = 20000 + random_int(0, 9000);
     $logPath = tempnam(sys_get_temp_dir(), 'fake-hub-log-');
-    $manifestPath = tempnam(sys_get_temp_dir(), 'recipe-artifact-manifest-');
-    file_put_contents($manifestPath, json_encode([]));
     $router = __DIR__ . '/fixtures/fake_hub_server.php';
 
     $phpBinary = PHP_BINARY;
@@ -210,7 +206,7 @@ function startFakeHub(): array
     // write, silently freezing it. A file redirect can never block.
     $serverLogPath = tempnam(sys_get_temp_dir(), 'fake-hub-server-stdio-');
     $descriptorSpec = [1 => ['file', $serverLogPath, 'w'], 2 => ['file', $serverLogPath, 'w']];
-    $env = array_merge(getenv() ?: [], ['FAKE_HUB_LOG' => $logPath, 'ARTIFACT_MANIFEST_PATH' => $manifestPath]);
+    $env = array_merge(getenv() ?: [], ['FAKE_HUB_LOG' => $logPath]);
     $process = proc_open([$phpBinary, '-S', "127.0.0.1:{$port}", $router], $descriptorSpec, $pipes, __DIR__, $env);
 
     if (!is_resource($process)) {
@@ -223,7 +219,7 @@ function startFakeHub(): array
         if ($conn !== false) {
             fclose($conn);
 
-            return ['process' => $process, 'port' => $port, 'logPath' => $logPath, 'serverLogPath' => $serverLogPath, 'manifestPath' => $manifestPath];
+            return ['process' => $process, 'port' => $port, 'logPath' => $logPath, 'serverLogPath' => $serverLogPath];
         }
         usleep(100000);
     }
@@ -237,14 +233,6 @@ function stopFakeHub(array $hub): void
     proc_close($hub['process']);
     @unlink($hub['logPath']);
     @unlink($hub['serverLogPath']);
-    @unlink($hub['manifestPath']);
-}
-
-function registerArtifact(array $hub, string $publicId, string $file): void
-{
-    $manifest = json_decode((string) file_get_contents($hub['manifestPath']), true) ?: [];
-    $manifest[$publicId] = ['file' => $file];
-    file_put_contents($hub['manifestPath'], json_encode($manifest));
 }
 
 /** @return array<int, array{method: string, path: string, body: array<string, mixed>|null}> */
@@ -354,71 +342,13 @@ $client = new Client(
     timeoutSeconds: 5,
     logger: $logger,
 );
-$runner = new RecipeStepRunner(new Executor(), $client, $logger, new ReleaseManager(), new ArtifactManager($client));
+$runner = new RecipeStepRunner(new Executor(), $client, $logger, new ReleaseManager());
 $projectConfig = [
     'working_directory' => $releaseRoot2,
     'job_heartbeat_interval_seconds' => 30,
     'release_retention_count' => 5,
     'allowed_services' => [],
 ];
-
-// Artifact-native source acquisition: source_repository deliberately does
-// not exist. A Git fallback would fail before materializing the release;
-// a successful run therefore proves checkout_release used only the Hub
-// artifact. No activate_release is included because this Windows account
-// cannot create the symlinks that production Ubuntu uses.
-$artifactZip = $workspace2 . '/recipe-source.zip';
-$zip = new ZipArchive();
-$zip->open($artifactZip, ZipArchive::CREATE);
-$zip->addFromString('app/source.txt', 'artifact-only source');
-$zip->addFromString('public/build/manifest.json', '{}');
-$zip->close();
-registerArtifact($hub, 'recipe-artifact-source', $artifactZip);
-$artifactJob = [
-    'id' => 'deploy-artifact-source',
-    'action' => 'deploy',
-    'commit_hash' => $source2['commitA'],
-    'previous_commit_hash' => null,
-    'branch' => 'main',
-    'recipe_rollback' => false,
-    'requires_complete_artifact' => true,
-    'artifact' => ['public_id' => 'recipe-artifact-source', 'checksum_sha256' => hash_file('sha256', $artifactZip), 'size_bytes' => filesize($artifactZip)],
-    'deployment_recipe' => [
-        'timeout_seconds' => 60,
-        'artifact_contract' => ['profile' => 'complete', 'prebuilt_steps' => [
-            ['name' => 'npm ci is prebuilt', 'required_paths' => ['public/build/manifest.json']],
-            ['name' => 'npm build is prebuilt', 'required_paths' => ['public/build/manifest.json']],
-        ]],
-        'steps' => [
-            step('checkout_release', 'artifact checkout', ['source_repository' => $workspace2 . '/does-not-exist']),
-            // If either of these executes, npm ci fails (the fixture has
-            // no package-lock) and the test fails. A success proves the
-            // artifact contract skipped both rather than contacting npm.
-            step('install_dependencies', 'npm ci is prebuilt', ['working_directory' => '{release_path}']),
-            step('run_script', 'npm build is prebuilt', ['working_directory' => '{release_path}', 'script' => 'build']),
-            step('verify_path_exists', 'artifact source exists', ['path' => '{release_path}/app/source.txt', 'kind' => 'file']),
-        ],
-    ],
-];
-$runner->run($artifactJob, $projectConfig);
-$artifactReleasePath = (new ReleaseManager())->releasePath($releaseRoot2, 'deploy-artifact-source');
-check('artifact recipe checkout materializes the artifact in the immutable release directory without Git', trim((string) @file_get_contents("{$artifactReleasePath}/app/source.txt")) === 'artifact-only source', $failures, $passCount);
-$artifactJobStatuses = array_values(array_filter(array_map(static fn ($entry) => $entry['path'] === '/api/agent/jobs/deploy-artifact-source/status' ? ($entry['body']['status'] ?? null) : null, readHubLog($hub['logPath']))));
-check('artifact recipe checkout succeeds without falling back to the nonexistent Git source', end($artifactJobStatuses) === 'succeeded', $failures, $passCount);
-
-// A stale/malformed artifact recipe must be rejected before it creates a
-// release directory or has any chance to run npm/Git on the server.
-@unlink($hub['logPath']);
-file_put_contents($hub['logPath'], '');
-$badArtifactJob = $artifactJob;
-$badArtifactJob['id'] = 'deploy-artifact-contract-invalid';
-unset($badArtifactJob['deployment_recipe']['artifact_contract']);
-$runner->run($badArtifactJob, $projectConfig);
-$badReleasePath = (new ReleaseManager())->releasePath($releaseRoot2, 'deploy-artifact-contract-invalid');
-$badStatuses = array_values(array_filter(array_map(static fn ($entry) => $entry['path'] === '/api/agent/jobs/deploy-artifact-contract-invalid/status' ? ($entry['body']['status'] ?? null) : null, readHubLog($hub['logPath']))));
-check('incompatible complete-artifact recipe fails before release creation', end($badStatuses) === 'failed' && !file_exists($badReleasePath), $failures, $passCount);
-@unlink($hub['logPath']);
-file_put_contents($hub['logPath'], '');
 
 function happyPathSteps(): array
 {

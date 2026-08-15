@@ -161,22 +161,10 @@ function Resume-WindowsScheduledTask {
 #>
 function Wait-ForDeploymentProcessesToExit {
     param(
-        # NOT Mandatory — same reasoning as Suspend-DeploymentService's own
-        # TaskNames/ProcessNames above: a config with an empty
-        # windows_process_names legitimately means "nothing configured to
-        # check for", not an error, and the Mandatory array-parameter
-        # crash bug applies here identically (this function is also
-        # called directly from Test-ProjectPreflight for every project).
-        [Parameter(Mandatory = $false)][string[]]$ProcessNames = @(),
+        [Parameter(Mandatory = $true)][string[]]$ProcessNames,
         [Parameter(Mandatory = $true)][string]$CommandLineMarker,
         [Parameter(Mandatory = $false)][int]$TimeoutSeconds = 30
     )
-
-    if (@($ProcessNames).Count -eq 0) {
-        # Nothing configured to match against — trivially "nothing
-        # running", not a WQL query with an empty/undefined filter.
-        return @{ Success = $true; RemainingProcesses = @() }
-    }
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $nameFilter = ($ProcessNames | ForEach-Object { "Name = '$_'" }) -join ' OR '
@@ -215,19 +203,8 @@ function Wait-ForDeploymentProcessesToExit {
 #>
 function Suspend-DeploymentService {
     param(
-        # NOT Mandatory: a Mandatory array-typed parameter throws "Cannot
-        # bind argument ... because it is an empty array" the instant a
-        # caller passes @() — a perfectly valid, real config (e.g.
-        # windows_scheduled_tasks/windows_process_names left empty during
-        # initial setup, or a project that genuinely has no competing
-        # Scheduled Task). This is the exact same bug already fixed for
-        # Resume-DeploymentService's PausedTaskNames parameter below;
-        # TaskNames/ProcessNames here were missed at the time. Confirmed
-        # empirically to crash Invoke-LauncherDeployFlow (and, with
-        # $ErrorActionPreference='Stop', the whole SimpleDeploy.ps1 CLI
-        # run) the moment either config array is empty.
-        [Parameter(Mandatory = $false)][string[]]$TaskNames = @(),
-        [Parameter(Mandatory = $false)][string[]]$ProcessNames = @(),
+        [Parameter(Mandatory = $true)][string[]]$TaskNames,
+        [Parameter(Mandatory = $true)][string[]]$ProcessNames,
         [Parameter(Mandatory = $true)][string]$CommandLineMarker,
         [Parameter(Mandatory = $true)][string]$StateDir,
         [Parameter(Mandatory = $false)][int]$ProcessExitTimeoutSeconds = 30

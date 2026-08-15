@@ -36,7 +36,6 @@
         <tr><th>{{ __('ui.common.environment') }}</th><td>{{ $project->environment }}</td></tr>
         <tr><th>{{ __('ui.common.server') }}</th><td><a href="{{ route('servers.show', $project->server) }}">{{ $project->server->name }}</a></td></tr>
         <tr><th>{{ __('ui.common.auto_deploy') }}</th><td>{{ $project->auto_deploy ? __('ui.projects.auto_deploy_yes') : __('ui.projects.auto_deploy_no_long') }}</td></tr>
-        <tr><th>Artifact policy</th><td>{{ $project->requires_complete_artifact ? 'Complete artifact required' : 'Legacy fallback allowed' }}</td></tr>
         <tr><th>project_key</th><td><x-ltr><code>{{ $project->project_key }}</code></x-ltr> <span class="muted">({{ __('ui.projects.project_key_must_match') }})</span></td></tr>
     </table>
 </x-card>

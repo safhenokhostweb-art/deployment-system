@@ -77,10 +77,7 @@ $ScriptRoot = $PSScriptRoot
 . (Join-Path $ScriptRoot 'lib\SimpleDeploy.Preflight.ps1')
 . (Join-Path $ScriptRoot 'lib\SimpleDeploy.Git.ps1')
 . (Join-Path $ScriptRoot 'lib\SimpleDeploy.Build.ps1')
-. (Join-Path $ScriptRoot 'lib\SimpleDeploy.ArtifactValidation.ps1')
 . (Join-Path $ScriptRoot 'lib\SimpleDeploy.Transfer.ps1')
-. (Join-Path $ScriptRoot 'lib\SimpleDeploy.Timing.ps1')
-. (Join-Path $ScriptRoot 'lib\SimpleDeploy.DeploymentState.ps1')
 . (Join-Path $ScriptRoot 'lib\SimpleDeploy.Orchestration.ps1')
 
 $StateDir = Join-Path $ScriptRoot 'state'

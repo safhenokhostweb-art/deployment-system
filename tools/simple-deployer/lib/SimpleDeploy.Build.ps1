@@ -52,35 +52,12 @@ function New-BuildWorkspace {
     "/", or matching a Windows drive letter are rejected before
     extraction — the same rule already proven in this project's PHP
     SafeFilesystem::extractZipSafely()).
-
-.PARAMETER SourceSubdirectory
-    Optional (Task 4B) — for a monorepo whose real deployable app lives
-    below the repository root (e.g. deployment-system's own service/
-    Laravel app next to unrelated agent/, local-agent/, tools/ source).
-    $null/empty (the default) is EXACTLY today's unchanged behavior —
-    the whole commit is archived, nothing about this path is exercised
-    for customer-site/saas-platform or any other project that has never
-    set this field.
-
-    When given, uses git's own `<commit>:<subdirectory>` tree-ish
-    addressing (`git archive $CommitSha:$SourceSubdirectory`) — NOT
-    `git archive $CommitSha -- $SourceSubdirectory` (which would keep
-    the subdirectory as a path PREFIX inside the archive, e.g.
-    "service/artisan"). The colon form makes the subdirectory's own
-    tree object the archive ROOT, so entries land as "artisan",
-    "composer.json", "app/..." with NO prefix at all — confirmed
-    empirically against a real repo before relying on it here. This is
-    git's own standard, documented mechanism for rooting an archive at a
-    subtree, not a fragile move/rename workaround: it is structurally
-    impossible for a file outside that subtree to ever appear in the
-    resulting archive, since git resolves a distinct tree object for it.
 #>
 function Export-GitArchiveToWorkspace {
     param(
         [Parameter(Mandatory = $true)][string]$RepositoryPath,
         [Parameter(Mandatory = $true)][string]$CommitSha,
-        [Parameter(Mandatory = $true)][string]$DestinationDir,
-        [Parameter(Mandatory = $false)][string]$SourceSubdirectory = $null
+        [Parameter(Mandatory = $true)][string]$DestinationDir
     )
 
     $actualHead = Get-LastCommitSha -RepositoryPath $RepositoryPath
@@ -88,34 +65,11 @@ function Export-GitArchiveToWorkspace {
         throw "Refusing to build an artifact: HEAD اکنون '$actualHead' است، در حالی که انتظار می‌رفت دقیقاً '$CommitSha' باشد — به‌نظر می‌رسد working tree در حین build تغییر کرده است."
     }
 
-    $treeIsh = $CommitSha
-    if (-not [string]::IsNullOrWhiteSpace($SourceSubdirectory)) {
-        # Defense in depth: git itself already refuses "../outside" (exits
-        # 128, "fatal: ... is outside repository") and a nonexistent/
-        # absolute path (exits 128, "fatal: not a valid object name") —
-        # confirmed empirically — but this tool never relies solely on a
-        # downstream command's own error text for a security boundary
-        # (same standard already applied to ZIP-Slip / path-repository
-        # checks elsewhere in this file): reject obviously-unsafe values
-        # here first, with a clear Persian message, before ever invoking
-        # git with them.
-        $normalizedSub = $SourceSubdirectory.Trim().Replace('\', '/').Trim('/')
-        $hasTraversalSegment = @($normalizedSub -split '/') -contains '..'
-        if ([string]::IsNullOrWhiteSpace($normalizedSub) -or
-            $normalizedSub.StartsWith('/') -or
-            ($normalizedSub -match '^[A-Za-z]:') -or
-            $hasTraversalSegment) {
-            throw "source_subdirectory مقدار نامعتبر دارد ('$SourceSubdirectory') — فقط یک مسیر نسبی داخل خود repository مجاز است (نه مسیر مطلق، نه ../)."
-        }
-        $treeIsh = "${CommitSha}:${normalizedSub}"
-    }
-
     $tempZip = Join-Path $env:TEMP "simpledeploy-archive-$([System.Guid]::NewGuid().ToString('N').Substring(0,10)).zip"
     try {
-        $result = Invoke-ExternalCommand -FilePath 'git.exe' -ArgumentList @('archive', '--format=zip', '-o', $tempZip, $treeIsh) -WorkingDirectory $RepositoryPath -TimeoutSeconds 300
+        $result = Invoke-ExternalCommand -FilePath 'git.exe' -ArgumentList @('archive', '--format=zip', '-o', $tempZip, $CommitSha) -WorkingDirectory $RepositoryPath -TimeoutSeconds 300
         if ($result.ExitCode -ne 0) {
-            $subdirNote = if ($SourceSubdirectory) { " (source_subdirectory='$SourceSubdirectory' — بررسی کنید این مسیر واقعاً در این commit وجود دارد)" } else { '' }
-            throw "git archive برای commit '$CommitSha'$subdirNote با خطا مواجه شد: $($result.StdErr)"
+            throw "git archive برای commit '$CommitSha' با خطا مواجه شد: $($result.StdErr)"
         }
         if (-not (Test-Path -LiteralPath $tempZip) -or (Get-Item -LiteralPath $tempZip).Length -eq 0) {
             throw 'git archive یک فایل خالی یا غیرقابل‌خواندن تولید کرد.'

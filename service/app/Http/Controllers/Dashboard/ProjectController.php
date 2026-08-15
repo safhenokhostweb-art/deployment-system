@@ -146,7 +146,6 @@ class ProjectController extends Controller
             'server_id' => $validated['server_id'],
             'pipeline' => $validated['pipeline'],
             'deployment_recipe' => $validated['deployment_recipe'],
-            'requires_complete_artifact' => $request->boolean('requires_complete_artifact'),
             'auto_deploy' => $request->boolean('auto_deploy'),
             'github_webhook_secret' => $plainWebhookSecret,
         ]);
@@ -295,7 +294,6 @@ class ProjectController extends Controller
             'server_id' => $validated['server_id'],
             'pipeline' => $validated['pipeline'],
             'deployment_recipe' => $validated['deployment_recipe'],
-            'requires_complete_artifact' => $request->boolean('requires_complete_artifact'),
             'auto_deploy' => $request->boolean('auto_deploy'),
             'is_active' => $request->boolean('is_active', true),
         ]);
@@ -410,10 +408,9 @@ class ProjectController extends Controller
         // deployment_recipe null, so this Project keeps deploying via
         // `pipeline` exactly as before — see Project::usesDeploymentRecipe().
         $rawRecipe = trim((string) ($validated['deployment_recipe'] ?? ''));
-        $requiresCompleteArtifact = $request->boolean('requires_complete_artifact');
         $validated['deployment_recipe'] = $rawRecipe === ''
             ? null
-            : $this->recipeValidator->validate(json_decode($rawRecipe, true), $requiresCompleteArtifact);
+            : $this->recipeValidator->validate(json_decode($rawRecipe, true));
 
         if ($project !== null) {
             $validated['project_key'] = $project->project_key;

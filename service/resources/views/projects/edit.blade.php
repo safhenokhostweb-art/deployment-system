@@ -42,11 +42,6 @@
         </label>
 
         <label>
-            <input type="checkbox" name="requires_complete_artifact" value="1" style="width:auto;display:inline-block;" {{ old('requires_complete_artifact', $project->requires_complete_artifact) ? 'checked' : '' }}>
-            Require a complete artifact for production deployment (never fall back to production Git, Composer, or npm).
-        </label>
-
-        <label>
             <input type="checkbox" name="is_active" value="1" style="width:auto;display:inline-block;" {{ old('is_active', $project->is_active) ? 'checked' : '' }}>
             {{ __('ui.projects.active_label') }}
         </label>

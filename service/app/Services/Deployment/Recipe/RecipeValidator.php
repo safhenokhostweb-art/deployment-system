@@ -35,9 +35,9 @@ class RecipeValidator
 
     /**
      * @param mixed $decoded the already json_decode(..., true)'d value of deployment_recipe
-     * @return array{timeout_seconds: int, steps: array<int, array<string, mixed>>, artifact_contract?: array{profile: string, prebuilt_steps: array<int, array{name: string, required_paths: array<int, string>}>}}
+     * @return array{timeout_seconds: int, steps: array<int, array<string, mixed>>}
      */
-    public function validate(mixed $decoded, bool $requiresCompleteArtifact = false): array
+    public function validate(mixed $decoded): array
     {
         if (!is_array($decoded) || $decoded === []) {
             abort(422, 'Deployment recipe must be a non-empty JSON array of steps, or an object with a non-empty "steps" array.');
@@ -49,7 +49,7 @@ class RecipeValidator
         $rawSteps = $decoded;
 
         if ($isWrapped) {
-            $unknown = array_diff(array_keys($decoded), ['timeout_seconds', 'steps', 'artifact_contract']);
+            $unknown = array_diff(array_keys($decoded), ['timeout_seconds', 'steps']);
             if ($unknown !== []) {
                 abort(422, 'Deployment recipe object only accepts "timeout_seconds" and "steps": unexpected key(s) ' . implode(', ', $unknown) . '.');
             }
@@ -75,118 +75,7 @@ class RecipeValidator
             abort(422, 'Deployment recipe has no step that actually changes anything — every step is a verify_* check. Add at least one build/activation step.');
         }
 
-        $recipe = ['timeout_seconds' => $totalTimeout, 'steps' => $steps];
-        $contract = $isWrapped && array_key_exists('artifact_contract', $decoded)
-            ? $this->validateArtifactContract($decoded['artifact_contract'], $steps)
-            : null;
-
-        if ($requiresCompleteArtifact) {
-            $this->assertCompleteArtifactCompatible($steps, $contract);
-        }
-
-        if ($contract !== null) {
-            $recipe['artifact_contract'] = $contract;
-        }
-
-        return $recipe;
-    }
-
-    /**
-     * A complete artifact is an explicit deployment profile, rather than a
-     * collection of per-step guesses. BUILD_TIME steps listed here are not
-     * run on the server: their outputs must already be present in the
-     * verified artifact at each required relative path.
-     *
-     * @param array<int, array<string, mixed>> $steps
-     * @return array{profile: string, prebuilt_steps: array<int, array{name: string, required_paths: array<int, string>}>}
-     */
-    private function validateArtifactContract(mixed $raw, array $steps): array
-    {
-        if (!is_array($raw) || array_diff(array_keys($raw), ['profile', 'prebuilt_steps']) !== []) {
-            abort(422, 'artifact_contract only accepts "profile" and "prebuilt_steps".');
-        }
-
-        if (($raw['profile'] ?? null) !== 'complete') {
-            abort(422, 'artifact_contract.profile must be "complete".');
-        }
-        if (!isset($raw['prebuilt_steps']) || !is_array($raw['prebuilt_steps']) || !array_is_list($raw['prebuilt_steps'])) {
-            abort(422, 'artifact_contract.prebuilt_steps must be an array.');
-        }
-
-        $buildableByName = [];
-        foreach ($steps as $step) {
-            if (in_array($step['type'], [RecipeStepType::INSTALL_DEPENDENCIES, RecipeStepType::RUN_SCRIPT, RecipeStepType::ASSEMBLE_NEXT_STANDALONE], true)) {
-                $buildableByName[$step['name']] = $step['type'];
-            }
-        }
-
-        $prebuilt = [];
-        foreach ($raw['prebuilt_steps'] as $index => $entry) {
-            $label = "artifact_contract.prebuilt_steps #{$index}";
-            if (!is_array($entry) || array_diff(array_keys($entry), ['name', 'required_paths']) !== []) {
-                abort(422, "{$label} only accepts \"name\" and \"required_paths\".");
-            }
-            $name = $this->requireNonEmptyString($entry, 'name', $label, 255);
-            if (!array_key_exists($name, $buildableByName)) {
-                abort(422, "{$label}: \"{$name}\" is not an install_dependencies, run_script, or assemble_next_standalone step.");
-            }
-            if (isset($prebuilt[$name])) {
-                abort(422, "{$label}: duplicate step name \"{$name}\".");
-            }
-            if (!isset($entry['required_paths']) || !is_array($entry['required_paths']) || !array_is_list($entry['required_paths']) || $entry['required_paths'] === []) {
-                abort(422, "{$label}: required_paths must be a non-empty array.");
-            }
-            $paths = [];
-            foreach ($entry['required_paths'] as $path) {
-                if (!is_string($path) || $path === '' || mb_strlen($path) > 1000 || str_contains($path, "\0") || str_starts_with($path, '/') || preg_match('/^[A-Za-z]:[\\\\\/]/', $path) === 1 || in_array('..', preg_split('#[\\\\/]#', $path) ?: [], true)) {
-                    abort(422, "{$label}: each required path must be a safe, project-relative path.");
-                }
-                $paths[] = str_replace('\\', '/', $path);
-            }
-            $prebuilt[$name] = ['name' => $name, 'required_paths' => array_values(array_unique($paths))];
-        }
-
-        return ['profile' => 'complete', 'prebuilt_steps' => array_values($prebuilt)];
-    }
-
-    /** @param array<int, array<string, mixed>> $steps */
-    private function assertCompleteArtifactCompatible(array $steps, ?array $contract): void
-    {
-        foreach ($steps as $step) {
-            if ($step['type'] === RecipeStepType::SHELL) {
-                abort(422, 'Complete-artifact recipes cannot contain shell steps: their build/runtime effect cannot be proven. Use a typed runtime step instead.');
-            }
-        }
-
-        $buildStepNames = array_column(array_filter($steps, static fn (array $step): bool => in_array($step['type'], [RecipeStepType::INSTALL_DEPENDENCIES, RecipeStepType::RUN_SCRIPT, RecipeStepType::ASSEMBLE_NEXT_STANDALONE], true)), 'name');
-        if ($buildStepNames === []) {
-            return;
-        }
-        if ($contract === null) {
-            abort(422, 'Complete-artifact recipes with BUILD_TIME steps require artifact_contract.profile="complete" and an explicit prebuilt_steps entry for each step.');
-        }
-
-        $declared = array_column($contract['prebuilt_steps'], 'name');
-        $missing = array_values(array_diff($buildStepNames, $declared));
-        if ($missing !== []) {
-            abort(422, 'Complete-artifact recipe BUILD_TIME step(s) are not declared prebuilt: ' . implode(', ', $missing) . '.');
-        }
-
-        $checkoutIndex = null;
-        foreach ($steps as $index => $step) {
-            if ($step['type'] === RecipeStepType::CHECKOUT_RELEASE) {
-                $checkoutIndex = $index;
-                break;
-            }
-        }
-        if ($checkoutIndex === null) {
-            abort(422, 'Complete-artifact recipes require a checkout_release step to materialize the artifact.');
-        }
-        foreach ($steps as $index => $step) {
-            if (in_array($step['type'], [RecipeStepType::INSTALL_DEPENDENCIES, RecipeStepType::RUN_SCRIPT, RecipeStepType::ASSEMBLE_NEXT_STANDALONE], true) && $index < $checkoutIndex) {
-                abort(422, 'Complete-artifact BUILD_TIME steps must appear after checkout_release so their declared artifact paths are verified first.');
-            }
-        }
+        return ['timeout_seconds' => $totalTimeout, 'steps' => $steps];
     }
 
     /**
