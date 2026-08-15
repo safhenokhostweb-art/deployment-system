@@ -4,6 +4,7 @@ namespace Tests\Feature\Api;
 
 use App\Models\Agent;
 use App\Models\AgentJob;
+use App\Models\Artifact;
 use App\Models\Deployment;
 use App\Models\DeploymentTarget;
 use App\Models\DeploymentTask;
@@ -71,6 +72,24 @@ class AgentTaskClaimTest extends TestCase
         $job = $response->json('job');
         $signer = app(JobPayloadSigner::class);
         $this->assertTrue(hash_equals($signer->sign($job, AgentFactory::$lastPlainSecret), $response->json('signature')));
+    }
+
+    public function test_agent_task_payload_carries_the_exact_attached_artifact(): void
+    {
+        $ctx = $this->makeClaimableTask();
+        $agent = $ctx['agent'];
+        $artifact = Artifact::factory()->create([
+            'project_id' => $ctx['project']->id,
+            'commit_hash' => $ctx['deployment']->commit_hash,
+        ]);
+        $ctx['deployment']->update(['artifact_id' => $artifact->id]);
+
+        $headers = $this->agentHeaders('GET', '/api/agent/jobs/next', '', $agent->public_id, AgentFactory::$lastPlainToken, AgentFactory::$lastPlainSecret);
+        $response = $this->get('/api/agent/jobs/next', $headers)->assertOk();
+
+        $response->assertJsonPath('job.artifact.public_id', $artifact->public_id);
+        $response->assertJsonPath('job.artifact.checksum_sha256', $artifact->checksum_sha256);
+        $response->assertJsonPath('job.artifact.size_bytes', $artifact->size_bytes);
     }
 
     public function test_legacy_job_is_preferred_over_a_new_domain_task_on_the_same_poll(): void

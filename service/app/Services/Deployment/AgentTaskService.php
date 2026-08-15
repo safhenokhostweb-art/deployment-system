@@ -155,6 +155,20 @@ class AgentTaskService
             'previous_commit_hash' => $task->deployment->previous_commit_hash,
             'branch' => $task->deployment->branch,
             'pipeline' => $task->deployment->project->pipeline,
+            // Keep the new AgentTask wire payload at parity with the
+            // legacy deployment payload. In particular, PipelineExecutor
+            // can enforce artifact-only source acquisition only when this
+            // exact matching artifact descriptor is present.
+            'deployment_recipe' => $task->deployment->project->usesDeploymentRecipe()
+                ? $task->deployment->project->deployment_recipe
+                : null,
+            'recipe_rollback' => $task->deployment->project->usesDeploymentRecipe()
+                && $task->deployment->action === Deployment::ACTION_ROLLBACK,
+            'artifact' => $task->deployment->artifact !== null ? [
+                'public_id' => $task->deployment->artifact->public_id,
+                'checksum_sha256' => $task->deployment->artifact->checksum_sha256,
+                'size_bytes' => $task->deployment->artifact->size_bytes,
+            ] : null,
             'issued_at' => now()->timestamp,
         ];
 
