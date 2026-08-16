@@ -42,23 +42,28 @@ final class ArtifactBuilder
      * @return array{path: string, checksum: string, size: int, requiredPaths: array<int, string>}
      * @throws LocalBuildFailedException
      */
-    public function build(string $projectDir, string $workspaceRoot, int $commitTimestamp, array $buildResult): array
+    public function build(string $projectDir, string $workspaceRoot, int $commitTimestamp, array $buildResult, ?callable $onStage = null): array
     {
         $this->validateStaging($projectDir, $buildResult);
 
         $finalZipPath = null;
         try {
+            $onStage?->__invoke('ZIP generation started');
             $finalZipPath = self::buildDeterministicZip($projectDir, $workspaceRoot, $commitTimestamp);
+            $onStage?->__invoke('ZIP generation completed');
 
             $size = @filesize($finalZipPath);
             if ($size === false || $size === 0) {
                 throw new LocalBuildFailedException('artifact_build_failed', 'The assembled artifact is empty.');
             }
 
+            $onStage?->__invoke('checksum calculation started');
             $checksum = hash_file('sha256', $finalZipPath);
             if ($checksum === false) {
                 throw new LocalBuildFailedException('artifact_build_failed', 'Could not compute a checksum for the assembled artifact.');
             }
+
+            $onStage?->__invoke('checksum calculation completed');
 
             return ['path' => $finalZipPath, 'checksum' => $checksum, 'size' => $size, 'requiredPaths' => $this->requiredPaths($projectDir, $buildResult)];
         } catch (\Throwable $e) {

@@ -29,6 +29,7 @@ declare(strict_types=1);
 require __DIR__ . '/../lib/Security.php';
 require __DIR__ . '/../lib/Logger.php';
 require __DIR__ . '/../lib/Client.php';
+require __DIR__ . '/../lib/RetryPolicy.php';
 require __DIR__ . '/../lib/GitManager.php';
 require __DIR__ . '/../lib/LocalBuildFailedException.php';
 require __DIR__ . '/../lib/ApplicationRoot.php';
@@ -296,7 +297,10 @@ if ($isWindows) {
     file_put_contents($lockedFilePath, "native binary content\n");
     $lockedFileHashBefore = hash_file('sha256', $lockedFilePath);
 
-    $holder = lockFileExclusively($lockedFilePath, 20);
+    // Composer/npm integration runs can legitimately exceed 20 seconds on
+    // a cold cache. Keep the independent holder alive through the complete
+    // build plus the offline-Hub retry path, then release it explicitly.
+    $holder = lockFileExclusively($lockedFilePath, 180);
     check('the reproduction lock was actually acquired by a separate process', $holder !== null, $failures, $passCount);
 
     if ($holder !== null) {

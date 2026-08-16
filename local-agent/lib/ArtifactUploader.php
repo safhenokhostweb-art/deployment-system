@@ -55,15 +55,22 @@ final class ArtifactUploader
         $archivePath = null;
 
         try {
+            $this->logger->info("Artifact {$jobId}: workspace preparation started for {$commitHash}.");
             $workspace = BuildWorkspace::create($this->workspaceBaseDir, $projectKey, $jobId);
             $prepared = $this->sourcePreparer->prepare($workspace, $repositoryPath, $commitHash, $onTick);
+            $this->logger->info("Artifact {$jobId}: workspace preparation completed.");
 
             $applicationDirectory = ApplicationRoot::resolve($workspace->projectDir(), $this->buildProfiles[$projectKey]['application_root'] ?? $applicationRoot);
+            $this->logger->info("Artifact {$jobId}: local build started.");
             $buildResult = $this->buildRunner->run($applicationDirectory, $onTick);
-            $this->logger->info("Local build for commit {$commitHash}: " . (empty($buildResult['log']) ? 'nothing to build' : implode(' && ', $buildResult['log'])));
+            $this->logger->info("Artifact {$jobId}: local build completed for {$commitHash}: " . (empty($buildResult['log']) ? 'nothing to build' : implode(' && ', $buildResult['log'])));
 
-            $archive = $this->builder->build($applicationDirectory, $workspace->root(), $prepared['commitTimestamp'], $buildResult);
+            $this->logger->info("Artifact {$jobId}: artifact creation started.");
+            $archive = $this->builder->build($applicationDirectory, $workspace->root(), $prepared['commitTimestamp'], $buildResult, function (string $stage) use ($jobId): void {
+                $this->logger->info("Artifact {$jobId}: {$stage}.");
+            });
             $archivePath = $archive['path'];
+            $this->logger->info("Artifact {$jobId}: artifact creation completed.");
 
             $createResponse = $this->retryHub(fn () => $this->client->request('POST', '/api/local-agent/artifacts', [
                 'project_key' => $projectKey,
@@ -90,6 +97,7 @@ final class ArtifactUploader
                 return ['succeeded' => false, 'message' => "Could not read the assembled artifact back from {$archivePath}.", 'failureCode' => 'artifact_build_failed'];
             }
 
+            $this->logger->info("Artifact {$jobId}: upload started ({$archive['size']} bytes).");
             $uploadResponse = $this->retryHub(fn () => $this->client->uploadRawBody('POST', "/api/local-agent/artifacts/{$artifactId}/content", $contents));
 
             if ($uploadResponse['status'] !== 200) {
@@ -108,6 +116,7 @@ final class ArtifactUploader
                 return ['succeeded' => false, 'message' => "Hub rejected artifact content: {$message}", 'failureCode' => $failureCode];
             }
 
+            $this->logger->info("Artifact {$jobId}: upload completed.");
             $this->logger->info("Artifact uploaded for commit {$commitHash} ({$archive['size']} bytes, checksum {$archive['checksum']}).");
 
             return ['succeeded' => true, 'message' => "Uploaded ({$archive['size']} bytes).", 'failureCode' => null];
