@@ -40,6 +40,16 @@
         <label for="pipeline">{{ __('ui.projects.pipeline') }}</label>
         <textarea id="pipeline" name="pipeline" rows="12" dir="ltr" style="text-align:left;">{{ old('pipeline', $pipelineJson) }}</textarea>
 
+        <label for="artifact_preserve_paths_text">Artifact preserve paths</label>
+        <textarea id="artifact_preserve_paths_text" name="artifact_preserve_paths_text" rows="4" dir="ltr" style="text-align:left;">{{ old('artifact_preserve_paths_text', implode("\n", $project->artifact_preserve_paths ?? [])) }}</textarea>
+        <p class="muted">One relative runtime path per line. Paths must not be absolute or contain <code>..</code>.</p>
+
+        <input type="hidden" name="requires_complete_artifact" value="0">
+        <label>
+            <input type="checkbox" name="requires_complete_artifact" value="1" style="width:auto;display:inline-block;" {{ old('requires_complete_artifact', $project->requires_complete_artifact) ? 'checked' : '' }}>
+            Require complete artifact
+        </label>
+
         <label>
             <input type="checkbox" name="auto_deploy" value="1" style="width:auto;display:inline-block;" {{ old('auto_deploy', $project->auto_deploy) ? 'checked' : '' }}>
             {{ __('ui.projects.auto_deploy_label') }}

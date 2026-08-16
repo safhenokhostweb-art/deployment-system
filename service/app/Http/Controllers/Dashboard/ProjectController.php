@@ -20,6 +20,7 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 
 class ProjectController extends Controller
 {
@@ -286,6 +287,18 @@ class ProjectController extends Controller
         Gate::authorize('projects.update');
         Gate::authorize('update', $project);
 
+        // The edit UI intentionally uses a newline-separated textarea while
+        // the canonical persisted contract is an array of project-relative
+        // paths. API callers can submit the array directly.
+        if ($request->has('artifact_preserve_paths_text')) {
+            $request->merge([
+                'artifact_preserve_paths' => array_values(array_filter(
+                    preg_split('/\R/', (string) $request->input('artifact_preserve_paths_text')) ?: [],
+                    static fn (string $path): bool => trim($path) !== '',
+                )),
+            ]);
+        }
+
         $validated = $this->validateProject($request, $project);
 
         $project->update([
@@ -297,6 +310,8 @@ class ProjectController extends Controller
             'server_id' => $validated['server_id'],
             'pipeline' => $validated['pipeline'],
             'deployment_recipe' => $validated['deployment_recipe'],
+            'artifact_preserve_paths' => $validated['artifact_preserve_paths'] ?? $project->artifact_preserve_paths,
+            'requires_complete_artifact' => $validated['requires_complete_artifact'] ?? $project->requires_complete_artifact,
             'application_root' => $validated['application_root'],
             'auto_deploy' => $request->boolean('auto_deploy'),
             'is_active' => $request->boolean('is_active', true),
@@ -390,6 +405,9 @@ class ProjectController extends Controller
             'server_id' => 'required|exists:servers,id',
             'pipeline' => 'required|string',
             'deployment_recipe' => 'nullable|string',
+            'artifact_preserve_paths' => 'sometimes|nullable|array|max:20',
+            'artifact_preserve_paths.*' => 'required|string|max:255',
+            'requires_complete_artifact' => 'sometimes|boolean',
             // Keep this as an array rule. The expression contains `|`, which
             // Laravel treats as a rule separator when it is embedded in a
             // pipe-delimited rule string, producing an invalid preg_match()
@@ -436,12 +454,42 @@ class ProjectController extends Controller
                 : $this->recipeValidator->validate(json_decode($rawRecipe, true));
         }
         $validated['application_root'] = $validated['application_root'] ?? $project?->application_root ?? '.';
+        if (array_key_exists('artifact_preserve_paths', $validated)) {
+            $validated['artifact_preserve_paths'] = $this->normalizeArtifactPreservePaths($validated['artifact_preserve_paths']);
+        }
 
         if ($project !== null) {
             $validated['project_key'] = $project->project_key;
         }
 
         return $validated;
+    }
+
+    /** @param array<int, string>|null $paths @return array<int, string>|null */
+    private function normalizeArtifactPreservePaths(?array $paths): ?array
+    {
+        if ($paths === null) {
+            return null;
+        }
+
+        $normalized = [];
+        foreach ($paths as $path) {
+            $path = rtrim(str_replace('\\', '/', trim($path)), '/');
+            if ($path === '' || str_starts_with($path, '/') || preg_match('/^[A-Za-z]:\//', $path) === 1
+                || preg_match('#(^|/)\.\.(/|$)#', $path) === 1 || str_contains($path, "\0")) {
+                throw ValidationException::withMessages([
+                    'artifact_preserve_paths' => 'Preserve paths must be relative paths without traversal segments.',
+                ]);
+            }
+            if (in_array($path, $normalized, true)) {
+                throw ValidationException::withMessages([
+                    'artifact_preserve_paths' => 'Preserve paths must not contain duplicates.',
+                ]);
+            }
+            $normalized[] = $path;
+        }
+
+        return $normalized;
     }
 
     /**
