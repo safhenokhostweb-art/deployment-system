@@ -20,26 +20,41 @@ case "$1" in
         # These programs are intentionally always-on. Restart only their
         # exact allowlisted names so the activated release is loaded.
         /usr/bin/supervisorctl restart reverb
-        /usr/bin/supervisorctl restart saas-platform-worker
-        /usr/bin/supervisorctl restart saas-install-worker
+        /usr/bin/supervisorctl restart 'saas-platform-worker:*'
+        /usr/bin/supervisorctl restart 'saas-install-worker:*'
 
         # restore is on-demand (autostart=false). A deployment must never
-        # start it, but an in-progress already-running restore needs the new
-        # release code just like the always-on workers.
-        restore_status="$(/usr/bin/supervisorctl status saas-restore-worker 2>&1)" || true
-        read -r restore_program restore_state _ <<< "$restore_status"
-        if [ "$restore_program" != "saas-restore-worker" ]; then
+        # start it. Supervisor exposes it as a group, so status can contain
+        # one line per process and must use the fixed group selector.
+        restore_status="$(/usr/bin/supervisorctl status 'saas-restore-worker:*' 2>&1)" || true
+        restore_member_count=0
+        restore_running=false
+        while read -r restore_program restore_state _; do
+            [ -n "$restore_program" ] || continue
+            case "$restore_program" in
+                saas-restore-worker:*) ;;
+                *)
+                    echo "Could not determine saas-restore-worker state" >&2
+                    exit 70
+                    ;;
+            esac
+            restore_member_count=$((restore_member_count + 1))
+            case "$restore_state" in
+                RUNNING) restore_running=true ;;
+                STOPPED|EXITED|FATAL|BACKOFF) ;;
+                *)
+                    echo "Unexpected saas-restore-worker state: $restore_state" >&2
+                    exit 70
+                    ;;
+            esac
+        done <<< "$restore_status"
+        if [ "$restore_member_count" -eq 0 ]; then
             echo "Could not determine saas-restore-worker state" >&2
             exit 70
         fi
-        case "$restore_state" in
-            RUNNING) /usr/bin/supervisorctl restart saas-restore-worker ;;
-            STOPPED|EXITED|FATAL|BACKOFF) ;;
-            *)
-                echo "Unexpected saas-restore-worker state: $restore_state" >&2
-                exit 70
-                ;;
-        esac
+        if [ "$restore_running" = true ]; then
+            /usr/bin/supervisorctl restart 'saas-restore-worker:*'
+        fi
         ;;
     *)
         echo "deployment-service-reload accepts only approved project keys" >&2
