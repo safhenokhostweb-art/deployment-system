@@ -7,6 +7,7 @@ use App\Events\PublishJobAwaitingApproval;
 use App\Events\PublishJobFailed;
 use App\Events\PublishJobSucceeded;
 use App\Models\AuditLogEntry;
+use App\Models\Artifact;
 use App\Models\LocalAgent;
 use App\Models\LocalChangeDetectionJob;
 use App\Models\LocalProjectMapping;
@@ -323,13 +324,37 @@ class PublishJobService
         return $job;
     }
 
+    public function refreshNoSourceChangeReviewEvidence(PublishJob $job, string $refreshedBy): PublishJob
+    {
+        return DB::transaction(function () use ($job, $refreshedBy) {
+            $job = PublishJob::query()->lockForUpdate()->findOrFail($job->id);
+            abort_unless($job->action === PublishJob::ACTION_STATUS_CHECK, 422, 'Only a status_check job can refresh review evidence.');
+            abort_unless($job->status === PublishJob::STATUS_AWAITING_APPROVAL, 409, 'Only an awaiting-approval job can refresh review evidence.');
+            abort_unless($job->files_changed_count === 0 && $job->changed_files === [] && $job->blocked_files === [], 422, 'Only a clean zero-change review can refresh evidence.');
+
+            $mapping = LocalProjectMapping::query()->where('local_agent_id', $job->local_agent_id)->where('project_id', $job->project_id)->lockForUpdate()->first();
+            abort_unless($mapping !== null && $mapping->localAgent->status === LocalAgent::STATUS_APPROVED, 422, 'The job no longer has an approved Local Agent mapping.');
+            abort_unless($mapping->working_tree_dirty === false, 422, 'The Local Agent working tree is not clean.');
+            abort_unless(is_string($mapping->local_head_sha) && preg_match('/^[0-9a-f]{40}$/', $mapping->local_head_sha) === 1, 422, 'The Local Agent has not reported a valid current HEAD.');
+            abort_unless($mapping->remote_tracking_sha === $mapping->local_head_sha, 422, 'The Local Agent current HEAD does not match its remote tracking SHA.');
+            abort_unless($mapping->effectiveBranch() !== '', 422, 'The Local Agent mapping has no effective branch.');
+            abort_if(Artifact::query()->where('project_id', $job->project_id)->where('commit_hash', $mapping->local_head_sha)->exists(), 409, 'An artifact already exists for this reviewed commit.');
+            abort_if(PublishJob::query()->where('project_id', $job->project_id)->where('local_agent_id', $job->local_agent_id)->whereKeyNot($job->id)->whereIn('status', [PublishJob::STATUS_QUEUED, PublishJob::STATUS_APPROVED, PublishJob::STATUS_RUNNING])->exists(), 409, 'Another active publish job conflicts with this evidence refresh.');
+
+            $job->update(['reviewed_head_sha' => $mapping->local_head_sha, 'reviewed_branch' => $mapping->effectiveBranch(), 'reviewed_mapping_id' => $mapping->id, 'reviewed_working_tree_clean' => true]);
+            AuditLogEntry::record(actorType: AuditLogEntry::ACTOR_USER, actorIdentifier: $refreshedBy, action: 'publish_job.review_evidence_refreshed', subjectType: PublishJob::class, subjectId: $job->id, metadata: ['head_sha' => $mapping->local_head_sha, 'branch' => $mapping->effectiveBranch(), 'mapping_id' => $mapping->id]);
+
+            return $job->refresh();
+        });
+    }
+
     private function assertNoSourceChangeEvidence(PublishJob $job): void
     {
         abort_unless($job->blocked_files === [] && $job->reviewed_working_tree_clean === true, 422, 'A no-source-change publish requires a clean working tree.');
         abort_unless(is_string($job->reviewed_head_sha) && preg_match('/^[0-9a-f]{40}$/', $job->reviewed_head_sha) === 1, 422, 'A no-source-change publish requires a verified current HEAD.');
         abort_unless(is_string($job->reviewed_branch) && $job->reviewed_branch !== '' && $job->reviewed_mapping_id !== null, 422, 'A no-source-change publish requires verified mapping and branch evidence.');
 
-        abort_unless($this->noSourceChangeEvidenceIsStillValid($job), 422, 'The verified Local Agent mapping is no longer valid.');
+        abort_unless($this->noSourceChangeEvidenceIsStillValid($job), 422, 'The verified Local Agent state is no longer valid.');
     }
 
     private function noSourceChangeEvidenceIsStillValid(PublishJob $job): bool
@@ -340,7 +365,13 @@ class PublishJobService
 
         $mapping = LocalProjectMapping::query()->whereKey($job->reviewed_mapping_id)->where('local_agent_id', $job->local_agent_id)->where('project_id', $job->project_id)->first();
 
-        return $mapping !== null && $mapping->effectiveBranch() === $job->reviewed_branch;
+        return $mapping !== null
+            && $mapping->effectiveBranch() === $job->reviewed_branch
+            && $mapping->working_tree_dirty === false
+            && is_string($mapping->local_head_sha)
+            && preg_match('/^[0-9a-f]{40}$/', $mapping->local_head_sha) === 1
+            && $mapping->remote_tracking_sha === $mapping->local_head_sha
+            && hash_equals((string) $job->reviewed_head_sha, $mapping->local_head_sha);
     }
 
     public function approveRollback(PublishJob $job, string $approvedBy): PublishJob

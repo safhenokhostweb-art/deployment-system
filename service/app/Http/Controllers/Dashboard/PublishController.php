@@ -54,6 +54,17 @@ class PublishController extends Controller
             ->with('status', 'انتشار تایید شد — کارگزار به‌زودی commit و push را انجام می‌دهد.');
     }
 
+    public function refreshReviewEvidence(Request $request, Project $project, PublishJob $publishJob): RedirectResponse
+    {
+        Gate::authorize('local_agents.manage');
+        abort_unless($publishJob->project_id === $project->id, 404);
+
+        $this->publishJobs->refreshNoSourceChangeReviewEvidence($publishJob, $request->user()->email);
+
+        return redirect()->route('projects.publish.show', [$project, $publishJob])
+            ->with('status', 'Review evidence refreshed. Explicit approval is still required.');
+    }
+
     public function rollback(Request $request, Project $project): RedirectResponse
     {
         Gate::authorize('local_agents.publish');

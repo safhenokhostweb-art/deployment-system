@@ -72,6 +72,7 @@ class PublishJobFlowTest extends TestCase
     {
         $agent = LocalAgent::factory()->approved()->create();
         $project = $this->mappedProject($agent);
+        $project->localProjectMappings()->first()->update(['local_head_sha' => str_repeat('c', 40), 'remote_tracking_sha' => str_repeat('c', 40), 'working_tree_dirty' => false]);
         $service = app(PublishJobService::class);
         $job = $service->queue($agent, $project, PublishJob::ACTION_STATUS_CHECK, 'dev@example.test');
         $service->reportStatusCheck($job, [], [], str_repeat('c', 40), 'main', true);
@@ -101,6 +102,7 @@ class PublishJobFlowTest extends TestCase
     {
         $agent = LocalAgent::factory()->approved()->create();
         $project = $this->mappedProject($agent);
+        $project->localProjectMappings()->first()->update(['local_head_sha' => str_repeat('c', 40), 'remote_tracking_sha' => str_repeat('c', 40), 'working_tree_dirty' => false]);
         $service = app(PublishJobService::class);
         $job = $service->queue($agent, $project, PublishJob::ACTION_STATUS_CHECK, 'dev@example.test');
         $service->reportStatusCheck($job, [], [], str_repeat('c', 40), 'main', true);

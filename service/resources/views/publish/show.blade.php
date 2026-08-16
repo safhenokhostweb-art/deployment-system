@@ -17,6 +17,16 @@
 
         @if ($publishJob->files_changed_count === 0)
             <p class="muted">{{ __('ui.publish.no_changes') }}</p>
+            @php($hasReviewEvidence = $publishJob->reviewed_head_sha && $publishJob->reviewed_branch && $publishJob->reviewed_mapping_id && $publishJob->reviewed_working_tree_clean)
+            @if (!$hasReviewEvidence)
+                <p class="muted">This legacy review needs fresh Local Agent evidence before it can be approved.</p>
+                @can('local_agents.manage')
+                <form method="POST" action="{{ route('projects.publish.refresh-review-evidence', [$project, $publishJob]) }}" style="margin-top:1rem;">
+                    @csrf
+                    <button type="submit" class="btn btn-primary">Refresh review evidence</button>
+                </form>
+                @endcan
+            @else
             <p class="muted">No source changes were found. Confirming will build and upload an artifact for the verified current commit; it will not create a commit or push.</p>
             @can('local_agents.publish')
             <form method="POST" action="{{ route('projects.publish.approve', [$project, $publishJob]) }}" style="margin-top:1rem;">
@@ -24,6 +34,7 @@
                 <button type="submit" class="btn btn-primary">Confirm publish existing commit</button>
             </form>
             @endcan
+            @endif
         @else
             <ul>
                 @foreach ($publishJob->changed_files as $file)

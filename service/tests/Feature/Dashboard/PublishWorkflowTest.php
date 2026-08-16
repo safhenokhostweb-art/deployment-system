@@ -98,6 +98,7 @@ class PublishWorkflowTest extends TestCase
         $localAgent = $project->localProjectMappings()->first()->localAgent;
         $job = app(PublishJobService::class)->queue($localAgent, $project, PublishJob::ACTION_STATUS_CHECK, $user->email);
         $mapping = $project->localProjectMappings()->first();
+        $mapping->update(['local_head_sha' => str_repeat('a', 40), 'remote_tracking_sha' => str_repeat('a', 40), 'working_tree_dirty' => false]);
         app(PublishJobService::class)->reportStatusCheck($job, [], [], str_repeat('a', 40), 'main', true);
 
         $this->actingAs($user)->post(route('projects.publish.approve', [$project, $job]))->assertRedirect();
@@ -119,6 +120,59 @@ class PublishWorkflowTest extends TestCase
 
         $this->actingAs($user)->post(route('projects.publish.approve', [$project, $job]))->assertStatus(422);
         $this->assertSame(PublishJob::STATUS_AWAITING_APPROVAL, $job->fresh()->status);
+    }
+
+    public function test_admin_can_refresh_a_legacy_zero_change_review_without_approving_it(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = $this->projectWithApprovedMapping();
+        $mapping = $project->localProjectMappings()->first();
+        $mapping->update(['local_head_sha' => str_repeat('b', 40), 'remote_tracking_sha' => str_repeat('b', 40), 'working_tree_dirty' => false]);
+        $job = app(PublishJobService::class)->queue($mapping->localAgent, $project, PublishJob::ACTION_STATUS_CHECK, $admin->email);
+        app(PublishJobService::class)->reportStatusCheck($job, []);
+
+        $this->actingAs($admin)->get(route('projects.publish.show', [$project, $job]))->assertSee('Refresh review evidence');
+        $this->actingAs($admin)->post(route('projects.publish.refresh-review-evidence', [$project, $job]))->assertRedirect();
+
+        $fresh = $job->fresh();
+        $this->assertSame(PublishJob::STATUS_AWAITING_APPROVAL, $fresh->status);
+        $this->assertSame(str_repeat('b', 40), $fresh->reviewed_head_sha);
+        $this->assertSame('main', $fresh->reviewed_branch);
+        $this->assertSame($mapping->id, $fresh->reviewed_mapping_id);
+        $this->assertTrue($fresh->reviewed_working_tree_clean);
+        $this->assertNull($fresh->approved_at);
+    }
+
+    public function test_refresh_rejects_dirty_or_stale_mapping_evidence_and_approval_rechecks_it(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = $this->projectWithApprovedMapping();
+        $mapping = $project->localProjectMappings()->first();
+        $mapping->update(['local_head_sha' => str_repeat('c', 40), 'remote_tracking_sha' => str_repeat('c', 40), 'working_tree_dirty' => true]);
+        $service = app(PublishJobService::class);
+        $job = $service->queue($mapping->localAgent, $project, PublishJob::ACTION_STATUS_CHECK, $admin->email);
+        $service->reportStatusCheck($job, []);
+
+        $this->actingAs($admin)->post(route('projects.publish.refresh-review-evidence', [$project, $job]))->assertStatus(422);
+        $mapping->update(['working_tree_dirty' => false]);
+        $service->refreshNoSourceChangeReviewEvidence($job, $admin->email);
+        $mapping->update(['local_head_sha' => str_repeat('d', 40), 'remote_tracking_sha' => str_repeat('d', 40)]);
+
+        $this->actingAs($admin)->post(route('projects.publish.approve', [$project, $job]))->assertStatus(422);
+        $this->assertSame(PublishJob::STATUS_AWAITING_APPROVAL, $job->fresh()->status);
+    }
+
+    public function test_developer_cannot_refresh_legacy_review_evidence(): void
+    {
+        $developer = User::factory()->create(['role' => User::ROLE_DEVELOPER]);
+        $project = $this->projectWithApprovedMapping();
+        $mapping = $project->localProjectMappings()->first();
+        $mapping->update(['local_head_sha' => str_repeat('e', 40), 'remote_tracking_sha' => str_repeat('e', 40), 'working_tree_dirty' => false]);
+        $job = app(PublishJobService::class)->queue($mapping->localAgent, $project, PublishJob::ACTION_STATUS_CHECK, $developer->email);
+        app(PublishJobService::class)->reportStatusCheck($job, []);
+
+        $this->actingAs($developer)->post(route('projects.publish.refresh-review-evidence', [$project, $job]))->assertStatus(403);
+        $this->assertNull($job->fresh()->reviewed_head_sha);
     }
 
     public function test_rollback_queues_and_immediately_approves_a_rollback_job(): void

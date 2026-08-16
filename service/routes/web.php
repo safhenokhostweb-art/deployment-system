@@ -101,6 +101,7 @@ Route::middleware('auth')->group(function () {
         ->name('publish-jobs.recover-stale');
     Route::post('/projects/{project}/publish', [PublishController::class, 'store'])->name('projects.publish');
     Route::post('/projects/{project}/publish/{publishJob}/approve', [PublishController::class, 'approve'])->name('projects.publish.approve');
+    Route::post('/projects/{project}/publish/{publishJob}/refresh-review-evidence', [PublishController::class, 'refreshReviewEvidence'])->name('projects.publish.refresh-review-evidence');
     Route::post('/projects/{project}/publish/{publishJob}/retry', [PublishController::class, 'retry'])->name('projects.publish.retry');
     Route::post('/projects/{project}/rollback', [PublishController::class, 'rollback'])->name('projects.publish.rollback');
     Route::get('/projects/{project}/publish/{publishJob}', [PublishController::class, 'show'])->name('projects.publish.show');
