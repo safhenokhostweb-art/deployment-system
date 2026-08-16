@@ -89,6 +89,58 @@ class LocalAgentArtifactFlowTest extends TestCase
         $this->assertNotEmpty($response->json('artifact_id'));
     }
 
+    public function test_create_accepts_the_canonical_required_paths_without_regex_rule_splitting(): void
+    {
+        [$agent, $project] = $this->mappedAgentAndProject();
+        $body = [
+            'project_key' => $project->project_key,
+            'commit_hash' => 'c21223c1ccd95d9bcf1e3feb105bea28b3f4b4f0',
+            'branch' => 'master',
+            'checksum_sha256' => '90299f0b5d7e291eb986e63ec217a7341b57bc4330cf2f398cd463b5ac997bac',
+            'size_bytes' => 8837722,
+            'required_paths' => [
+                'composer.json',
+                'vendor/autoload.php',
+                'artisan',
+                'bootstrap/app.php',
+                'public/index.php',
+                'public/build/manifest.json',
+            ],
+        ];
+        $path = '/api/local-agent/artifacts';
+
+        $response = $this->postJson($path, $body, $this->headersFor($agent, 'POST', $path, json_encode($body)))
+            ->assertCreated();
+
+        $this->assertDatabaseHas('artifacts', [
+            'public_id' => $response->json('artifact_id'),
+            'project_id' => $project->id,
+            'commit_hash' => $body['commit_hash'],
+            'checksum_sha256' => $body['checksum_sha256'],
+            'status' => Artifact::STATUS_UPLOADING,
+        ]);
+        $this->assertSame($body['required_paths'], Artifact::where('public_id', $response->json('artifact_id'))->value('required_paths'));
+    }
+
+    public function test_create_rejects_required_paths_with_parent_directory_segments(): void
+    {
+        [$agent, $project] = $this->mappedAgentAndProject();
+        $body = [
+            'project_key' => $project->project_key,
+            'commit_hash' => str_repeat('a', 40),
+            'branch' => 'main',
+            'checksum_sha256' => hash('sha256', 'x'),
+            'size_bytes' => 1,
+            'required_paths' => ['vendor/../autoload.php'],
+        ];
+        $path = '/api/local-agent/artifacts';
+
+        $this->postJson($path, $body, $this->headersFor($agent, 'POST', $path, json_encode($body)))
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('required_paths.0');
+        $this->assertDatabaseMissing('artifacts', ['project_id' => $project->id, 'commit_hash' => $body['commit_hash']]);
+    }
+
     public function test_create_rejects_a_project_the_agent_is_not_mapped_to(): void
     {
         $agent = LocalAgent::factory()->approved()->create();

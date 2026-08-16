@@ -42,7 +42,11 @@ class LocalAgentArtifactController extends Controller
             'checksum_sha256' => 'required|string|size:64|regex:/^[0-9a-f]{64}$/',
             'size_bytes' => 'required|integer|min:1',
             'required_paths' => 'nullable|array|max:20',
-            'required_paths.*' => 'string|max:500|regex:/^(?!.*(?:^|\\/)\\.\\.(?:\\/|$))[A-Za-z0-9._\\/-]+$/',
+            // This expression contains alternation (`|`). Laravel splits
+            // pipe-delimited string rules before handing the regex to its
+            // validator, so keep this rule as an array just like
+            // ProjectController's application_root validation rule.
+            'required_paths.*' => ['string', 'max:500', 'regex:/^(?!.*(?:^|\\/)\\.\\.(?:\\/|$))[A-Za-z0-9._\\/-]+$/'],
         ]);
 
         $project = $this->resolveMappedProject($agent, $validated['project_key']);
