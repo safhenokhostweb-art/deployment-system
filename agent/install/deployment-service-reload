@@ -1,13 +1,48 @@
 #!/usr/bin/env bash
-# Root-owned, fixed-function helper for the only services a deployment-system
-# release may reload. Its one literal project argument is also enforced by
-# sudoers; no user-controlled service name reaches systemctl.
+# Root-owned, fixed-function helper. Its literal project arguments are also
+# enforced by sudoers; no user-controlled service or Supervisor program reaches
+# a privileged command.
 set -Eeuo pipefail
 
-if [ "$#" -ne 1 ] || [ "$1" != "deployment-system" ]; then
-    echo "deployment-service-reload accepts only deployment-system" >&2
-    exit 65
+if [ "$#" -ne 1 ]; then
+    exit 64
 fi
 
-/usr/bin/systemctl reload php8.3-fpm
-/usr/bin/systemctl reload nginx
+case "$1" in
+    deployment-system)
+        /usr/bin/systemctl reload php8.3-fpm
+        /usr/bin/systemctl reload nginx
+        ;;
+    saas-platform)
+        /usr/bin/systemctl reload php8.3-fpm
+        /usr/bin/systemctl reload nginx
+
+        # These programs are intentionally always-on. Restart only their
+        # exact allowlisted names so the activated release is loaded.
+        /usr/bin/supervisorctl restart reverb
+        /usr/bin/supervisorctl restart saas-platform-worker
+        /usr/bin/supervisorctl restart saas-install-worker
+
+        # restore is on-demand (autostart=false). A deployment must never
+        # start it, but an in-progress already-running restore needs the new
+        # release code just like the always-on workers.
+        restore_status="$(/usr/bin/supervisorctl status saas-restore-worker 2>&1)" || true
+        read -r restore_program restore_state _ <<< "$restore_status"
+        if [ "$restore_program" != "saas-restore-worker" ]; then
+            echo "Could not determine saas-restore-worker state" >&2
+            exit 70
+        fi
+        case "$restore_state" in
+            RUNNING) /usr/bin/supervisorctl restart saas-restore-worker ;;
+            STOPPED|EXITED|FATAL|BACKOFF) ;;
+            *)
+                echo "Unexpected saas-restore-worker state: $restore_state" >&2
+                exit 70
+                ;;
+        esac
+        ;;
+    *)
+        echo "deployment-service-reload accepts only approved project keys" >&2
+        exit 65
+        ;;
+esac

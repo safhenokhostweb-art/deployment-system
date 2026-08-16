@@ -86,6 +86,7 @@ function buildFixtureZip(string $dir, string $name, string $marker): array
     // from whatever the previous release happened to have.
     $zip->addFromString('vendor/autoload.php', "<?php\n// vendor from {$marker}\n");
     $zip->addFromString('public/build/manifest.json', json_encode(['from' => $marker]));
+    $zip->addFromString('public/storage/artifact-placeholder.txt', "must-not-replace-runtime-data from {$marker}\n");
     $zip->close();
 
     return ['path' => $zipPath, 'checksum' => hash_file('sha256', $zipPath), 'size' => filesize($zipPath)];
@@ -190,13 +191,17 @@ check('missing required runtime path fails before activation', $incompleteResult
 check('missing required runtime path leaves the live tree unchanged', str_contains((string) file_get_contents("{$workingDirectory}/index.php"), 'release A'), $failures, $passCount);
 
 // ============================================================
-// Preserve paths: seed .env + storage before a second deploy, confirm
-// they survive into the new release, and the previous release was
-// renamed aside (not deleted).
+// Preserve paths: seed .env + storage + the independent public/storage
+// runtime directory before a second deploy, confirm they survive into the
+// new release, and the previous release was renamed aside (not deleted).
 // ============================================================
 file_put_contents("{$workingDirectory}/.env", "DB_PASSWORD=must-survive\n");
 mkdir("{$workingDirectory}/storage/app", 0777, true);
 file_put_contents("{$workingDirectory}/storage/app/upload.txt", "user-uploaded-file\n");
+if (!is_dir("{$workingDirectory}/public/storage")) {
+    mkdir("{$workingDirectory}/public/storage", 0777, true);
+}
+file_put_contents("{$workingDirectory}/public/storage/avatar.txt", "public-runtime-upload\n");
 
 $fixtureB = buildFixtureZip($workspace, 'release-b', 'release B');
 registerManifestEntry($hub['manifestPath'], 'artifact-b', $fixtureB['path']);
@@ -204,7 +209,7 @@ registerManifestEntry($hub['manifestPath'], 'artifact-b', $fixtureB['path']);
 $resultB = $manager->deploy(
     ['public_id' => 'artifact-b', 'checksum_sha256' => $fixtureB['checksum'], 'size_bytes' => $fixtureB['size']],
     $workingDirectory,
-    ['.env', 'storage'],
+    ['.env', 'storage', 'public/storage'],
     3,
 );
 
@@ -212,6 +217,8 @@ check('second deploy succeeds', $resultB['status'] === 'succeeded', $failures, $
 check('second deploy has the new release content', str_contains((string) @file_get_contents("{$workingDirectory}/index.php"), 'release B'), $failures, $passCount);
 check('.env survived the swap', trim((string) @file_get_contents("{$workingDirectory}/.env")) === 'DB_PASSWORD=must-survive', $failures, $passCount);
 check('storage/app/upload.txt survived the swap', trim((string) @file_get_contents("{$workingDirectory}/storage/app/upload.txt")) === 'user-uploaded-file', $failures, $passCount);
+check('independent public/storage/avatar.txt survived the swap', trim((string) @file_get_contents("{$workingDirectory}/public/storage/avatar.txt")) === 'public-runtime-upload', $failures, $passCount);
+check('new artifact public/storage content did not replace preserved runtime data', str_contains((string) @file_get_contents("{$workingDirectory}/public/storage/artifact-placeholder.txt"), 'release A'), $failures, $passCount);
 
 // vendor/ and public/build/ are NOT in the preserve-paths list passed to
 // deploy() above (only .env/storage are) — they must come exclusively
