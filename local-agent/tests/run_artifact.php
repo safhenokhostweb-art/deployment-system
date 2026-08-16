@@ -32,6 +32,7 @@ require __DIR__ . '/../lib/GitManager.php';
 require __DIR__ . '/../lib/LocalBuildFailedException.php';
 require __DIR__ . '/../lib/ApplicationRoot.php';
 require __DIR__ . '/../lib/LocalBuildRunner.php';
+require __DIR__ . '/../lib/RetryPolicy.php';
 require __DIR__ . '/../lib/SafeFilesystem.php';
 require __DIR__ . '/../lib/BuildWorkspace.php';
 require __DIR__ . '/../lib/WorkspaceSourcePreparer.php';
@@ -159,13 +160,23 @@ function buildFixtureRepo(GitManager $git, string $workspace): array
     return ['path' => $repo, 'commitHash' => $commitHash];
 }
 
-function buildFixtureRepoMinimal(GitManager $git, string $workspace): array
+function buildFixtureRepoMinimal(GitManager $git, string $workspace, bool $withComposerJson = false, bool $withPackageJson = false): array
 {
     $repo = $workspace . '/repo';
     mkdir($repo, 0777, true);
     runGit($git, ['init', '--quiet', '-b', 'main'], $repo);
     runGit($git, ['config', 'user.email', 'test@example.test'], $repo);
     runGit($git, ['config', 'user.name', 'Artifact Test'], $repo);
+    if ($withComposerJson) {
+        file_put_contents("{$repo}/composer.json", json_encode(['name' => 'fixture/minimal'], JSON_PRETTY_PRINT));
+    }
+    if ($withPackageJson) {
+        file_put_contents("{$repo}/package.json", json_encode([
+            'name' => 'fixture-minimal',
+            'private' => true,
+            'scripts' => ['build' => 'node -e "process.exit(0)"'],
+        ], JSON_PRETTY_PRINT));
+    }
     file_put_contents("{$repo}/index.php", "<?php\n");
     runGit($git, ['add', '-A'], $repo);
     runGit($git, ['commit', '--quiet', '-m', 'initial'], $repo);
@@ -353,7 +364,7 @@ check('ArtifactBuilder: building the same prepared directory twice is determinis
 // Validation: claims composer ran, but vendor/autoload.php doesn't actually exist.
 $noVendorWorkspace = makeWorkspace();
 $git2 = new GitManager();
-$noVendorFixture = buildFixtureRepoMinimal($git2, $noVendorWorkspace);
+$noVendorFixture = buildFixtureRepoMinimal($git2, $noVendorWorkspace, true, false);
 check('ArtifactBuilder: throws artifact_missing_vendor when composer supposedly ran but vendor is absent', (function () use ($builder, $noVendorFixture, $noVendorWorkspace) {
     try {
         $builder->build($noVendorFixture['path'], $noVendorWorkspace, time(), ['ranComposer' => true, 'ranNpmBuild' => false]);
@@ -363,15 +374,19 @@ check('ArtifactBuilder: throws artifact_missing_vendor when composer supposedly 
         return $e->failureCode === 'artifact_missing_vendor';
     }
 })(), $failures, $passCount);
-check('ArtifactBuilder: throws artifact_missing_build when npm build supposedly ran but manifest is absent', (function () use ($builder, $noVendorFixture, $noVendorWorkspace) {
+$noBuildWorkspace = makeWorkspace();
+$git3 = new GitManager();
+$noBuildFixture = buildFixtureRepoMinimal($git3, $noBuildWorkspace, false, true);
+check('ArtifactBuilder: throws artifact_missing_build when npm build supposedly ran but manifest is absent', (function () use ($builder, $noBuildFixture, $noBuildWorkspace) {
     try {
-        $builder->build($noVendorFixture['path'], $noVendorWorkspace, time(), ['ranComposer' => false, 'ranNpmBuild' => true]);
+        $builder->build($noBuildFixture['path'], $noBuildWorkspace, time(), ['ranComposer' => false, 'ranNpmBuild' => true]);
 
         return false;
     } catch (LocalBuildFailedException $e) {
         return $e->failureCode === 'artifact_missing_build';
     }
 })(), $failures, $passCount);
+rrmdir($noBuildWorkspace);
 rrmdir($noVendorWorkspace);
 
 // ============================================================
