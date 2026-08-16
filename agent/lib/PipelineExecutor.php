@@ -106,6 +106,11 @@ final class PipelineExecutor
             if (($step['type'] ?? null) === 'runtime_permissions') {
                 $command = 'sudo -n /usr/local/sbin/deployment-runtime-permissions ' . $job['project_key'];
                 $result = $this->executor->runArgv(['sudo', '-n', '/usr/local/sbin/deployment-runtime-permissions', $job['project_key']], $workingDirectory, $stepTimeout);
+            } elseif (($step['type'] ?? null) === 'service_reload') {
+                // This is deliberately an argv call to one fixed sudoers-approved
+                // helper. Pipeline JSON never controls a service name or command.
+                $command = 'sudo -n /usr/local/sbin/deployment-service-reload ' . $job['project_key'];
+                $result = $this->executor->runArgv(['sudo', '-n', '/usr/local/sbin/deployment-service-reload', $job['project_key']], $workingDirectory, $stepTimeout);
             } else {
                 $command = strtr($step['command'], $replacements);
                 $result = $this->executor->run($command, $workingDirectory, $stepTimeout);

@@ -321,6 +321,14 @@ $logFailStop = readHubLog($hub['logPath']);
 $failStopStatuses = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-fail-stop/status' ? ($e['body']['status'] ?? null) : null, $logFailStop)));
 check('a failed step: final status is failed', end($failStopStatuses) === 'failed', $failures, $passCount);
 
+// Typed privileged operations are a closed argv allowlist.  This source-level
+// contract test is intentionally platform-independent: Windows CI has no
+// sudo, while production must never substitute a shell command here.
+$pipelineSource = (string) file_get_contents(__DIR__ . '/../lib/PipelineExecutor.php');
+check('runtime_permissions uses only its fixed helper argv', str_contains($pipelineSource, "['sudo', '-n', '/usr/local/sbin/deployment-runtime-permissions', \$job['project_key']]"), $failures, $passCount);
+check('service_reload uses only its fixed helper argv', str_contains($pipelineSource, "['sudo', '-n', '/usr/local/sbin/deployment-service-reload', \$job['project_key']]"), $failures, $passCount);
+check('typed service reload does not expose direct systemctl', !str_contains($pipelineSource, "['systemctl'"), $failures, $passCount);
+
 stopFakeHub($hub);
 rrmdir($workspace);
 

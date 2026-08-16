@@ -45,6 +45,7 @@ class ProjectController extends Controller
         ['name' => 'migrate', 'command' => '{php_binary} artisan migrate --force'],
         ['name' => 'cache clear', 'command' => '{php_binary} artisan optimize:clear && {php_binary} artisan optimize'],
         ['name' => 'runtime permissions', 'type' => 'runtime_permissions', 'command' => ''],
+        ['name' => 'restart services', 'type' => 'service_reload', 'command' => ''],
         ['name' => 'asset build', 'command' => 'npm ci --include=dev && npm run build', 'skip_when_artifact' => true],
         ['name' => 'queue restart', 'command' => '{php_binary} artisan queue:restart'],
     ];
@@ -405,8 +406,15 @@ class ProjectController extends Controller
         }
 
         foreach ($pipeline as $step) {
-            if (!is_array($step) || !isset($step['name']) || (!isset($step['command']) && ($step['type'] ?? null) !== 'runtime_permissions')) {
+            if (!is_array($step)) {
                 abort(422, 'Every pipeline step needs a name and a command.');
+            }
+            $typedOperation = $step['type'] ?? null;
+            if (!isset($step['name']) || (!isset($step['command']) && !in_array($typedOperation, ['runtime_permissions', 'service_reload'], true))) {
+                abort(422, 'Every pipeline step needs a name and a command.');
+            }
+            if ($typedOperation !== null && (!in_array($typedOperation, ['runtime_permissions', 'service_reload'], true) || ($step['command'] ?? '') !== '')) {
+                abort(422, 'Pipeline typed operations must be approved and cannot include a command.');
             }
         }
 

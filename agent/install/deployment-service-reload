@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Root-owned, fixed-function helper for the only services a deployment-system
+# release may reload. Its one literal project argument is also enforced by
+# sudoers; no user-controlled service name reaches systemctl.
+set -Eeuo pipefail
+
+if [ "$#" -ne 1 ] || [ "$1" != "deployment-system" ]; then
+    echo "deployment-service-reload accepts only deployment-system" >&2
+    exit 65
+fi
+
+/usr/bin/systemctl reload php8.3-fpm
+/usr/bin/systemctl reload nginx
