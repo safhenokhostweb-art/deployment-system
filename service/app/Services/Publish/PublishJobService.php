@@ -9,6 +9,7 @@ use App\Events\PublishJobSucceeded;
 use App\Models\AuditLogEntry;
 use App\Models\LocalAgent;
 use App\Models\LocalChangeDetectionJob;
+use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use App\Models\PublishJob;
 use App\Services\Security\SecretRedactor;
@@ -75,8 +76,12 @@ class PublishJobService
      * (triggeredBy: auto, $approvedBy is a system identifier, not a real
      * user — logged as ACTOR_SYSTEM accordingly).
      */
-    public function queueApprovedPublish(LocalAgent $localAgent, Project $project, string $commitMessage, string $approvedBy, string $triggeredBy = 'approval'): PublishJob
+    public function queueApprovedPublish(LocalAgent $localAgent, Project $project, string $commitMessage, string $approvedBy, string $triggeredBy = 'approval', ?array $noSourceEvidence = null): PublishJob
     {
+        if ($noSourceEvidence !== null) {
+            abort_unless(isset($noSourceEvidence['head_sha'], $noSourceEvidence['branch'], $noSourceEvidence['mapping_id']), 422, 'A no-source-change retry requires complete verified evidence.');
+        }
+
         $job = PublishJob::create([
             'local_agent_id' => $localAgent->id,
             'project_id' => $project->id,
@@ -86,6 +91,11 @@ class PublishJobService
             'requested_by' => $approvedBy,
             'approved_by' => $approvedBy,
             'approved_at' => now(),
+            'no_source_change' => $noSourceEvidence !== null,
+            'reviewed_head_sha' => $noSourceEvidence['head_sha'] ?? null,
+            'reviewed_branch' => $noSourceEvidence['branch'] ?? null,
+            'reviewed_mapping_id' => $noSourceEvidence['mapping_id'] ?? null,
+            'reviewed_working_tree_clean' => $noSourceEvidence !== null ? true : null,
         ]);
 
         AuditLogEntry::record(
@@ -118,9 +128,27 @@ class PublishJobService
                 ->whereIn('status', [PublishJob::STATUS_QUEUED, PublishJob::STATUS_APPROVED])
                 ->oldest('created_at')
                 ->lockForUpdate()
-                ->get();
+            ->get();
 
             foreach ($candidates as $job) {
+                if ($job->no_source_change && !$this->noSourceChangeEvidenceIsStillValid($job)) {
+                    $job->update([
+                        'status' => PublishJob::STATUS_REJECTED,
+                        'error_message' => 'Verified no-source-change mapping evidence is no longer valid.',
+                        'finished_at' => now(),
+                    ]);
+
+                    AuditLogEntry::record(
+                        actorType: AuditLogEntry::ACTOR_SYSTEM,
+                        actorIdentifier: null,
+                        action: 'publish_job.no_source_change_rejected',
+                        subjectType: PublishJob::class,
+                        subjectId: $job->id,
+                    );
+
+                    continue;
+                }
+
                 $touchesSharedRemote = $job->action !== PublishJob::ACTION_STATUS_CHECK;
                 $project = $touchesSharedRemote ? Project::query()->lockForUpdate()->find($job->project_id) : null;
 
@@ -217,7 +245,7 @@ class PublishJobService
      *     IgnoreRules before ever staging them (Phase 5.5) — reported for
      *     operator visibility only, never affects approval/publish logic
      */
-    public function reportStatusCheck(PublishJob $job, array $changedFiles, array $blockedFiles = []): PublishJob
+    public function reportStatusCheck(PublishJob $job, array $changedFiles, array $blockedFiles = [], ?string $headSha = null, ?string $branch = null, ?bool $workingTreeClean = null): PublishJob
     {
         abort_unless($job->action === PublishJob::ACTION_STATUS_CHECK, 422, 'Only a status_check job can report changed files.');
 
@@ -227,11 +255,26 @@ class PublishJobService
             return $job;
         }
 
+        $mapping = null;
+        if ($headSha !== null || $branch !== null || $workingTreeClean !== null) {
+            abort_unless($headSha !== null && preg_match('/^[0-9a-f]{40}$/', $headSha) === 1, 422, 'A status check must include a valid current HEAD SHA.');
+            abort_unless(is_string($branch) && $branch !== '', 422, 'A status check must include the current branch.');
+            abort_unless(is_bool($workingTreeClean), 422, 'A status check must state whether the working tree is clean.');
+
+            $mapping = LocalProjectMapping::query()->where('local_agent_id', $job->local_agent_id)->where('project_id', $job->project_id)->first();
+            abort_unless($mapping !== null && $mapping->effectiveBranch() === $branch, 422, 'The status-check branch does not match the active Local Agent mapping.');
+            abort_unless($workingTreeClean === ($changedFiles === [] && $blockedFiles === []), 422, 'Status-check cleanliness evidence does not match the reported files.');
+        }
+
         $job->update([
             'status' => PublishJob::STATUS_AWAITING_APPROVAL,
             'changed_files' => $changedFiles,
             'blocked_files' => $blockedFiles,
             'files_changed_count' => count($changedFiles),
+            'reviewed_head_sha' => $headSha,
+            'reviewed_branch' => $branch,
+            'reviewed_mapping_id' => $mapping?->id,
+            'reviewed_working_tree_clean' => $workingTreeClean,
             'finished_at' => now(),
         ]);
 
@@ -241,7 +284,7 @@ class PublishJobService
             action: 'publish_job.status_reported',
             subjectType: PublishJob::class,
             subjectId: $job->id,
-            metadata: ['files_changed_count' => count($changedFiles), 'blocked_files_count' => count($blockedFiles)],
+            metadata: ['files_changed_count' => count($changedFiles), 'blocked_files_count' => count($blockedFiles), 'head_sha' => $headSha, 'branch' => $branch, 'working_tree_clean' => $workingTreeClean],
         );
 
         event(new PublishJobAwaitingApproval($job->refresh()));
@@ -249,16 +292,22 @@ class PublishJobService
         return $job;
     }
 
-    public function approve(PublishJob $job, string $commitMessage, string $approvedBy): PublishJob
+    public function approve(PublishJob $job, ?string $commitMessage, string $approvedBy): PublishJob
     {
         abort_unless($job->action === PublishJob::ACTION_STATUS_CHECK, 422, 'Only a status_check job can be approved for publish.');
         abort_unless($job->status === PublishJob::STATUS_AWAITING_APPROVAL, 409, 'This publish job is not awaiting approval.');
-        abort_if($job->files_changed_count === 0, 422, 'There are no changed files to publish.');
+        $noSourceChange = $job->files_changed_count === 0;
+        if ($noSourceChange) {
+            $this->assertNoSourceChangeEvidence($job);
+        } else {
+            abort_unless(is_string($commitMessage) && $commitMessage !== '', 422, 'A commit message is required when publishing changed files.');
+        }
 
         $job->update([
             'status' => PublishJob::STATUS_APPROVED,
             'action' => PublishJob::ACTION_PUBLISH,
             'commit_message' => $commitMessage,
+            'no_source_change' => $noSourceChange,
             'approved_by' => $approvedBy,
             'approved_at' => now(),
         ]);
@@ -266,12 +315,32 @@ class PublishJobService
         AuditLogEntry::record(
             actorType: AuditLogEntry::ACTOR_USER,
             actorIdentifier: $approvedBy,
-            action: 'publish_job.approved',
+            action: $noSourceChange ? 'publish_job.no_source_change_approved' : 'publish_job.approved',
             subjectType: PublishJob::class,
             subjectId: $job->id,
         );
 
         return $job;
+    }
+
+    private function assertNoSourceChangeEvidence(PublishJob $job): void
+    {
+        abort_unless($job->blocked_files === [] && $job->reviewed_working_tree_clean === true, 422, 'A no-source-change publish requires a clean working tree.');
+        abort_unless(is_string($job->reviewed_head_sha) && preg_match('/^[0-9a-f]{40}$/', $job->reviewed_head_sha) === 1, 422, 'A no-source-change publish requires a verified current HEAD.');
+        abort_unless(is_string($job->reviewed_branch) && $job->reviewed_branch !== '' && $job->reviewed_mapping_id !== null, 422, 'A no-source-change publish requires verified mapping and branch evidence.');
+
+        abort_unless($this->noSourceChangeEvidenceIsStillValid($job), 422, 'The verified Local Agent mapping is no longer valid.');
+    }
+
+    private function noSourceChangeEvidenceIsStillValid(PublishJob $job): bool
+    {
+        if ($job->reviewed_mapping_id === null || !is_string($job->reviewed_branch)) {
+            return false;
+        }
+
+        $mapping = LocalProjectMapping::query()->whereKey($job->reviewed_mapping_id)->where('local_agent_id', $job->local_agent_id)->where('project_id', $job->project_id)->first();
+
+        return $mapping !== null && $mapping->effectiveBranch() === $job->reviewed_branch;
     }
 
     public function approveRollback(PublishJob $job, string $approvedBy): PublishJob
@@ -302,6 +371,10 @@ class PublishJobService
             $this->recordLateCallback($job, 'result');
 
             return $job;
+        }
+
+        if ($job->no_source_change) {
+            abort_unless($commitHash !== null && hash_equals((string) $job->reviewed_head_sha, $commitHash), 422, 'A no-source-change publish must report its verified reviewed HEAD exactly.');
         }
 
         $job->update([

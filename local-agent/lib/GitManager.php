@@ -143,6 +143,17 @@ final class GitManager
         return trim($result['output']);
     }
 
+    public function currentBranch(string $repositoryPath): string
+    {
+        $result = $this->run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], $repositoryPath, $this->timeoutFor('status'));
+
+        if ($result['exitCode'] !== 0 || trim($result['output']) === '') {
+            throw new \RuntimeException("git branch lookup failed in {$repositoryPath}: " . trim($result['output']));
+        }
+
+        return trim($result['output']);
+    }
+
     /**
      * @param array<int, string> $command
      * @param callable|null $onTick root-cause fix: called periodically

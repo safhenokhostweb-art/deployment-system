@@ -20,7 +20,7 @@ final class SafetyChecker
      */
     public function assertSafeToPublish(GitManager $git, string $repositoryPath, string $expectedBranch): void
     {
-        $branch = $this->currentBranch($git, $repositoryPath);
+        $branch = $git->currentBranch($repositoryPath);
 
         if ($branch !== $expectedBranch) {
             throw new \RuntimeException("Refusing to publish: current branch is '{$branch}', expected '{$expectedBranch}'.");
@@ -36,15 +36,20 @@ final class SafetyChecker
         }
     }
 
-    private function currentBranch(GitManager $git, string $repositoryPath): string
+    public function assertSafeToPublishVerifiedHead(GitManager $git, string $repositoryPath, string $expectedBranch, string $expectedHead): string
     {
-        $result = $git->run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], $repositoryPath, $git->timeoutFor('status'));
+        $this->assertSafeToPublish($git, $repositoryPath, $expectedBranch);
 
-        if ($result['exitCode'] !== 0) {
-            throw new \RuntimeException("Could not determine the current branch in {$repositoryPath}: " . trim($result['output']));
+        if ($git->changedFiles($repositoryPath) !== []) {
+            throw new \RuntimeException('Refusing no-source-change publish: the working tree is no longer clean.');
         }
 
-        return trim($result['output']);
+        $head = $git->lastCommitHash($repositoryPath);
+        if (!preg_match('/^[0-9a-f]{40}$/', $expectedHead) || !hash_equals($expectedHead, $head)) {
+            throw new \RuntimeException('Refusing no-source-change publish: current HEAD no longer matches the reviewed commit.');
+        }
+
+        return $head;
     }
 
     private function mergeInProgress(string $repositoryPath): bool

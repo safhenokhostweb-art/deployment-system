@@ -100,6 +100,9 @@ class LocalAgentJobController extends Controller
                 // AgentOperationController::next()'s project_key.
                 'project_key' => $job->project->project_key,
                 'commit_message' => $job->action === PublishJob::ACTION_PUBLISH ? $job->commit_message : null,
+                'no_source_change' => $job->action === PublishJob::ACTION_PUBLISH ? $job->no_source_change : false,
+                'expected_head_sha' => $job->action === PublishJob::ACTION_PUBLISH && $job->no_source_change ? $job->reviewed_head_sha : null,
+                'expected_branch' => $job->action === PublishJob::ACTION_PUBLISH && $job->no_source_change ? $job->reviewed_branch : null,
             ],
         ]);
     }
@@ -126,9 +129,12 @@ class LocalAgentJobController extends Controller
                 'changed_files.*' => 'string|max:1000',
                 'blocked_files' => 'nullable|array',
                 'blocked_files.*' => 'string|max:1000',
+                'head_sha' => 'required|string|regex:/^[0-9a-f]{40}$/',
+                'branch' => 'required|string|max:255',
+                'working_tree_clean' => 'required|boolean',
             ]);
 
-            $updated = $this->publishJobs->reportStatusCheck($job, $validated['changed_files'], $validated['blocked_files'] ?? []);
+            $updated = $this->publishJobs->reportStatusCheck($job, $validated['changed_files'], $validated['blocked_files'] ?? [], $validated['head_sha'], $validated['branch'], $validated['working_tree_clean']);
 
             return response()->json(['status' => $updated->status]);
         }

@@ -203,6 +203,31 @@ try {
 }
 check('assertSafeToPublish() passes silently on a clean repo on the expected branch', !$threw, $failures, $passCount);
 
+$reviewedHead = $git->lastCommitHash($repo);
+$verifiedHead = $safety->assertSafeToPublishVerifiedHead($git, $repo, 'main', $reviewedHead);
+check('no-source-change publish accepts the exact reviewed clean HEAD', $verifiedHead === $reviewedHead, $failures, $passCount);
+
+file_put_contents($repo . '/uncommitted.txt', 'dirty');
+$threw = false;
+try {
+    $safety->assertSafeToPublishVerifiedHead($git, $repo, 'main', $reviewedHead);
+} catch (\RuntimeException $e) {
+    $threw = str_contains($e->getMessage(), 'no longer clean');
+}
+check('no-source-change publish rejects a working tree that became dirty after review', $threw, $failures, $passCount);
+unlink($repo . '/uncommitted.txt');
+
+file_put_contents($repo . '/file.txt', 'changed');
+runGit(['git', 'add', '.'], $repo);
+runGit(['git', 'commit', '-q', '-m', 'advance head'], $repo);
+$threw = false;
+try {
+    $safety->assertSafeToPublishVerifiedHead($git, $repo, 'main', $reviewedHead);
+} catch (\RuntimeException $e) {
+    $threw = str_contains($e->getMessage(), 'no longer matches');
+}
+check('no-source-change publish rejects a HEAD that changed after review', $threw, $failures, $passCount);
+
 // Merge in progress (simulated via a fake MERGE_HEAD)
 file_put_contents($repo . '/.git/MERGE_HEAD', str_repeat('a', 40) . "\n");
 $threw = false;

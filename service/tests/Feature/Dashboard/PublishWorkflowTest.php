@@ -91,7 +91,25 @@ class PublishWorkflowTest extends TestCase
         $this->assertSame($user->email, $fresh->approved_by);
     }
 
-    public function test_a_publish_job_with_no_changed_files_cannot_be_approved(): void
+    public function test_a_publish_job_with_no_changed_files_can_be_explicitly_approved_when_the_agent_proved_it_is_clean_and_at_a_valid_head(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->projectWithApprovedMapping();
+        $localAgent = $project->localProjectMappings()->first()->localAgent;
+        $job = app(PublishJobService::class)->queue($localAgent, $project, PublishJob::ACTION_STATUS_CHECK, $user->email);
+        $mapping = $project->localProjectMappings()->first();
+        app(PublishJobService::class)->reportStatusCheck($job, [], [], str_repeat('a', 40), 'main', true);
+
+        $this->actingAs($user)->post(route('projects.publish.approve', [$project, $job]))->assertRedirect();
+
+        $fresh = $job->fresh();
+        $this->assertSame(PublishJob::STATUS_APPROVED, $fresh->status);
+        $this->assertTrue($fresh->no_source_change);
+        $this->assertSame(str_repeat('a', 40), $fresh->reviewed_head_sha);
+        $this->assertSame($mapping->id, $fresh->reviewed_mapping_id);
+    }
+
+    public function test_a_no_source_change_publish_fails_closed_without_verified_evidence(): void
     {
         $user = User::factory()->create();
         $project = $this->projectWithApprovedMapping();
@@ -99,10 +117,7 @@ class PublishWorkflowTest extends TestCase
         $job = app(PublishJobService::class)->queue($localAgent, $project, PublishJob::ACTION_STATUS_CHECK, $user->email);
         app(PublishJobService::class)->reportStatusCheck($job, []);
 
-        $this->actingAs($user)->post(route('projects.publish.approve', [$project, $job]), [
-            'commit_message' => 'Nothing to publish',
-        ])->assertStatus(422);
-
+        $this->actingAs($user)->post(route('projects.publish.approve', [$project, $job]))->assertStatus(422);
         $this->assertSame(PublishJob::STATUS_AWAITING_APPROVAL, $job->fresh()->status);
     }
 

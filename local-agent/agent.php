@@ -349,7 +349,13 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
             // survived — the operator should see a blocked .env the same
             // way they see an allowed file, never just silence.
             $blockedFiles = array_values(array_diff($rawFiles, $changedFiles));
-            $client->request('POST', $reportPath, ['changed_files' => $changedFiles, 'blocked_files' => $blockedFiles]);
+            $client->request('POST', $reportPath, [
+                'changed_files' => $changedFiles,
+                'blocked_files' => $blockedFiles,
+                'head_sha' => $git->lastCommitHash($repositoryPath),
+                'branch' => $git->currentBranch($repositoryPath),
+                'working_tree_clean' => $rawFiles === [],
+            ]);
             $logger->info("Job {$job['id']}: reported " . count($changedFiles) . ' changed file(s), ' . count($blockedFiles) . ' blocked file(s)');
 
             return;
@@ -357,8 +363,19 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
 
         if ($job['action'] === 'publish') {
             $logger->info("Job {$job['id']}: publishing {$projectKey} ({$repositoryPath})");
-            $safety->assertSafeToPublish($git, $repositoryPath, $branch);
-            $changedFiles = IgnoreRules::filter($git->changedFiles($repositoryPath), IgnoreRules::loadPatterns($repositoryPath));
+            $noSourceChange = ($job['no_source_change'] ?? false) === true;
+            if ($noSourceChange) {
+                $expectedHead = $job['expected_head_sha'] ?? null;
+                $expectedBranch = $job['expected_branch'] ?? null;
+                if (!is_string($expectedHead) || !is_string($expectedBranch)) {
+                    throw new \RuntimeException('Refusing no-source-change publish: verified review evidence is missing.');
+                }
+                $commitHash = $safety->assertSafeToPublishVerifiedHead($git, $repositoryPath, $expectedBranch, $expectedHead);
+                $changedFiles = [];
+            } else {
+                $safety->assertSafeToPublish($git, $repositoryPath, $branch);
+                $changedFiles = IgnoreRules::filter($git->changedFiles($repositoryPath), IgnoreRules::loadPatterns($repositoryPath));
+            }
             // Phase 5.5: only commit when there is something new to commit
             // — a retry after "commit succeeded, push failed" has nothing
             // left to add (the previous attempt already committed it), and
@@ -370,8 +387,8 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
 
             assertWithinMaxRuntime($jobStartedAt, $jobMaxRuntimeSeconds, (string) $job['id'], $logger);
 
-            $output = $pushes->push($repositoryPath, $remoteName, $branch, $onTick);
-            $commitHash = $git->lastCommitHash($repositoryPath);
+            $output = $noSourceChange ? 'No source changes: publishing verified existing commit without git commit or push.' : $pushes->push($repositoryPath, $remoteName, $branch, $onTick);
+            $commitHash ??= $git->lastCommitHash($repositoryPath);
 
             // Root-cause fix (production has no access to
             // repo.packagist.org, api.github.com, or the npm registry):

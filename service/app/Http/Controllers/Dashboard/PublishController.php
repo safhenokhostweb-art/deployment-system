@@ -45,10 +45,10 @@ class PublishController extends Controller
         abort_unless($publishJob->project_id === $project->id, 404);
 
         $validated = $request->validate([
-            'commit_message' => 'required|string|max:500',
+            'commit_message' => ($publishJob->files_changed_count === 0 ? 'nullable' : 'required') . '|string|max:500',
         ]);
 
-        $this->publishJobs->approve($publishJob, $validated['commit_message'], $request->user()->email);
+        $this->publishJobs->approve($publishJob, $validated['commit_message'] ?? null, $request->user()->email);
 
         return redirect()->route('projects.publish.show', [$project, $publishJob])
             ->with('status', 'انتشار تایید شد — کارگزار به‌زودی commit و push را انجام می‌دهد.');
@@ -118,7 +118,12 @@ class PublishController extends Controller
             $project,
             (string) $publishJob->commit_message,
             $request->user()->email,
-            'retry'
+            'retry',
+            $publishJob->no_source_change ? [
+                'head_sha' => $publishJob->reviewed_head_sha,
+                'branch' => $publishJob->reviewed_branch,
+                'mapping_id' => $publishJob->reviewed_mapping_id,
+            ] : null,
         );
 
         return redirect()->route('projects.publish.show', [$project, $newJob])

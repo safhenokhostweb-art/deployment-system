@@ -17,6 +17,13 @@
 
         @if ($publishJob->files_changed_count === 0)
             <p class="muted">{{ __('ui.publish.no_changes') }}</p>
+            <p class="muted">No source changes were found. Confirming will build and upload an artifact for the verified current commit; it will not create a commit or push.</p>
+            @can('local_agents.publish')
+            <form method="POST" action="{{ route('projects.publish.approve', [$project, $publishJob]) }}" style="margin-top:1rem;">
+                @csrf
+                <button type="submit" class="btn btn-primary">Confirm publish existing commit</button>
+            </form>
+            @endcan
         @else
             <ul>
                 @foreach ($publishJob->changed_files as $file)

@@ -3,6 +3,7 @@
 namespace Tests\Feature\Api;
 
 use App\Models\LocalAgent;
+use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use App\Models\PublishJob;
 use App\Services\Publish\PublishJobService;
@@ -25,10 +26,18 @@ class PublishJobFlowTest extends TestCase
         return $this->localAgentHeaders($method, $path, $body, $agent->public_id, LocalAgentFactory::$lastPlainToken, LocalAgentFactory::$lastPlainSecret);
     }
 
+    private function mappedProject(LocalAgent $agent): Project
+    {
+        $project = Project::factory()->create();
+        LocalProjectMapping::factory()->create(['local_agent_id' => $agent->id, 'project_id' => $project->id]);
+
+        return $project;
+    }
+
     public function test_agent_claims_a_queued_status_check_job(): void
     {
         $agent = LocalAgent::factory()->approved()->create();
-        $project = Project::factory()->create();
+        $project = $this->mappedProject($agent);
         $job = app(PublishJobService::class)->queue($agent, $project, PublishJob::ACTION_STATUS_CHECK, 'dev@example.test');
 
         $headers = $this->headersFor($agent, 'GET', '/api/local-agent/publish-jobs/next');
@@ -43,11 +52,11 @@ class PublishJobFlowTest extends TestCase
     public function test_agent_reports_changed_files_for_a_status_check_job(): void
     {
         $agent = LocalAgent::factory()->approved()->create();
-        $project = Project::factory()->create();
+        $project = $this->mappedProject($agent);
         $job = app(PublishJobService::class)->queue($agent, $project, PublishJob::ACTION_STATUS_CHECK, 'dev@example.test');
         app(PublishJobService::class)->claimNext($agent);
 
-        $body = ['changed_files' => ['app/Foo.php', 'README.md']];
+        $body = ['changed_files' => ['app/Foo.php', 'README.md'], 'head_sha' => str_repeat('a', 40), 'branch' => 'main', 'working_tree_clean' => false];
         $path = "/api/local-agent/publish-jobs/{$job->public_id}/report";
         $headers = $this->headersFor($agent, 'POST', $path, json_encode($body));
 
@@ -59,6 +68,51 @@ class PublishJobFlowTest extends TestCase
         $this->assertSame(2, $job->files_changed_count);
     }
 
+    public function test_no_source_change_publish_exposes_the_reviewed_head_to_the_agent(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create();
+        $project = $this->mappedProject($agent);
+        $service = app(PublishJobService::class);
+        $job = $service->queue($agent, $project, PublishJob::ACTION_STATUS_CHECK, 'dev@example.test');
+        $service->reportStatusCheck($job, [], [], str_repeat('c', 40), 'main', true);
+        $service->approve($job, null, 'dev@example.test');
+
+        $headers = $this->headersFor($agent, 'GET', '/api/local-agent/publish-jobs/next');
+        $this->get('/api/local-agent/publish-jobs/next', $headers)->assertOk()
+            ->assertJsonPath('job.action', PublishJob::ACTION_PUBLISH)
+            ->assertJsonPath('job.no_source_change', true)
+            ->assertJsonPath('job.expected_head_sha', str_repeat('c', 40))
+            ->assertJsonPath('job.expected_branch', 'main');
+    }
+
+    public function test_status_check_rejects_no_source_change_evidence_for_the_wrong_mapping_branch(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create();
+        $project = $this->mappedProject($agent);
+        $job = app(PublishJobService::class)->queue($agent, $project, PublishJob::ACTION_STATUS_CHECK, 'dev@example.test');
+        app(PublishJobService::class)->claimNext($agent);
+        $body = ['changed_files' => [], 'head_sha' => str_repeat('a', 40), 'branch' => 'wrong', 'working_tree_clean' => true];
+        $path = "/api/local-agent/publish-jobs/{$job->public_id}/report";
+
+        $this->postJson($path, $body, $this->headersFor($agent, 'POST', $path, json_encode($body)))->assertStatus(422);
+    }
+
+    public function test_no_source_change_result_must_equal_the_reviewed_head(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create();
+        $project = $this->mappedProject($agent);
+        $service = app(PublishJobService::class);
+        $job = $service->queue($agent, $project, PublishJob::ACTION_STATUS_CHECK, 'dev@example.test');
+        $service->reportStatusCheck($job, [], [], str_repeat('c', 40), 'main', true);
+        $service->approve($job, null, 'dev@example.test');
+        $service->claimNext($agent);
+        $body = ['status' => 'succeeded', 'commit_hash' => str_repeat('d', 40)];
+        $path = "/api/local-agent/publish-jobs/{$job->public_id}/report";
+
+        $this->postJson($path, $body, $this->headersFor($agent, 'POST', $path, json_encode($body)))->assertStatus(422);
+        $this->assertSame(PublishJob::STATUS_RUNNING, $job->fresh()->status);
+    }
+
     /**
      * Phase 5.5: the agent reports blocked_files alongside changed_files
      * (agent.php's status_check branch now sends both) — this is the
@@ -67,11 +121,11 @@ class PublishJobFlowTest extends TestCase
     public function test_agent_reports_blocked_files_alongside_changed_files(): void
     {
         $agent = LocalAgent::factory()->approved()->create();
-        $project = Project::factory()->create();
+        $project = $this->mappedProject($agent);
         $job = app(PublishJobService::class)->queue($agent, $project, PublishJob::ACTION_STATUS_CHECK, 'dev@example.test');
         app(PublishJobService::class)->claimNext($agent);
 
-        $body = ['changed_files' => ['app/Foo.php'], 'blocked_files' => ['.env', 'credentials.json']];
+        $body = ['changed_files' => ['app/Foo.php'], 'blocked_files' => ['.env', 'credentials.json'], 'head_sha' => str_repeat('a', 40), 'branch' => 'main', 'working_tree_clean' => false];
         $path = "/api/local-agent/publish-jobs/{$job->public_id}/report";
         $headers = $this->headersFor($agent, 'POST', $path, json_encode($body));
 
