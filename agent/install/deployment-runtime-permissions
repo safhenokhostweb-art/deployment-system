@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Root-owned, intentionally non-generic runtime permission normalizer.
+set -Eeuo pipefail
+
+[ "$#" -eq 1 ] || exit 64
+case "$1" in
+  deployment-system) ROOT=/var/www/deployment-system/service ;;
+  *) exit 65 ;;
+esac
+
+for path in "$ROOT/storage" "$ROOT/bootstrap/cache" "$ROOT/database" "$ROOT/database/database.sqlite"; do
+  resolved="$(realpath -e -- "$path")" || exit 66
+  case "$resolved" in "$ROOT"/*) ;; *) exit 67 ;; esac
+done
+[ -f "$ROOT/database/database.sqlite" ] || exit 68
+
+for path in "$ROOT/storage" "$ROOT/bootstrap/cache" "$ROOT/database"; do
+  find -P "$path" -type d -exec chown www-data:www-data {} + -exec chmod 0775 {} +
+  find -P "$path" -type f -exec chown www-data:www-data {} + -exec chmod 0664 {} +
+done
+
+chown www-data:www-data "$ROOT/database/database.sqlite"
+chmod 0664 "$ROOT/database/database.sqlite"

@@ -44,6 +44,7 @@ class ProjectController extends Controller
         ['name' => 'composer install', 'command' => 'composer install --no-dev --optimize-autoloader --no-interaction', 'skip_when_artifact' => true],
         ['name' => 'migrate', 'command' => '{php_binary} artisan migrate --force'],
         ['name' => 'cache clear', 'command' => '{php_binary} artisan optimize:clear && {php_binary} artisan optimize'],
+        ['name' => 'runtime permissions', 'type' => 'runtime_permissions', 'command' => ''],
         ['name' => 'asset build', 'command' => 'npm ci --include=dev && npm run build', 'skip_when_artifact' => true],
         ['name' => 'queue restart', 'command' => '{php_binary} artisan queue:restart'],
     ];
@@ -404,7 +405,7 @@ class ProjectController extends Controller
         }
 
         foreach ($pipeline as $step) {
-            if (!is_array($step) || !isset($step['name'], $step['command'])) {
+            if (!is_array($step) || !isset($step['name']) || (!isset($step['command']) && ($step['type'] ?? null) !== 'runtime_permissions')) {
                 abort(422, 'Every pipeline step needs a name and a command.');
             }
         }

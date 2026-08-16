@@ -1,0 +1,2 @@
+# Install as /etc/sudoers.d/deployment-runtime-permissions (root:root 0440).
+deployment-agent ALL=(root) NOPASSWD: /usr/local/sbin/deployment-runtime-permissions deployment-system

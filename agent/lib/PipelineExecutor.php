@@ -58,6 +58,7 @@ final class PipelineExecutor
 
         $sequence = 0;
         $failed = false;
+        $maintenanceEnabled = false;
 
         $usedArtifact = false;
         if (!empty($job['artifact'])) {
@@ -102,11 +103,19 @@ final class PipelineExecutor
             }
 
             $sequence++;
-            $command = strtr($step['command'], $replacements);
+            if (($step['type'] ?? null) === 'runtime_permissions') {
+                $command = 'sudo -n /usr/local/sbin/deployment-runtime-permissions ' . $job['project_key'];
+                $result = $this->executor->runArgv(['sudo', '-n', '/usr/local/sbin/deployment-runtime-permissions', $job['project_key']], $workingDirectory, $stepTimeout);
+            } else {
+                $command = strtr($step['command'], $replacements);
+                $result = $this->executor->run($command, $workingDirectory, $stepTimeout);
+            }
 
             $this->logger->info("Job {$job['id']} step {$sequence} ({$step['name']}): {$command}");
 
-            $result = $this->executor->run($command, $workingDirectory, $stepTimeout);
+            if (str_contains($command, 'artisan down') && $result['exitCode'] === 0) {
+                $maintenanceEnabled = true;
+            }
 
             $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
                 'sequence' => $sequence,
@@ -121,6 +130,15 @@ final class PipelineExecutor
             if ($result['exitCode'] !== 0) {
                 $failed = true;
                 $this->logger->error("Job {$job['id']} step {$sequence} ({$step['name']}) failed with exit code {$result['exitCode']}");
+                if ($maintenanceEnabled && is_file(rtrim($workingDirectory, '/') . '/artisan')) {
+                    $cleanup = $this->executor->runArgv([$projectConfig['php_binary'] ?? 'php', 'artisan', 'up'], $workingDirectory, min($stepTimeout, 60));
+                    $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+                        'sequence' => ++$sequence, 'step_name' => 'maintenance cleanup', 'command' => 'artisan up',
+                        'output' => mb_substr($cleanup['output'], -50000), 'exit_code' => $cleanup['exitCode'],
+                        'duration_ms' => $cleanup['durationMs'], 'timed_out' => $cleanup['timedOut'],
+                    ]);
+                    $this->logger->error("Job {$job['id']}: maintenance cleanup " . ($cleanup['exitCode'] === 0 ? 'succeeded' : 'failed') . ' after the original failure.');
+                }
                 break;
             }
         }
