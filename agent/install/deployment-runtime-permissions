@@ -2,8 +2,14 @@
 # Root-owned, intentionally non-generic runtime permission normalizer.
 set -Eeuo pipefail
 
-[ "$#" -eq 1 ] || exit 64
-case "$1" in
+fail() {
+  printf 'deployment-runtime-permissions: project=%s phase=%s path=%s operation=%s exit_code=%s\n' "$1" "$2" "$3" "$4" "$5" >&2
+  exit "$5"
+}
+
+project_key="${1:-missing}"
+[ "$#" -eq 1 ] || fail "$project_key" validate - 'argument count' 64
+case "$project_key" in
   deployment-system)
     ROOT=/var/www/deployment-system/service
     paths=("$ROOT/storage" "$ROOT/bootstrap/cache" "$ROOT/database")
@@ -17,34 +23,50 @@ case "$1" in
     paths=("$ROOT/storage" "$ROOT/bootstrap/cache" "$ROOT/public/storage")
     files=()
     ;;
-  *) exit 65 ;;
+  *) fail "$project_key" validate - 'invalid project key' 65 ;;
 esac
 
-for path in "${paths[@]}" "${files[@]}"; do
-  resolved="$(realpath -e -- "$path")" || exit 66
-  case "$resolved" in "$ROOT"/*) ;; *) exit 67 ;; esac
+# The find child processes use the same concise diagnostic format for
+# persistent chown/chmod failures. A vanished entry remains the one tolerated
+# race: it is absent when the child reaches it, so no failure is reported.
+export -f fail
+export project_key
+
+validate_path() {
+  local path="$1"
+  resolved="$(realpath -e -- "$path")" || fail "$project_key" validate "$path" realpath 66
+  case "$resolved" in "$ROOT"/*) ;; *) fail "$project_key" validate "$path" 'path confinement' 67 ;; esac
+}
+
+for path in "${paths[@]}"; do
+  validate_path "$path"
+done
+
+for path in "${files[@]}"; do
+  [ -f "$path" ] || fail "$project_key" validate "$path" 'required database.sqlite existence check' 68
+  validate_path "$path"
 done
 
 for path in "${paths[@]}"; do
   # Runtime files (notably SQLite WAL/SHM/journal files and session/cache
   # entries) can disappear between readdir and chown.  Ignore only that
   # legitimate race; any persistent ownership/mode failure remains fatal.
-  find -P "$path" -ignore_readdir_race -type d -exec /bin/sh -c '
+  find -P "$path" -ignore_readdir_race -type d -exec /bin/bash -c '
     for target do
-      chown www-data:www-data -- "$target" 2>/dev/null || { [ ! -e "$target" ] || exit 1; }
-      chmod 0775 -- "$target" 2>/dev/null || { [ ! -e "$target" ] || exit 1; }
+      chown www-data:www-data -- "$target" 2>/dev/null || { [ ! -e "$target" ] || fail "$project_key" normalize "$target" chown 1; }
+      chmod 0775 -- "$target" 2>/dev/null || { [ ! -e "$target" ] || fail "$project_key" normalize "$target" chmod 1; }
     done
-  ' sh {} +
-  find -P "$path" -ignore_readdir_race -type f -exec /bin/sh -c '
+  ' bash {} + || fail "$project_key" normalize "$path" 'find directory' 1
+  find -P "$path" -ignore_readdir_race -type f -exec /bin/bash -c '
     for target do
-      chown www-data:www-data -- "$target" 2>/dev/null || { [ ! -e "$target" ] || exit 1; }
-      chmod 0664 -- "$target" 2>/dev/null || { [ ! -e "$target" ] || exit 1; }
+      chown www-data:www-data -- "$target" 2>/dev/null || { [ ! -e "$target" ] || fail "$project_key" normalize "$target" chown 1; }
+      chmod 0664 -- "$target" 2>/dev/null || { [ ! -e "$target" ] || fail "$project_key" normalize "$target" chmod 1; }
     done
-  ' sh {} +
+  ' bash {} + || fail "$project_key" normalize "$path" 'find file' 1
 done
 
 for path in "${files[@]}"; do
-  [ -f "$path" ] || exit 68
-  chown www-data:www-data "$path"
-  chmod 0664 "$path"
+  [ -f "$path" ] || fail "$project_key" normalize "$path" 'required database.sqlite existence check' 68
+  chown www-data:www-data "$path" || fail "$project_key" normalize "$path" chown 1
+  chmod 0664 "$path" || fail "$project_key" normalize "$path" chmod 1
 done
