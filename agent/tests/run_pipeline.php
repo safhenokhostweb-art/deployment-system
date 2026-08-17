@@ -88,9 +88,12 @@ function buildFixtureZip(string $dir, string $name): array
 }
 
 /**
- * @return array{process: resource, port: int, logPath: string, manifestPath: string}
+ * @param array<int, string> $failJobIds           /log + /status POSTs for these job ids get HTTP 500
+ * @param array<int, string> $transportFailJobIds  the post-artifact runtime-permissions /log POST for these job
+ *                                                 ids is answered with an abruptly truncated response (Client throws)
+ * @return array{process: resource, port: int, logPath: string, manifestPath: string, serverLogPath: string}
  */
-function startFakeHub(): array
+function startFakeHub(array $failJobIds = [], array $transportFailJobIds = []): array
 {
     $port = 23000 + random_int(0, 8000);
     $logPath = tempnam(sys_get_temp_dir(), 'fake-hub-pipeline-log-');
@@ -110,7 +113,12 @@ function startFakeHub(): array
     // via FAKE_HUB_LOG and the HTTP responses themselves).
     $serverLogPath = tempnam(sys_get_temp_dir(), 'fake-hub-pipeline-server-stdio-');
     $descriptorSpec = [1 => ['file', $serverLogPath, 'w'], 2 => ['file', $serverLogPath, 'w']];
-    $env = array_merge(getenv() ?: [], ['FAKE_HUB_LOG' => $logPath, 'ARTIFACT_MANIFEST_PATH' => $manifestPath]);
+    $env = array_merge(getenv() ?: [], [
+        'FAKE_HUB_LOG' => $logPath,
+        'ARTIFACT_MANIFEST_PATH' => $manifestPath,
+        'FAKE_HUB_FAIL_JOB_IDS' => implode(',', $failJobIds),
+        'FAKE_HUB_TRANSPORT_FAIL_JOB_IDS' => implode(',', $transportFailJobIds),
+    ]);
     $process = proc_open([PHP_BINARY, '-S', "127.0.0.1:{$port}", $router], $descriptorSpec, $pipes, __DIR__, $env);
 
     if (!is_resource($process)) {
@@ -155,8 +163,28 @@ function readHubLog(string $logPath): array
     return array_map(static fn (string $line) => json_decode($line, true), $lines);
 }
 
+/**
+ * Reads the local agent log file (the Logger's daily file) and returns only
+ * the lines mentioning $jobId, so assertions can target one job's local
+ * diagnostics even though every scenario in this file shares one workspace
+ * and therefore one Logger.
+ *
+ * @return array<int, string>
+ */
+function readAgentLogLines(string $logDir, string $jobId): array
+{
+    $logFile = $logDir . '/agent-' . date('Y-m-d') . '.log';
+    $lines = array_filter(explode("\n", (string) @file_get_contents($logFile)));
+
+    return array_values(array_filter($lines, static fn (string $line): bool => str_contains($line, $jobId)));
+}
+
 $workspace = makeWorkspace();
-$hub = startFakeHub();
+// Only 'job-hub-http-fail' and 'job-hub-transport-fail' are failed by the
+// fake Hub (see the fixture's FAKE_HUB_FAIL_JOB_IDS /
+// FAKE_HUB_TRANSPORT_FAIL_JOB_IDS env contract); every other job in this
+// file is served normally by the same process.
+$hub = startFakeHub(['job-hub-http-fail'], ['job-hub-transport-fail']);
 $logger = new Logger($workspace . '/logs');
 $client = new Client(
     baseUrl: "http://127.0.0.1:{$hub['port']}",
@@ -330,6 +358,243 @@ check('failed immediate normalization: normalizer was still invoked exactly once
 file_put_contents($hub['logPath'], '');
 
 // ============================================================
+// Local failure observability (CASE 1-6).  The Hub becomes unavailable
+// (HTTP 500 / connection failure) the instant the post-artifact
+// permission-normalization failure leaves the runtime tree owned by
+// deployment-agent, which used to swallow the only copy of the helper's
+// stderr diagnostic.  These scenarios prove the LOCAL logger now carries it
+// before any Hub call, so it survives even when the Hub POSTs fail.
+// ============================================================
+
+// CASE 1 — success (reuses scenario 3's job, whose normalization succeeded):
+// a successful post-artifact normalization must leave NO local ERROR line.
+$case1Lines = readAgentLogLines($workspace . '/logs', 'job-with-ordered-normalization');
+check('CASE 1: successful post-artifact normalization writes no local ERROR line', count(array_filter($case1Lines, static fn (string $l): bool => str_contains($l, '] ERROR '))) === 0, $failures, $passCount);
+
+// CASE 2 — failure with diagnostic (reuses scenario 4's job, whose helper
+// returned exit 1 + 'normalization failed'): the local ERROR line carries
+// job id, project key, exit code, timed_out and the helper output.  The job
+// still fails exactly as before (scenario 4 already proved no application
+// pipeline step ran and the Hub status became 'failed').
+$case2ErrorLines = array_values(array_filter(readAgentLogLines($workspace . '/logs', 'job-with-failed-normalization'), static fn (string $l): bool => str_contains($l, '] ERROR ')));
+$case2ErrorLine = implode("\n", $case2ErrorLines);
+check('CASE 2: local ERROR line carries the job id', str_contains($case2ErrorLine, 'job-with-failed-normalization'), $failures, $passCount);
+check('CASE 2: local ERROR line carries the project key', str_contains($case2ErrorLine, 'project=deployment-system'), $failures, $passCount);
+check('CASE 2: local ERROR line carries the helper exit code', str_contains($case2ErrorLine, 'exit_code=1'), $failures, $passCount);
+check('CASE 2: local ERROR line carries timed_out', str_contains($case2ErrorLine, 'timed_out=false'), $failures, $passCount);
+check('CASE 2: local ERROR line carries the helper diagnostic output', str_contains($case2ErrorLine, 'output=normalization failed'), $failures, $passCount);
+check('CASE 2: exactly one local ERROR line for the failed job', count($case2ErrorLines) === 1, $failures, $passCount);
+
+// CASE 3a — Hub AgentJob log POST fails with HTTP 500 (the confirmed
+// production symptom: the Hub is alive but unhealthy, so the diagnostic is
+// never persisted centrally).  The local diagnostic must already exist, and
+// the deployment must still fail.
+$hubHttpFailDir = $workspace . '/hub-http-fail-site';
+$hubHttpFailZip = buildFixtureZip($workspace, 'hub-http-fail-artifact');
+registerManifestEntry($hub['manifestPath'], 'artifact-hub-http-fail', $hubHttpFailZip['path']);
+$hubHttpFailMarker = $workspace . '/hub-http-fail.marker';
+$hubHttpFailCalls = [];
+$hubHttpFailExecutor = new PipelineExecutor(
+    $client,
+    $executor,
+    $artifactManager,
+    $logger,
+    static function (string $projectKey, string $workingDirectory, int $timeoutSeconds) use (&$hubHttpFailCalls): array {
+        $hubHttpFailCalls[] = $projectKey;
+
+        return ['exitCode' => 1, 'output' => '[runtime-permissions] project=deployment-system phase=find_files path=/var/www/deployment-system/service/storage operation=chown exit_code=1', 'timedOut' => false, 'durationMs' => 1];
+    },
+);
+$jobHubHttpFail = [
+    'id' => 'job-hub-http-fail',
+    'action' => 'deploy',
+    'project_key' => 'deployment-system',
+    'commit_hash' => str_repeat('g', 40),
+    'branch' => 'main',
+    'artifact' => ['public_id' => 'artifact-hub-http-fail', 'checksum_sha256' => $hubHttpFailZip['checksum'], 'size_bytes' => $hubHttpFailZip['size']],
+    'pipeline' => [
+        ['name' => 'migrate', 'command' => 'node -e "require(\'fs\').writeFileSync(process.argv[1], \'ran\')" ' . escapeshellarg($hubHttpFailMarker)],
+        ['name' => 'runtime permissions', 'type' => 'runtime_permissions', 'command' => ''],
+    ],
+];
+$hubHttpFailExecutor->execute($jobHubHttpFail, ['working_directory' => $hubHttpFailDir], 30);
+
+check('CASE 3 (HTTP 500): no application pipeline step ran', !is_file($hubHttpFailMarker), $failures, $passCount);
+$hubHttpFailLogLines = array_values(array_filter(readAgentLogLines($workspace . '/logs', 'job-hub-http-fail'), static fn (string $l): bool => str_contains($l, '] ERROR ') && str_contains($l, 'runtime permission normalization failed')));
+check('CASE 3 (HTTP 500): local diagnostic still exists', count($hubHttpFailLogLines) === 1, $failures, $passCount);
+check('CASE 3 (HTTP 500): local diagnostic carries the helper output', str_contains(implode("\n", $hubHttpFailLogLines), 'operation=chown'), $failures, $passCount);
+$hubHttpFailStatuses = array_values(array_filter(array_map(static fn ($e) => str_contains($e['path'] ?? '', 'job-hub-http-fail/status') ? ($e['body']['status'] ?? null) : null, readHubLog($hub['logPath']))));
+check('CASE 3 (HTTP 500): failed status report was still attempted (Hub 500s it, as in production)', $hubHttpFailStatuses === ['running', 'failed'], $failures, $passCount);
+
+@unlink($hub['logPath']);
+file_put_contents($hub['logPath'], '');
+
+// CASE 3b — Hub connection dies during the runtime-permissions /log POST
+// (curl reports a transport error, so Client::request() throws).  The local
+// diagnostic was written before the POST, so it survives; the exception
+// still propagates and fails the job exactly as it did before this change.
+$hubTransportFailDir = $workspace . '/hub-transport-fail-site';
+$hubTransportFailZip = buildFixtureZip($workspace, 'hub-transport-fail-artifact');
+registerManifestEntry($hub['manifestPath'], 'artifact-hub-transport-fail', $hubTransportFailZip['path']);
+$hubTransportFailMarker = $workspace . '/hub-transport-fail.marker';
+$hubTransportFailCalls = [];
+$hubTransportFailExecutor = new PipelineExecutor(
+    $client,
+    $executor,
+    $artifactManager,
+    $logger,
+    static function (string $projectKey, string $workingDirectory, int $timeoutSeconds) use (&$hubTransportFailCalls): array {
+        $hubTransportFailCalls[] = $projectKey;
+
+        return ['exitCode' => 1, 'output' => '[runtime-permissions] project=deployment-system phase=validate path=/var/www/deployment-system/service/database operation=chown exit_code=1', 'timedOut' => false, 'durationMs' => 1];
+    },
+);
+$jobHubTransportFail = [
+    'id' => 'job-hub-transport-fail',
+    'action' => 'deploy',
+    'project_key' => 'deployment-system',
+    'commit_hash' => str_repeat('h', 40),
+    'branch' => 'main',
+    'artifact' => ['public_id' => 'artifact-hub-transport-fail', 'checksum_sha256' => $hubTransportFailZip['checksum'], 'size_bytes' => $hubTransportFailZip['size']],
+    'pipeline' => [
+        ['name' => 'migrate', 'command' => 'node -e "require(\'fs\').writeFileSync(process.argv[1], \'ran\')" ' . escapeshellarg($hubTransportFailMarker)],
+        ['name' => 'runtime permissions', 'type' => 'runtime_permissions', 'command' => ''],
+    ],
+];
+$hubTransportThrew = false;
+try {
+    $hubTransportFailExecutor->execute($jobHubTransportFail, ['working_directory' => $hubTransportFailDir], 30);
+} catch (\Throwable) {
+    $hubTransportThrew = true;
+}
+check('CASE 3 (transport): Hub /log POST failure still fails the job (exception propagates as before)', $hubTransportThrew, $failures, $passCount);
+check('CASE 3 (transport): no application pipeline step ran', !is_file($hubTransportFailMarker), $failures, $passCount);
+$hubTransportFailLogLines = array_values(array_filter(readAgentLogLines($workspace . '/logs', 'job-hub-transport-fail'), static fn (string $l): bool => str_contains($l, '] ERROR ') && str_contains($l, 'runtime permission normalization failed')));
+check('CASE 3 (transport): local diagnostic still exists despite the throwing Hub POST', count($hubTransportFailLogLines) === 1, $failures, $passCount);
+check('CASE 3 (transport): local diagnostic carries the helper output', str_contains(implode("\n", $hubTransportFailLogLines), 'phase=validate'), $failures, $passCount);
+
+// CASE 4 — helper fails with empty stdout/stderr: the local log must say
+// output=<empty> so "helper produced no diagnostic" is distinguishable from
+// "transport lost the diagnostic".
+$emptyDir = $workspace . '/empty-output-site';
+$emptyZip = buildFixtureZip($workspace, 'empty-output-artifact');
+registerManifestEntry($hub['manifestPath'], 'artifact-empty-output', $emptyZip['path']);
+$emptyMarker = $workspace . '/empty-output.marker';
+$emptyCalls = [];
+$emptyExecutor = new PipelineExecutor(
+    $client,
+    $executor,
+    $artifactManager,
+    $logger,
+    static function (string $projectKey, string $workingDirectory, int $timeoutSeconds) use (&$emptyCalls): array {
+        $emptyCalls[] = $projectKey;
+
+        return ['exitCode' => 2, 'output' => '', 'timedOut' => false, 'durationMs' => 1];
+    },
+);
+$jobEmptyOutput = [
+    'id' => 'job-empty-output',
+    'action' => 'deploy',
+    'project_key' => 'deployment-system',
+    'commit_hash' => str_repeat('i', 40),
+    'branch' => 'main',
+    'artifact' => ['public_id' => 'artifact-empty-output', 'checksum_sha256' => $emptyZip['checksum'], 'size_bytes' => $emptyZip['size']],
+    'pipeline' => [
+        ['name' => 'migrate', 'command' => 'node -e "require(\'fs\').writeFileSync(process.argv[1], \'ran\')" ' . escapeshellarg($emptyMarker)],
+        ['name' => 'runtime permissions', 'type' => 'runtime_permissions', 'command' => ''],
+    ],
+];
+$emptyExecutor->execute($jobEmptyOutput, ['working_directory' => $emptyDir], 30);
+$emptyErrorLines = array_values(array_filter(readAgentLogLines($workspace . '/logs', 'job-empty-output'), static fn (string $l): bool => str_contains($l, '] ERROR ')));
+check('CASE 4: empty helper output is logged explicitly as output=<empty>', count($emptyErrorLines) === 1 && str_contains(implode("\n", $emptyErrorLines), 'output=<empty>'), $failures, $passCount);
+check('CASE 4: original helper exit code is preserved', str_contains(implode("\n", $emptyErrorLines), 'exit_code=2'), $failures, $passCount);
+
+@unlink($hub['logPath']);
+file_put_contents($hub['logPath'], '');
+
+// CASE 5 — helper returns very large diagnostic output: the local journal
+// message is bounded to the 4 KiB cap (not the 50 KB the Hub truncation
+// allows), so a misbehaving/looping helper cannot flood the journal.
+$largeDir = $workspace . '/large-output-site';
+$largeZip = buildFixtureZip($workspace, 'large-output-artifact');
+registerManifestEntry($hub['manifestPath'], 'artifact-large-output', $largeZip['path']);
+$largeMarker = $workspace . '/large-output.marker';
+$largeCalls = [];
+$largeOutput = str_repeat('x', 100000);
+$largeExecutor = new PipelineExecutor(
+    $client,
+    $executor,
+    $artifactManager,
+    $logger,
+    static function (string $projectKey, string $workingDirectory, int $timeoutSeconds) use (&$largeCalls, $largeOutput): array {
+        $largeCalls[] = $projectKey;
+
+        return ['exitCode' => 1, 'output' => $largeOutput, 'timedOut' => false, 'durationMs' => 1];
+    },
+);
+$jobLargeOutput = [
+    'id' => 'job-large-output',
+    'action' => 'deploy',
+    'project_key' => 'deployment-system',
+    'commit_hash' => str_repeat('j', 40),
+    'branch' => 'main',
+    'artifact' => ['public_id' => 'artifact-large-output', 'checksum_sha256' => $largeZip['checksum'], 'size_bytes' => $largeZip['size']],
+    'pipeline' => [
+        ['name' => 'migrate', 'command' => 'node -e "require(\'fs\').writeFileSync(process.argv[1], \'ran\')" ' . escapeshellarg($largeMarker)],
+        ['name' => 'runtime permissions', 'type' => 'runtime_permissions', 'command' => ''],
+    ],
+];
+$largeExecutor->execute($jobLargeOutput, ['working_directory' => $largeDir], 30);
+$largeErrorLines = array_values(array_filter(readAgentLogLines($workspace . '/logs', 'job-large-output'), static fn (string $l): bool => str_contains($l, '] ERROR ')));
+$largeErrorLine = implode("\n", $largeErrorLines);
+check('CASE 5: large helper output is bounded with an explicit truncation marker', count($largeErrorLines) === 1 && str_contains($largeErrorLine, '...[truncated]'), $failures, $passCount);
+check('CASE 5: bounded journal line stays far below the raw 100 KB helper output', mb_strlen($largeErrorLine) < 5000, $failures, $passCount);
+
+// CASE 6 — helper diagnostic on stderr.  Executor already merges child
+// stdout+stderr into result['output'] (proved directly below), and the real
+// helper writes every diagnostic to stderr (printf ... >&2); together these
+// prove stderr reaches the local failure diagnostic without any executor
+// redesign.
+$stderrProbe = $executor->runArgv(
+    [PHP_BINARY, '-r', 'fwrite(STDOUT, "stdout-probe"); fwrite(STDERR, "stderr-probe");'],
+    sys_get_temp_dir(),
+    10,
+);
+check('CASE 6: Executor merges child stderr into result["output"]', str_contains($stderrProbe['output'], 'stdout-probe') && str_contains($stderrProbe['output'], 'stderr-probe'), $failures, $passCount);
+
+$stderrDir = $workspace . '/stderr-fail-site';
+$stderrZip = buildFixtureZip($workspace, 'stderr-fail-artifact');
+registerManifestEntry($hub['manifestPath'], 'artifact-stderr-fail', $stderrZip['path']);
+$stderrMarker = $workspace . '/stderr-fail.marker';
+$stderrCalls = [];
+$stderrExecutor = new PipelineExecutor(
+    $client,
+    $executor,
+    $artifactManager,
+    $logger,
+    static function (string $projectKey, string $workingDirectory, int $timeoutSeconds) use (&$stderrCalls): array {
+        $stderrCalls[] = $projectKey;
+
+        return ['exitCode' => 1, 'output' => '[runtime-permissions] project=deployment-system phase=find_files path=/var/www/deployment-system/service/database operation=chmod exit_code=1', 'timedOut' => false, 'durationMs' => 1];
+    },
+);
+$jobStderrFail = [
+    'id' => 'job-stderr-fail',
+    'action' => 'deploy',
+    'project_key' => 'deployment-system',
+    'commit_hash' => str_repeat('k', 40),
+    'branch' => 'main',
+    'artifact' => ['public_id' => 'artifact-stderr-fail', 'checksum_sha256' => $stderrZip['checksum'], 'size_bytes' => $stderrZip['size']],
+    'pipeline' => [
+        ['name' => 'migrate', 'command' => 'node -e "require(\'fs\').writeFileSync(process.argv[1], \'ran\')" ' . escapeshellarg($stderrMarker)],
+        ['name' => 'runtime permissions', 'type' => 'runtime_permissions', 'command' => ''],
+    ],
+];
+$stderrExecutor->execute($jobStderrFail, ['working_directory' => $stderrDir], 30);
+$stderrErrorLines = array_values(array_filter(readAgentLogLines($workspace . '/logs', 'job-stderr-fail'), static fn (string $l): bool => str_contains($l, '] ERROR ')));
+check('CASE 6: stderr diagnostic reaches the local failure log', count($stderrErrorLines) === 1 && str_contains(implode("\n", $stderrErrorLines), 'phase=find_files') && str_contains(implode("\n", $stderrErrorLines), 'operation=chmod'), $failures, $passCount);
+
+// ============================================================
 // Scenario 5: artifact present but activation FAILS (checksum
 // mismatch) — no pipeline step must run at all, not even a non-skip one.
 // ============================================================
@@ -412,6 +677,12 @@ check('runtime_permissions uses only its fixed helper argv', str_contains($pipel
 check('immediate runtime_permissions keeps the fixed helper argv', str_contains($pipelineSource, "return \$this->executor->runArgv(['sudo', '-n', '/usr/local/sbin/deployment-runtime-permissions', \$projectKey]"), $failures, $passCount);
 check('service_reload uses only its fixed helper argv', str_contains($pipelineSource, "['sudo', '-n', '/usr/local/sbin/deployment-service-reload', \$job['project_key']]"), $failures, $passCount);
 check('typed service reload does not expose direct systemctl', !str_contains($pipelineSource, "['systemctl'"), $failures, $passCount);
+// The local failure diagnostic is written before the Hub AgentJob log POST
+// for the immediate runtime-permissions step, so a failing Hub request can
+// never erase it (it is also written before any throw the POST could raise).
+$localDiagnosticPos = strpos($pipelineSource, 'formatRuntimePermissionsFailureOutput(');
+$runtimePermsHubLogPos = strpos($pipelineSource, "'runtime permissions (post-artifact)'");
+check('local runtime-permissions diagnostic precedes the Hub AgentJob log POST', $localDiagnosticPos !== false && $runtimePermsHubLogPos !== false && $localDiagnosticPos < $runtimePermsHubLogPos, $failures, $passCount);
 
 stopFakeHub($hub);
 rrmdir($workspace);

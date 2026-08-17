@@ -53,5 +53,39 @@ if ($logPath !== false && $logPath !== '') {
     file_put_contents($logPath, json_encode($entry) . "\n", FILE_APPEND | LOCK_EX);
 }
 
+// Test-only failure injection for tests/run_pipeline.php's CASE 3 (Hub
+// log/status POST failure during the post-artifact permission-normalization
+// window), mirroring the confirmed production symptom exactly:
+//   FAKE_HUB_FAIL_JOB_IDS — every /log and /status POST for those job ids
+//     is answered with HTTP 500 (the Hub is alive but unhealthy, so the
+//     diagnostic is never persisted centrally).
+//   FAKE_HUB_TRANSPORT_FAIL_JOB_IDS — the post-artifact runtime-permissions
+//     /log POST for those job ids is answered with a Content-Length far
+//     larger than the body actually sent, so curl reports a transport error
+//     and Client::request() throws (the "Hub connection died" variant).
+$failJobIds = array_values(array_filter(array_map('trim', explode(',', (string) getenv('FAKE_HUB_FAIL_JOB_IDS')))));
+$transportFailJobIds = array_values(array_filter(array_map('trim', explode(',', (string) getenv('FAKE_HUB_TRANSPORT_FAIL_JOB_IDS')))));
+
+if (preg_match('#^/api/agent/jobs/([^/]+)/(log|status)$#', $path, $m)) {
+    if (in_array($m[1], $failJobIds, true)) {
+        http_response_code(500);
+        header('Content-Type: application/json');
+        echo json_encode(['message' => 'server error']);
+
+        return;
+    }
+
+    if ($m[2] === 'log'
+        && in_array($m[1], $transportFailJobIds, true)
+        && ($decoded['step_name'] ?? null) === 'runtime permissions (post-artifact)'
+    ) {
+        header('Content-Type: application/json');
+        header('Content-Length: 1000000');
+        echo json_encode(['status' => 'ok']);
+
+        return;
+    }
+}
+
 header('Content-Type: application/json');
 echo json_encode(['status' => 'ok']);

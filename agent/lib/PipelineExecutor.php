@@ -28,6 +28,9 @@ namespace DeploymentAgent;
  */
 final class PipelineExecutor
 {
+    /** Max bytes of helper output written to the local journal on failure. */
+    private const RUNTIME_PERMISSIONS_LOCAL_OUTPUT_MAX_BYTES = 4096;
+
     public function __construct(
         private readonly Client $client,
         private readonly Executor $executor,
@@ -109,6 +112,26 @@ final class PipelineExecutor
                 $command = 'sudo -n /usr/local/sbin/deployment-runtime-permissions ' . $job['project_key'];
                 $result = $this->runRuntimePermissions($job['project_key'], $workingDirectory, $stepTimeout);
 
+                // Local failure diagnostic FIRST, before any Hub call.  The
+                // Hub API is known to become unavailable (HTTP 500, or even
+                // an outright connection failure) the instant this failure
+                // leaves the runtime tree owned by deployment-agent — the
+                // AgentJob log POST below is the only other carrier of the
+                // helper's stderr diagnostic, and it is exactly the channel
+                // that breaks in that window.  Writing locally first means a
+                // Hub failure can never erase the copy of the diagnostic that
+                // survives on this server.
+                if ($result['exitCode'] !== 0) {
+                    $this->logger->error(
+                        'Job ' . $job['id']
+                        . ': Artifact activated, but immediate runtime permission normalization failed. No application pipeline steps were run. '
+                        . 'project=' . $job['project_key']
+                        . ' exit_code=' . $result['exitCode']
+                        . ' timed_out=' . ($result['timedOut'] ? 'true' : 'false')
+                        . ' ' . self::formatRuntimePermissionsFailureOutput($result['output'])
+                    );
+                }
+
                 $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
                     'sequence' => $sequence,
                     'step_name' => 'runtime permissions (post-artifact)',
@@ -121,7 +144,6 @@ final class PipelineExecutor
 
                 if ($result['exitCode'] !== 0) {
                     $message = 'Artifact activated, but immediate runtime permission normalization failed. No application pipeline steps were run.';
-                    $this->logger->error("Job {$job['id']}: {$message} Exit code {$result['exitCode']}.");
                     $this->client->request('POST', "/api/agent/jobs/{$job['id']}/status", [
                         'status' => 'failed',
                         'message' => $message,
@@ -223,5 +245,26 @@ final class PipelineExecutor
         // This is deliberately a literal argv call to the root-owned helper.
         // No project-provided pipeline field can change its command or args.
         return $this->executor->runArgv(['sudo', '-n', '/usr/local/sbin/deployment-runtime-permissions', $projectKey], $workingDirectory, $stepTimeout);
+    }
+
+    /**
+     * Bounds the runtime-permissions helper's output for one local journal
+     * line. The helper's diagnostics are short by construction, but a
+     * misbehaving/looping helper must not be able to flood the journal. An
+     * empty result is explicitly marked so "helper produced no diagnostic"
+     * is distinguishable from "the diagnostic transport was lost".
+     */
+    private static function formatRuntimePermissionsFailureOutput(string $output): string
+    {
+        $output = trim($output);
+
+        if ($output === '') {
+            return 'output=<empty>';
+        }
+
+        // mb_strcut() is byte-counted and never splits a multi-byte sequence.
+        $bounded = mb_strcut($output, 0, self::RUNTIME_PERMISSIONS_LOCAL_OUTPUT_MAX_BYTES);
+
+        return 'output=' . $bounded . ($bounded === $output ? '' : '...[truncated]');
     }
 }
