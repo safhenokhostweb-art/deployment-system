@@ -26,8 +26,21 @@ for path in "${paths[@]}" "${files[@]}"; do
 done
 
 for path in "${paths[@]}"; do
-  find -P "$path" -type d -exec chown www-data:www-data {} + -exec chmod 0775 {} +
-  find -P "$path" -type f -exec chown www-data:www-data {} + -exec chmod 0664 {} +
+  # Runtime files (notably SQLite WAL/SHM/journal files and session/cache
+  # entries) can disappear between readdir and chown.  Ignore only that
+  # legitimate race; any persistent ownership/mode failure remains fatal.
+  find -P "$path" -ignore_readdir_race -type d -exec /bin/sh -c '
+    for target do
+      chown www-data:www-data -- "$target" 2>/dev/null || { [ ! -e "$target" ] || exit 1; }
+      chmod 0775 -- "$target" 2>/dev/null || { [ ! -e "$target" ] || exit 1; }
+    done
+  ' sh {} +
+  find -P "$path" -ignore_readdir_race -type f -exec /bin/sh -c '
+    for target do
+      chown www-data:www-data -- "$target" 2>/dev/null || { [ ! -e "$target" ] || exit 1; }
+      chmod 0664 -- "$target" 2>/dev/null || { [ ! -e "$target" ] || exit 1; }
+    done
+  ' sh {} +
 done
 
 for path in "${files[@]}"; do

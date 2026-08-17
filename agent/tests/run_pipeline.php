@@ -247,7 +247,90 @@ if (count($artifactLogEntries) >= 1) {
 file_put_contents($hub['logPath'], '');
 
 // ============================================================
-// Scenario 3: artifact present but activation FAILS (checksum
+// Scenario 3: an artifact with a runtime_permissions typed step executes
+// the fixed normalizer immediately after activation, before any application
+// command, and skips that later typed step instead of running it twice.
+// ============================================================
+$normalizationMarker = $workspace . '/normalization.marker';
+$applicationMarker = $workspace . '/application-after-normalization.marker';
+$normalizationCalls = [];
+$normalizationShouldFail = false;
+$normalizationPipelineExecutor = new PipelineExecutor(
+    $client,
+    $executor,
+    $artifactManager,
+    $logger,
+    static function (string $projectKey, string $workingDirectory, int $timeoutSeconds) use (&$normalizationCalls, &$normalizationShouldFail, $normalizationMarker): array {
+        $normalizationCalls[] = [$projectKey, $workingDirectory, $timeoutSeconds];
+        file_put_contents($normalizationMarker, 'normalized');
+
+        return ['exitCode' => $normalizationShouldFail ? 1 : 0, 'output' => $normalizationShouldFail ? 'normalization failed' : 'normalized', 'timedOut' => false, 'durationMs' => 1];
+    },
+);
+
+$orderedArtifactSiteDir = $workspace . '/ordered-artifact-site';
+$orderedFixtureZip = buildFixtureZip($workspace, 'ordered-artifact');
+registerManifestEntry($hub['manifestPath'], 'artifact-ordered', $orderedFixtureZip['path']);
+$jobWithOrderedNormalization = [
+    'id' => 'job-with-ordered-normalization',
+    'action' => 'deploy',
+    'project_key' => 'deployment-system',
+    'commit_hash' => str_repeat('e', 40),
+    'branch' => 'main',
+    'artifact' => ['public_id' => 'artifact-ordered', 'checksum_sha256' => $orderedFixtureZip['checksum'], 'size_bytes' => $orderedFixtureZip['size']],
+    'pipeline' => [
+        ['name' => 'migrate', 'command' => 'node -e "const fs=require(\'fs\'); if(!fs.existsSync(process.argv[1])) process.exit(19); fs.writeFileSync(process.argv[2], \'ran\')" ' . escapeshellarg($normalizationMarker) . ' ' . escapeshellarg($applicationMarker)],
+        ['name' => 'runtime permissions', 'type' => 'runtime_permissions', 'command' => ''],
+    ],
+];
+$normalizationPipelineExecutor->execute($jobWithOrderedNormalization, ['working_directory' => $orderedArtifactSiteDir], 30);
+
+check('artifact runtime permissions: application command ran only after immediate normalization', is_file($applicationMarker), $failures, $passCount);
+check('artifact runtime permissions: normalizer was invoked exactly once', count($normalizationCalls) === 1, $failures, $passCount);
+check('artifact runtime permissions: normalizer received the project key before pipeline execution', ($normalizationCalls[0][0] ?? null) === 'deployment-system', $failures, $passCount);
+$orderedLogEntries = array_values(array_filter(readHubLog($hub['logPath']), static fn ($e) => $e['path'] === '/api/agent/jobs/job-with-ordered-normalization/log'));
+check('artifact runtime permissions: Hub logs activation, immediate normalization, then the application command', array_map(static fn ($e) => $e['body']['step_name'] ?? null, $orderedLogEntries) === ['deploy artifact', 'runtime permissions (post-artifact)', 'migrate'], $failures, $passCount);
+
+@unlink($hub['logPath']);
+file_put_contents($hub['logPath'], '');
+
+// ============================================================
+// Scenario 4: immediate normalization failure stops the deployment after
+// activation; no application pipeline step is allowed to run.
+// ============================================================
+@unlink($normalizationMarker);
+$failedNormalizationMarker = $workspace . '/application-after-failed-normalization.marker';
+$normalizationShouldFail = true;
+$normalizationCalls = [];
+$normalizationFailureSiteDir = $workspace . '/normalization-failure-site';
+$normalizationFailureFixtureZip = buildFixtureZip($workspace, 'normalization-failure-artifact');
+registerManifestEntry($hub['manifestPath'], 'artifact-normalization-failure', $normalizationFailureFixtureZip['path']);
+$jobWithFailedNormalization = [
+    'id' => 'job-with-failed-normalization',
+    'action' => 'deploy',
+    'project_key' => 'deployment-system',
+    'commit_hash' => str_repeat('f', 40),
+    'branch' => 'main',
+    'artifact' => ['public_id' => 'artifact-normalization-failure', 'checksum_sha256' => $normalizationFailureFixtureZip['checksum'], 'size_bytes' => $normalizationFailureFixtureZip['size']],
+    'pipeline' => [
+        ['name' => 'migrate', 'command' => 'node -e "require(\'fs\').writeFileSync(process.argv[1], \'ran\')" ' . escapeshellarg($failedNormalizationMarker)],
+        ['name' => 'runtime permissions', 'type' => 'runtime_permissions', 'command' => ''],
+    ],
+];
+$normalizationPipelineExecutor->execute($jobWithFailedNormalization, ['working_directory' => $normalizationFailureSiteDir], 30);
+
+check('failed immediate normalization: no application command ran', !is_file($failedNormalizationMarker), $failures, $passCount);
+$normalizationFailureStatuses = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-with-failed-normalization/status' ? ($e['body']['status'] ?? null) : null, readHubLog($hub['logPath']))));
+check('failed immediate normalization: reports running then failed', $normalizationFailureStatuses === ['running', 'failed'], $failures, $passCount);
+$normalizationFailureLogs = array_values(array_filter(readHubLog($hub['logPath']), static fn ($e) => $e['path'] === '/api/agent/jobs/job-with-failed-normalization/log'));
+check('failed immediate normalization: logs activation and failed normalization only', array_map(static fn ($e) => $e['body']['step_name'] ?? null, $normalizationFailureLogs) === ['deploy artifact', 'runtime permissions (post-artifact)'], $failures, $passCount);
+check('failed immediate normalization: normalizer was still invoked exactly once', count($normalizationCalls) === 1, $failures, $passCount);
+
+@unlink($hub['logPath']);
+file_put_contents($hub['logPath'], '');
+
+// ============================================================
+// Scenario 5: artifact present but activation FAILS (checksum
 // mismatch) — no pipeline step must run at all, not even a non-skip one.
 // ============================================================
 $failedSiteDir = $workspace . '/failed-site';
@@ -295,7 +378,7 @@ check('failed activation: exactly one log entry (the failed artifact deploy step
 file_put_contents($hub['logPath'], '');
 
 // ============================================================
-// Scenario 4: legacy pipeline, a step fails mid-way — subsequent steps
+// Scenario 6: legacy pipeline, a step fails mid-way — subsequent steps
 // never run (pre-existing behavior, reverified after the extraction).
 // ============================================================
 $failStopDir = $workspace . '/fail-stop-site';
@@ -326,6 +409,7 @@ check('a failed step: final status is failed', end($failStopStatuses) === 'faile
 // sudo, while production must never substitute a shell command here.
 $pipelineSource = (string) file_get_contents(__DIR__ . '/../lib/PipelineExecutor.php');
 check('runtime_permissions uses only its fixed helper argv', str_contains($pipelineSource, "['sudo', '-n', '/usr/local/sbin/deployment-runtime-permissions', \$job['project_key']]"), $failures, $passCount);
+check('immediate runtime_permissions keeps the fixed helper argv', str_contains($pipelineSource, "return \$this->executor->runArgv(['sudo', '-n', '/usr/local/sbin/deployment-runtime-permissions', \$projectKey]"), $failures, $passCount);
 check('service_reload uses only its fixed helper argv', str_contains($pipelineSource, "['sudo', '-n', '/usr/local/sbin/deployment-service-reload', \$job['project_key']]"), $failures, $passCount);
 check('typed service reload does not expose direct systemctl', !str_contains($pipelineSource, "['systemctl'"), $failures, $passCount);
 

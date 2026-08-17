@@ -40,6 +40,10 @@ check('saas-platform runtime permissions include bootstrap/cache only as an appr
 check('saas-platform runtime permissions include the real public/storage directory only as an approved path', str_contains($runtime, '"$ROOT/public/storage"'), $failures, $passCount);
 check('runtime helper resolves and confines every approved path below its root', str_contains($runtime, 'realpath -e -- "$path"') && str_contains($runtime, 'case "$resolved" in "$ROOT"/*)'), $failures, $passCount);
 check('runtime helper never recursively operates on the whole application root', !str_contains($runtime, 'find -P "$ROOT" '), $failures, $passCount);
+check('deployment-system helper normalizes the SQLite directory and primary database file', str_contains($runtime, '"$ROOT/database"') && str_contains($runtime, '"$ROOT/database/database.sqlite"'), $failures, $passCount);
+check('runtime helper normalizes runtime directories to www-data writable modes', str_contains($runtime, 'chmod 0775 -- "$target"'), $failures, $passCount);
+check('runtime helper normalizes SQLite and WAL/SHM/journal files to www-data writable modes', str_contains($runtime, 'chmod 0664 -- "$target"') && str_contains($runtime, '-type f'), $failures, $passCount);
+check('runtime helper tolerates only disappearing runtime entries during traversal', str_contains($runtime, '-ignore_readdir_race') && str_contains($runtime, '[ ! -e "$target" ] || exit 1'), $failures, $passCount);
 check('runtime sudoers allows only the two literal approved arguments', str_contains($runtimeSudoers, 'deployment-runtime-permissions deployment-system') && str_contains($runtimeSudoers, 'deployment-runtime-permissions saas-platform'), $failures, $passCount);
 
 check('deployment-system remains an explicit service-reload project key', str_contains($service, 'deployment-system)'), $failures, $passCount);

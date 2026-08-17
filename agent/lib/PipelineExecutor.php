@@ -33,6 +33,8 @@ final class PipelineExecutor
         private readonly Executor $executor,
         private readonly ArtifactManager $artifactManager,
         private readonly Logger $logger,
+        /** @var (\Closure(string, string, int): array{exitCode: int, output: string, timedOut: bool, durationMs: int})|null Test seam; production always uses the fixed helper argv below. */
+        private readonly ?\Closure $runtimePermissionsRunner = null,
     ) {
     }
 
@@ -61,6 +63,7 @@ final class PipelineExecutor
         $maintenanceEnabled = false;
 
         $usedArtifact = false;
+        $runtimePermissionsNormalized = false;
         if (!empty($job['artifact'])) {
             $sequence++;
             $artifactResult = $this->artifactManager->deploy(
@@ -93,11 +96,54 @@ final class PipelineExecutor
 
             $usedArtifact = true;
             $this->logger->info("Job {$job['id']}: artifact activated successfully.");
+
+            // Preserved runtime paths are copied by this unprivileged agent
+            // into the staging release before its atomic activation.  Run the
+            // project's fixed, sudoers-constrained normalizer immediately
+            // after that activation, before *any* application pipeline
+            // command (migrate, Artisan, cache, etc.) can touch the new tree.
+            // The typed step remains the opt-in contract: projects without it
+            // keep their artifact behavior unchanged.
+            if (self::hasRuntimePermissionsStep($job['pipeline'] ?? [])) {
+                $sequence++;
+                $command = 'sudo -n /usr/local/sbin/deployment-runtime-permissions ' . $job['project_key'];
+                $result = $this->runRuntimePermissions($job['project_key'], $workingDirectory, $stepTimeout);
+
+                $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+                    'sequence' => $sequence,
+                    'step_name' => 'runtime permissions (post-artifact)',
+                    'command' => $command,
+                    'output' => mb_substr($result['output'], -50000),
+                    'exit_code' => $result['exitCode'],
+                    'duration_ms' => $result['durationMs'],
+                    'timed_out' => $result['timedOut'],
+                ]);
+
+                if ($result['exitCode'] !== 0) {
+                    $message = 'Artifact activated, but immediate runtime permission normalization failed. No application pipeline steps were run.';
+                    $this->logger->error("Job {$job['id']}: {$message} Exit code {$result['exitCode']}.");
+                    $this->client->request('POST', "/api/agent/jobs/{$job['id']}/status", [
+                        'status' => 'failed',
+                        'message' => $message,
+                    ]);
+
+                    return;
+                }
+
+                $runtimePermissionsNormalized = true;
+                $this->logger->info("Job {$job['id']}: runtime permissions normalized immediately after artifact activation.");
+            }
         }
 
         foreach ($job['pipeline'] as $step) {
             if ($usedArtifact && ($step['skip_when_artifact'] ?? false)) {
                 $this->logger->info("Job {$job['id']}: skipping step '{$step['name']}' — its work was already done by the artifact deploy above.");
+
+                continue;
+            }
+
+            if ($runtimePermissionsNormalized && ($step['type'] ?? null) === 'runtime_permissions') {
+                $this->logger->info("Job {$job['id']}: skipping step '{$step['name']}' — runtime permissions were already normalized immediately after artifact activation.");
 
                 continue;
             }
@@ -153,5 +199,29 @@ final class PipelineExecutor
         ]);
 
         $this->logger->info("Job {$job['id']} finished: " . ($failed ? 'failed' : 'succeeded'));
+    }
+
+    /** @param array<int, mixed> $pipeline */
+    private static function hasRuntimePermissionsStep(array $pipeline): bool
+    {
+        foreach ($pipeline as $step) {
+            if (is_array($step) && ($step['type'] ?? null) === 'runtime_permissions') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** @return array{exitCode: int, output: string, timedOut: bool, durationMs: int} */
+    private function runRuntimePermissions(string $projectKey, string $workingDirectory, int $stepTimeout): array
+    {
+        if ($this->runtimePermissionsRunner !== null) {
+            return ($this->runtimePermissionsRunner)($projectKey, $workingDirectory, $stepTimeout);
+        }
+
+        // This is deliberately a literal argv call to the root-owned helper.
+        // No project-provided pipeline field can change its command or args.
+        return $this->executor->runArgv(['sudo', '-n', '/usr/local/sbin/deployment-runtime-permissions', $projectKey], $workingDirectory, $stepTimeout);
     }
 }
