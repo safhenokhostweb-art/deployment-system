@@ -98,6 +98,12 @@ class DeploymentDispatcher
     {
         abort_unless($deployment->status === Deployment::STATUS_PENDING_APPROVAL, 409, 'Only pending_approval deployments can be approved.');
 
+        // A Local Agent can finish uploading an artifact while this
+        // deployment is awaiting human approval. Resolve it at the final
+        // pre-queue boundary so the queued job has one deterministic
+        // artifact_id before either claim path can make it executable.
+        $this->attachArtifactIfAvailable($deployment, $deployment->project);
+
         $deployment->update([
             'status' => Deployment::STATUS_QUEUED,
             'approved_by' => $approvedBy,
@@ -161,7 +167,7 @@ class DeploymentDispatcher
 
     /**
      * Root-cause fix (customer-site direct-GitHub-dependency removal):
-     * called right after every Deployment::create() above. A Project
+     * called at each pre-queue boundary in this dispatcher. A Project
      * whose Local Agent never uploaded a matching artifact for this
      * exact commit (every Project not using the Local Agent artifact-
      * publish flow, or one where the upload simply hasn't landed yet)
@@ -169,9 +175,13 @@ class DeploymentDispatcher
      * omits `artifact` from the job payload and the agent runs the
      * exact legacy git-based pipeline, unchanged.
      */
-    private function attachArtifactIfAvailable(Deployment $deployment, Project $project, string $commitHash): void
+    private function attachArtifactIfAvailable(Deployment $deployment, Project $project): void
     {
-        $artifact = $this->artifacts->findMatching($project, $commitHash);
+        if ($deployment->action !== Deployment::ACTION_DEPLOY || $deployment->artifact_id !== null) {
+            return;
+        }
+
+        $artifact = $this->artifacts->findMatching($project, $deployment->commit_hash);
 
         if ($artifact !== null) {
             $deployment->update(['artifact_id' => $artifact->id]);
@@ -208,7 +218,7 @@ class DeploymentDispatcher
                 'approved_at' => $project->auto_deploy ? now() : null,
             ]);
 
-            $this->attachArtifactIfAvailable($deployment, $project, $commitHash);
+            $this->attachArtifactIfAvailable($deployment, $project);
 
             AuditLogEntry::record(
                 actorType: AuditLogEntry::ACTOR_GITHUB,
@@ -247,7 +257,7 @@ class DeploymentDispatcher
                 'queued_at' => now(),
             ]);
 
-            $this->attachArtifactIfAvailable($deployment, $project, $commitHash);
+            $this->attachArtifactIfAvailable($deployment, $project);
 
             AuditLogEntry::record(
                 actorType: AuditLogEntry::ACTOR_USER,
@@ -317,7 +327,7 @@ class DeploymentDispatcher
                 'approved_at' => $autoApprove ? now() : null,
             ]);
 
-            $this->attachArtifactIfAvailable($deployment, $project, $commitHash);
+            $this->attachArtifactIfAvailable($deployment, $project);
 
             if ($autoApprove) {
                 $this->createTasksForDeployment($deployment, $targets);
