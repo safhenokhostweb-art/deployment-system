@@ -21,3 +21,6 @@ config.php
 !config.example.php
 *.pem
 *.key
+
+service.backup-*/
+service.failed-*/
