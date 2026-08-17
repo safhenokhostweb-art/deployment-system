@@ -99,19 +99,32 @@ class Server extends Model
     }
 
     /**
-     * A server is "online" if it has made any authenticated call (poll,
-     * heartbeat, log, or status update — all update last_seen_at) within
-     * the configured threshold. Computed, not stored, so it's always
-     * accurate and never needs a scheduled write to stay correct.
+     * A server is considered online when either:
+     *
+     * 1. At least one approved Agent assigned to this server has reported
+     *    within the configured offline threshold; or
+     * 2. The legacy Server heartbeat itself is still within that threshold.
+     *
+     * Agent heartbeat is the primary source for the current architecture.
+     * Server.last_seen_at remains as a backward-compatible fallback for
+     * legacy server-authenticated installations.
      */
     public function isOnline(): bool
     {
-        if ($this->last_seen_at === null) {
-            return false;
+        $thresholdSeconds = (int) config('deployment.server_offline_threshold_seconds');
+        $cutoff = now()->subSeconds($thresholdSeconds);
+
+        $hasOnlineApprovedAgent = $this->agents()
+            ->where('status', Agent::STATUS_APPROVED)
+            ->whereNotNull('last_seen_at')
+            ->where('last_seen_at', '>', $cutoff)
+            ->exists();
+
+        if ($hasOnlineApprovedAgent) {
+            return true;
         }
 
-        $thresholdSeconds = config('deployment.server_offline_threshold_seconds');
-
-        return $this->last_seen_at->greaterThan(now()->subSeconds($thresholdSeconds));
+        return $this->last_seen_at !== null
+            && $this->last_seen_at->greaterThan($cutoff);
     }
 }
