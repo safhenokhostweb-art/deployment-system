@@ -37,11 +37,12 @@ class RecoverStalePublishJobs extends Command
         $prefix = $dryRun ? '[dry-run] Would recover' : 'Recovered';
 
         $this->info(sprintf(
-            '%s %d stale publish job(s) checked: %d timed out, %d abandoned, %d deployment(s) finalized, %d lock(s) released.',
+            '%s %d stale publish job(s) checked: %d timed out, %d abandoned, %d review(s) expired, %d deployment(s) finalized, %d lock(s) released.',
             $prefix,
             $result['checked'],
             $result['timed_out'],
             $result['abandoned'],
+            $result['reviews_expired'],
             $result['deployments_finalized'],
             $result['locks_released'],
         ));

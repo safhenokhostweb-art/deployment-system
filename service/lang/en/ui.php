@@ -370,6 +370,8 @@ return [
         'lease_expired_awaiting_recovery' => 'This job\'s lease has expired but the recovery sweep has not run yet — it will be finalized within a minute.',
         'lease_expired_at' => 'Lease expired: :time',
         'abandoned_explanation' => 'The Hub never heard back from the claiming agent before this job\'s lease expired — it likely crashed, was killed, or lost connectivity mid-command.',
+        'review_stale_message' => 'Review evidence is no longer current. Start a new change review.',
+        'review_stale_start_new_button' => 'Start a new change review',
     ],
 
     'publish_history' => [

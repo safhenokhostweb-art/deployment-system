@@ -12,12 +12,12 @@
 
 <x-card>
     @if ($publishJob->action === 'status_check' && $publishJob->status === 'awaiting_approval')
+        @php($hasReviewEvidence = $publishJob->reviewed_head_sha && $publishJob->reviewed_branch && $publishJob->reviewed_mapping_id && $publishJob->reviewed_working_tree_clean)
         <h3>{{ __('ui.publish.changed_files_title') }}</h3>
         <p>{{ __('ui.publish.files_changed_count', ['count' => $publishJob->files_changed_count]) }}</p>
 
         @if ($publishJob->files_changed_count === 0)
             <p class="muted">{{ __('ui.publish.no_changes') }}</p>
-            @php($hasReviewEvidence = $publishJob->reviewed_head_sha && $publishJob->reviewed_branch && $publishJob->reviewed_mapping_id && $publishJob->reviewed_working_tree_clean)
             @if (!$hasReviewEvidence)
                 <p class="muted">This legacy review needs fresh Local Agent evidence before it can be approved.</p>
                 @can('local_agents.manage')
@@ -26,6 +26,15 @@
                     <button type="submit" class="btn btn-primary">Refresh review evidence</button>
                 </form>
                 @endcan
+            @elseif ($reviewEvidenceValid === false)
+                <p class="muted">{{ __('ui.publish.review_stale_message') }}</p>
+                @can('local_agents.manage')
+                <form method="POST" action="{{ route('projects.publish.refresh-review-evidence', [$project, $publishJob]) }}" style="margin-top:1rem;">
+                    @csrf
+                    <button type="submit" class="btn btn-primary">Refresh review evidence</button>
+                </form>
+                @endcan
+                <a href="{{ route('projects.show', $project) }}" class="btn btn-secondary" style="margin-top:1rem;">{{ __('ui.publish.review_stale_start_new_button') }}</a>
             @else
             <p class="muted">No source changes were found. Confirming will build and upload an artifact for the verified current commit; it will not create a commit or push.</p>
             @can('local_agents.publish')
@@ -52,6 +61,10 @@
             </ul>
             @endif
 
+            @if ($reviewEvidenceValid === false)
+                <p class="muted">{{ __('ui.publish.review_stale_message') }}</p>
+                <a href="{{ route('projects.show', $project) }}" class="btn btn-secondary" style="margin-top:1rem;">{{ __('ui.publish.review_stale_start_new_button') }}</a>
+            @else
             @can('local_agents.publish')
             <form method="POST" action="{{ route('projects.publish.approve', [$project, $publishJob]) }}" style="margin-top:1rem;">
                 @csrf
@@ -60,6 +73,7 @@
                 <button type="submit" class="btn btn-primary" style="margin-top:0.6rem;">{{ __('ui.publish.approve_publish_button') }}</button>
             </form>
             @endcan
+            @endif
         @endif
     @elseif ($publishJob->status === 'running' && $publishJob->isLeaseExpired())
         {{-- Root-cause fix, section 8: never shown as a plain "در حال
@@ -107,7 +121,7 @@
         @else
             <p class="muted">{{ __('ui.publish.deployment_awaiting_webhook') }}</p>
         @endif
-    @elseif (in_array($publishJob->status, ['failed', 'timed_out', 'abandoned']))
+    @elseif (in_array($publishJob->status, ['failed', 'timed_out', 'abandoned', 'rejected']))
         <h3>{{ __('ui.publish.error_label') }}</h3>
         <p class="muted">{{ $publishJob->error_message }}</p>
         @if ($publishJob->status === 'abandoned')

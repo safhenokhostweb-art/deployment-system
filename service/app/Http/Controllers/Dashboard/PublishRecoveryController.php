@@ -39,10 +39,11 @@ class PublishRecoveryController extends Controller
         );
 
         $status = sprintf(
-            'بازیابی انجام شد: %d Job بررسی شد — %d اتمام‌زمان، %d رهاشده، %d Deployment نهایی‌شد، %d Lock آزاد شد.',
+            'بازیابی انجام شد: %d Job بررسی شد — %d اتمام‌زمان، %d رهاشده، %d Review منقضی، %d Deployment نهایی‌شد، %d Lock آزاد شد.',
             $result['checked'],
             $result['timed_out'],
             $result['abandoned'],
+            $result['reviews_expired'],
             $result['deployments_finalized'],
             $result['locks_released'],
         );

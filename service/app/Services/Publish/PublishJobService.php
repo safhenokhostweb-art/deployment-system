@@ -288,6 +288,11 @@ class PublishJobService
             metadata: ['files_changed_count' => count($changedFiles), 'blocked_files_count' => count($blockedFiles), 'head_sha' => $headSha, 'branch' => $branch, 'working_tree_clean' => $workingTreeClean],
         );
 
+        // This review is now the current one for its local agent + project —
+        // any older awaiting_approval review is superseded so it can never
+        // be approved from stale evidence.
+        $this->supersedeOlderReviews($job);
+
         event(new PublishJobAwaitingApproval($job->refresh()));
 
         return $job;
@@ -297,11 +302,41 @@ class PublishJobService
     {
         abort_unless($job->action === PublishJob::ACTION_STATUS_CHECK, 422, 'Only a status_check job can be approved for publish.');
         abort_unless($job->status === PublishJob::STATUS_AWAITING_APPROVAL, 409, 'This publish job is not awaiting approval.');
+
         $noSourceChange = $job->files_changed_count === 0;
+
+        // Zero-change reviews keep their existing refreshable guard: the
+        // captured evidence must be complete, clean, and still in sync with
+        // the remote. It throws 422 and leaves the review awaiting so an
+        // admin can refresh it (refreshNoSourceChangeReviewEvidence) rather
+        // than permanently finalizing it.
         if ($noSourceChange) {
             $this->assertNoSourceChangeEvidence($job);
         } else {
             abort_unless(is_string($commitMessage) && $commitMessage !== '', 422, 'A commit message is required when publishing changed files.');
+        }
+
+        // Every review — changed or zero-change — is only approvable while
+        // its captured evidence still matches the current authoritative
+        // LocalProjectMapping. A review of a HEAD/branch/cleanliness that
+        // has since moved must fail safely and be finalized so it can never
+        // be approved later from a stale page or a recovered row.
+        if (!$this->reviewEvidenceIsStillValid($job)) {
+            $this->finalizeReviewAsRejected(
+                $job,
+                'The review evidence is no longer current. Start a new change review.',
+                'publish_job.review_evidence_stale_rejected',
+                [
+                    'attempted_by' => $approvedBy,
+                    'reviewed_mapping_id' => $job->reviewed_mapping_id,
+                    'reviewed_branch' => $job->reviewed_branch,
+                    'reviewed_head_sha' => $job->reviewed_head_sha,
+                ],
+                AuditLogEntry::ACTOR_USER,
+                $approvedBy,
+            );
+
+            abort(409, 'The review evidence is no longer current — start a new change review before approving.');
         }
 
         $job->update([
@@ -357,21 +392,145 @@ class PublishJobService
         abort_unless($this->noSourceChangeEvidenceIsStillValid($job), 422, 'The verified Local Agent state is no longer valid.');
     }
 
-    private function noSourceChangeEvidenceIsStillValid(PublishJob $job): bool
+    /**
+     * A status_check review is only still approvable while every piece of
+     * evidence it captured still matches the current authoritative
+     * LocalProjectMapping: mapping identity, effective branch, local HEAD,
+     * and working-tree cleanliness. Fail-closed: a review with missing
+     * evidence (legacy rows / reports that carried no head/branch/
+     * cleanliness) or a vanished mapping is never "still valid".
+     */
+    public function reviewEvidenceIsStillValid(PublishJob $job): bool
     {
-        if ($job->reviewed_mapping_id === null || !is_string($job->reviewed_branch)) {
+        if ($job->reviewed_mapping_id === null
+            || !is_string($job->reviewed_branch) || $job->reviewed_branch === ''
+            || !is_string($job->reviewed_head_sha)
+            || $job->reviewed_working_tree_clean === null) {
             return false;
         }
 
-        $mapping = LocalProjectMapping::query()->whereKey($job->reviewed_mapping_id)->where('local_agent_id', $job->local_agent_id)->where('project_id', $job->project_id)->first();
+        $mapping = LocalProjectMapping::query()
+            ->whereKey($job->reviewed_mapping_id)
+            ->where('local_agent_id', $job->local_agent_id)
+            ->where('project_id', $job->project_id)
+            ->first();
 
-        return $mapping !== null
-            && $mapping->effectiveBranch() === $job->reviewed_branch
-            && $mapping->working_tree_dirty === false
-            && is_string($mapping->local_head_sha)
-            && preg_match('/^[0-9a-f]{40}$/', $mapping->local_head_sha) === 1
-            && $mapping->remote_tracking_sha === $mapping->local_head_sha
-            && hash_equals((string) $job->reviewed_head_sha, $mapping->local_head_sha);
+        if ($mapping === null || $mapping->effectiveBranch() !== $job->reviewed_branch) {
+            return false;
+        }
+
+        if (preg_match('/^[0-9a-f]{40}$/', (string) $mapping->local_head_sha) !== 1
+            || !hash_equals((string) $job->reviewed_head_sha, (string) $mapping->local_head_sha)) {
+            return false;
+        }
+
+        // The mapping's live cleanliness must match what the review captured
+        // (a clean review requires a clean tree; a changed-files review
+        // requires the tree to still be dirty — otherwise the developer
+        // committed or reverted in the meantime).
+        return $mapping->working_tree_dirty === ($job->reviewed_working_tree_clean === false);
+    }
+
+    private function noSourceChangeEvidenceIsStillValid(PublishJob $job): bool
+    {
+        if (!$this->reviewEvidenceIsStillValid($job)) {
+            return false;
+        }
+
+        $mapping = LocalProjectMapping::query()->whereKey($job->reviewed_mapping_id)->first();
+
+        // A zero-change publish builds an artifact for the current commit
+        // without creating or pushing anything, so the local HEAD must still
+        // be exactly the reviewed commit AND in sync with its remote
+        // tracking branch (nothing locally-ahead that would be silently
+        // dropped by the artifact build).
+        return $mapping !== null && $mapping->remote_tracking_sha === $mapping->local_head_sha;
+    }
+
+    /**
+     * The single terminal path for a review that can no longer be approved:
+     * superseded by a newer review, expired by the review TTL, or rejected
+     * at approval time because its evidence is stale. Reuses the existing
+     * `rejected` terminal status (semantically "this review will not proceed
+     * to publish"); the audit action distinguishes the reason. Never deletes
+     * the history row, and releases a project publish lock only if THIS job
+     * happens to hold one (reviews never acquire one).
+     */
+    private function finalizeReviewAsRejected(PublishJob $job, string $message, string $auditAction, array $metadata, string $actorType, ?string $actorIdentifier): void
+    {
+        if ($job->isTerminal()) {
+            return;
+        }
+
+        $job->update([
+            'status' => PublishJob::STATUS_REJECTED,
+            'error_message' => $message,
+            'recovery_metadata' => $metadata,
+            'finished_at' => now(),
+        ]);
+
+        $this->releaseProjectLock($job);
+
+        AuditLogEntry::record(
+            actorType: $actorType,
+            actorIdentifier: $actorIdentifier,
+            action: $auditAction,
+            subjectType: PublishJob::class,
+            subjectId: $job->id,
+            metadata: $metadata,
+        );
+    }
+
+    /**
+     * Supersede: whenever a status_check successfully reaches
+     * awaiting_approval, any OLDER awaiting_approval review for the same
+     * (local_agent_id, project_id) is finalized as rejected — the newer
+     * review is the only one an operator should be able to approve. Scoped
+     * per mapping/local agent so two developers' machines reviewing the same
+     * project do not invalidate each other's reviews.
+     */
+    private function supersedeOlderReviews(PublishJob $newer): void
+    {
+        $older = PublishJob::query()
+            ->where('local_agent_id', $newer->local_agent_id)
+            ->where('project_id', $newer->project_id)
+            ->where('action', PublishJob::ACTION_STATUS_CHECK)
+            ->where('status', PublishJob::STATUS_AWAITING_APPROVAL)
+            ->whereKeyNot($newer->id)
+            ->get();
+
+        foreach ($older as $job) {
+            $this->finalizeReviewAsRejected(
+                $job,
+                'Superseded by a newer review for the same local agent and project.',
+                'publish_job.review_superseded',
+                ['superseded_by_publish_job_id' => $newer->id, 'superseded_by_reviewed_head_sha' => $newer->reviewed_head_sha],
+                AuditLogEntry::ACTOR_SYSTEM,
+                null,
+            );
+        }
+    }
+
+    /**
+     * deployments:recover-stale's review-expiry write path: an
+     * awaiting_approval review older than publish_review_ttl_minutes is
+     * finalized as rejected (publish_job.review_expired). Reviews never hold
+     * a project publish lock, so no lock state is involved.
+     */
+    public function expireReview(PublishJob $job): PublishJob
+    {
+        abort_if($job->isTerminal(), 409, 'Cannot expire a review that has already reached a terminal state.');
+
+        $this->finalizeReviewAsRejected(
+            $job,
+            'The review expired without approval — start a new change review.',
+            'publish_job.review_expired',
+            ['review_ttl_minutes' => (int) config('deployment.publish_review_ttl_minutes')],
+            AuditLogEntry::ACTOR_SYSTEM,
+            null,
+        );
+
+        return $job;
     }
 
     public function approveRollback(PublishJob $job, string $approvedBy): PublishJob

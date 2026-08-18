@@ -98,7 +98,15 @@ class PublishController extends Controller
                 ->first();
         }
 
-        return view('publish.show', compact('project', 'publishJob', 'resultingDeployment'));
+        // Live evidence validity for an awaiting_approval review: null for
+        // every other state, false when the reviewed evidence no longer
+        // matches the current LocalProjectMapping (the view then hides the
+        // approval button and points the operator at a new review).
+        $reviewEvidenceValid = $publishJob->action === PublishJob::ACTION_STATUS_CHECK && $publishJob->status === PublishJob::STATUS_AWAITING_APPROVAL
+            ? $this->publishJobs->reviewEvidenceIsStillValid($publishJob)
+            : null;
+
+        return view('publish.show', compact('project', 'publishJob', 'resultingDeployment', 'reviewEvidenceValid'));
     }
 
     /**

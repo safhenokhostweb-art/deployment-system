@@ -33,6 +33,24 @@ class PublishWorkflowTest extends TestCase
         return $project;
     }
 
+    /**
+     * A changed-files status_check review whose captured evidence matches the
+     * current mapping state (HEAD repeated $headChar 40×, branch 'main',
+     * working tree dirty) — the realistic shape a modern agent reports
+     * (head/branch/cleanliness), and the shape the approval
+     * evidence-validity guard requires.
+     */
+    private function reviewedChangedFilesJob(Project $project, string $requestedBy, string $headChar = 'a'): PublishJob
+    {
+        $mapping = $project->localProjectMappings()->first();
+        $mapping->update(['local_head_sha' => str_repeat($headChar, 40), 'working_tree_dirty' => true]);
+
+        $job = app(PublishJobService::class)->queue($mapping->localAgent, $project, PublishJob::ACTION_STATUS_CHECK, $requestedBy);
+        app(PublishJobService::class)->reportStatusCheck($job, ['app/Foo.php'], [], str_repeat($headChar, 40), 'main', false);
+
+        return $job;
+    }
+
     public function test_developer_can_start_a_publish_status_check(): void
     {
         $developer = User::factory()->create(['role' => User::ROLE_DEVELOPER]);
@@ -76,9 +94,7 @@ class PublishWorkflowTest extends TestCase
     {
         $user = User::factory()->create();
         $project = $this->projectWithApprovedMapping();
-        $localAgent = $project->localProjectMappings()->first()->localAgent;
-        $job = app(PublishJobService::class)->queue($localAgent, $project, PublishJob::ACTION_STATUS_CHECK, $user->email);
-        app(PublishJobService::class)->reportStatusCheck($job, ['app/Foo.php']);
+        $job = $this->reviewedChangedFilesJob($project, $user->email);
 
         $this->actingAs($user)->post(route('projects.publish.approve', [$project, $job]), [
             'commit_message' => 'Fix the widget',
@@ -194,9 +210,7 @@ class PublishWorkflowTest extends TestCase
         // unmodified GitHub webhook path, never from this code.
         $user = User::factory()->create();
         $project = $this->projectWithApprovedMapping();
-        $localAgent = $project->localProjectMappings()->first()->localAgent;
-        $job = app(PublishJobService::class)->queue($localAgent, $project, PublishJob::ACTION_STATUS_CHECK, $user->email);
-        app(PublishJobService::class)->reportStatusCheck($job, ['app/Foo.php']);
+        $job = $this->reviewedChangedFilesJob($project, $user->email);
         app(PublishJobService::class)->approve($job, 'Fix the widget', $user->email);
         app(PublishJobService::class)->reportResult($job, str_repeat('a', 40), 'main -> main');
 
@@ -225,12 +239,13 @@ class PublishWorkflowTest extends TestCase
         $user = User::factory()->create();
         $project = $this->projectWithApprovedMapping();
         $localAgent = $project->localProjectMappings()->first()->localAgent;
+        $project->localProjectMappings()->first()->update(['local_head_sha' => str_repeat('a', 40), 'working_tree_dirty' => true]);
         $service = app(PublishJobService::class);
 
         $job = $service->queue($localAgent, $project, PublishJob::ACTION_STATUS_CHECK, $user->email);
         $this->actingAs($user)->get(route('projects.publish.show', [$project, $job]))->assertOk();
 
-        $service->reportStatusCheck($job, ['app/Foo.php']);
+        $service->reportStatusCheck($job, ['app/Foo.php'], [], str_repeat('a', 40), 'main', false);
         $this->actingAs($user)->get(route('projects.publish.show', [$project, $job]))->assertOk()->assertSee('app/Foo.php');
 
         $service->approve($job, 'Fix the widget', $user->email);
@@ -335,10 +350,8 @@ class PublishWorkflowTest extends TestCase
     {
         $user = User::factory()->create();
         $project = $this->projectWithApprovedMapping();
-        $localAgent = $project->localProjectMappings()->first()->localAgent;
         $service = app(PublishJobService::class);
-        $job = $service->queue($localAgent, $project, PublishJob::ACTION_STATUS_CHECK, $user->email);
-        $service->reportStatusCheck($job, ['app/Foo.php']);
+        $job = $this->reviewedChangedFilesJob($project, $user->email);
         $service->approve($job, 'Fix the widget', $user->email);
         $service->reportResult($job, str_repeat('a', 40), 'main -> main');
 
@@ -351,10 +364,8 @@ class PublishWorkflowTest extends TestCase
     {
         $user = User::factory()->create();
         $project = $this->projectWithApprovedMapping();
-        $localAgent = $project->localProjectMappings()->first()->localAgent;
         $service = app(PublishJobService::class);
-        $job = $service->queue($localAgent, $project, PublishJob::ACTION_STATUS_CHECK, $user->email);
-        $service->reportStatusCheck($job, ['app/Foo.php']);
+        $job = $this->reviewedChangedFilesJob($project, $user->email);
         $service->approve($job, 'Fix the widget', $user->email);
         $service->reportResult($job, str_repeat('b', 40), 'main -> main');
 
@@ -369,5 +380,77 @@ class PublishWorkflowTest extends TestCase
             ->assertSee(__('ui.publish.view_deployment_button'))
             ->assertDontSee(__('ui.publish.deployment_awaiting_webhook'))
             ->assertSee(route('deployments.show', $deployment));
+    }
+
+    /**
+     * A stale review (mapping HEAD moved since the review was captured) must
+     * not show an active approval button — only the stale message and a way
+     * to start a new review.
+     */
+    public function test_stale_review_page_hides_the_approval_button_and_shows_the_stale_message(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->projectWithApprovedMapping();
+        $job = $this->reviewedChangedFilesJob($project, $user->email);
+        // The developer's mapping HEAD moves after the review was captured.
+        $project->localProjectMappings()->first()->update(['local_head_sha' => str_repeat('b', 40), 'working_tree_dirty' => false]);
+
+        $this->actingAs($user)->get(route('projects.publish.show', [$project, $job]))
+            ->assertOk()
+            ->assertSee(__('ui.publish.review_stale_message'))
+            ->assertSee(__('ui.publish.review_stale_start_new_button'))
+            ->assertDontSee(__('ui.publish.approve_publish_button'))
+            ->assertDontSee(__('ui.publish.commit_message_label'));
+    }
+
+    /**
+     * A new status_check can always be started even while an old stale
+     * awaiting_approval review exists — the old row is neither deleted nor
+     * allowed to block the new workflow.
+     */
+    public function test_a_new_status_check_can_be_started_while_an_old_stale_review_is_awaiting(): void
+    {
+        $developer = User::factory()->create(['role' => User::ROLE_DEVELOPER]);
+        $project = $this->projectWithApprovedMapping();
+        $mapping = $project->localProjectMappings()->first();
+        $old = $this->reviewedChangedFilesJob($project, $developer->email);
+        $mapping->update(['local_head_sha' => str_repeat('b', 40), 'working_tree_dirty' => true]); // old review now stale
+
+        $response = $this->actingAs($developer)->post(route('projects.publish', $project), [
+            'local_project_mapping_id' => $mapping->id,
+        ]);
+
+        $new = PublishJob::where('id', '!=', $old->id)->firstOrFail();
+        $response->assertRedirect(route('projects.publish.show', [$project, $new]));
+        $this->assertSame(PublishJob::ACTION_STATUS_CHECK, $new->action);
+        $this->assertSame(PublishJob::STATUS_QUEUED, $new->status);
+        $this->assertSame(PublishJob::STATUS_AWAITING_APPROVAL, $old->fresh()->status, 'The old review is still a queryable row, just no longer blocking.');
+        $this->assertSame(2, PublishJob::count());
+    }
+
+    /**
+     * Superseded/rejected review rows are history, not deletions — they stay
+     * queryable and remain visible on the Publish History page.
+     */
+    public function test_rejected_reviews_remain_queryable_and_visible_in_history(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->projectWithApprovedMapping();
+        $mapping = $project->localProjectMappings()->first();
+        $mapping->update(['local_head_sha' => str_repeat('a', 40), 'working_tree_dirty' => true]);
+        $old = $this->reviewedChangedFilesJob($project, $user->email);
+
+        // A newer review for the same agent+project supersedes the old one.
+        $mapping->update(['local_head_sha' => str_repeat('b', 40), 'working_tree_dirty' => true]);
+        $new = $this->reviewedChangedFilesJob($project, $user->email, 'b');
+
+        $this->assertSame(PublishJob::STATUS_REJECTED, $old->fresh()->status);
+        $this->assertSame(PublishJob::STATUS_AWAITING_APPROVAL, $new->fresh()->status);
+
+        $this->assertDatabaseHas('publish_jobs', ['id' => $old->id, 'status' => PublishJob::STATUS_REJECTED]);
+
+        $this->actingAs($user)->get(route('publish.history'))
+            ->assertOk()
+            ->assertSee(route('projects.publish.show', [$project, $old]));
     }
 }

@@ -153,6 +153,26 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Publish review TTL (stale awaiting_approval reviews)
+    |--------------------------------------------------------------------------
+    |
+    | A status_check review sitting at `awaiting_approval` is only as good as
+    | the evidence it captured (mapping, branch, HEAD, working-tree
+    | cleanliness). The approvals guard re-validates that evidence at
+    | approval time, and a newer review supersedes older ones — but a review
+    | nobody acts on must not stay approvable forever either. This is the
+    | ceiling deployments:recover-stale enforces: an awaiting_approval
+    | review older than this is finalized as `rejected`
+    | (publish_job.review_expired). Deliberately far longer than the
+    | running-job lease (publish_job_lease_seconds): a human approval review
+    | legitimately stays open far longer than a running git command, but not
+    | indefinitely.
+    |
+    */
+    'publish_review_ttl_minutes' => (int) env('DEPLOYMENT_PUBLISH_REVIEW_TTL_MINUTES', 10080),
+
+    /*
+    |--------------------------------------------------------------------------
     | Deployment lease (sandogh deployment overhaul, Phase 2)
     |--------------------------------------------------------------------------
     |

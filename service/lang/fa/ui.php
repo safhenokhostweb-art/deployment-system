@@ -370,6 +370,8 @@ return [
         'lease_expired_awaiting_recovery' => 'lease این Job منقضی شده اما هنوز توسط چرخه بازیابی جاروب نشده — ظرف یک دقیقه نهایی می‌شود.',
         'lease_expired_at' => 'زمان انقضای lease: :time',
         'abandoned_explanation' => 'Hub قبل از انقضای lease این Job هیچ پاسخی از عامل دریافت‌کننده نگرفت — احتمالاً عامل کرش کرده، کشته شده، یا اتصالش قطع شده است.',
+        'review_stale_message' => 'شواهد این بررسی دیگر به‌روز نیستند. یک بررسی تغییرات جدید شروع کنید.',
+        'review_stale_start_new_button' => 'شروع بررسی تغییرات جدید',
     ],
 
     'publish_history' => [

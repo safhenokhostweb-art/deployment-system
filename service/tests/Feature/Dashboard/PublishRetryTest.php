@@ -27,10 +27,11 @@ class PublishRetryTest extends TestCase
         $project = Project::factory()->create();
         $agent = LocalAgent::factory()->approved()->create();
         LocalProjectMapping::factory()->create(['local_agent_id' => $agent->id, 'project_id' => $project->id]);
+        LocalProjectMapping::where('local_agent_id', $agent->id)->where('project_id', $project->id)->first()->update(['local_head_sha' => str_repeat('a', 40), 'working_tree_dirty' => true]);
         $service = app(PublishJobService::class);
 
         $job = $service->queue($agent, $project, PublishJob::ACTION_STATUS_CHECK, 'dev@example.test');
-        $service->reportStatusCheck($job, ['app/Foo.php']);
+        $service->reportStatusCheck($job, ['app/Foo.php'], [], str_repeat('a', 40), 'main', false);
         $service->approve($job, 'Fix the widget', 'dev@example.test');
         $service->reportFailure($job, 'git push rejected (non-fast-forward)');
 

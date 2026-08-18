@@ -164,10 +164,11 @@ class PublishJobFlowTest extends TestCase
     public function test_agent_claims_an_approved_publish_job_and_reports_success(): void
     {
         $agent = LocalAgent::factory()->approved()->create();
-        $project = Project::factory()->create();
+        $project = $this->mappedProject($agent);
+        $project->localProjectMappings()->first()->update(['local_head_sha' => str_repeat('a', 40), 'working_tree_dirty' => true]);
         $job = app(PublishJobService::class)->queue($agent, $project, PublishJob::ACTION_STATUS_CHECK, 'dev@example.test');
         app(PublishJobService::class)->claimNext($agent);
-        app(PublishJobService::class)->reportStatusCheck($job, ['app/Foo.php']);
+        app(PublishJobService::class)->reportStatusCheck($job, ['app/Foo.php'], [], str_repeat('a', 40), 'main', false);
         app(PublishJobService::class)->approve($job, 'Fix the widget', 'dev@example.test');
 
         $nextHeaders = $this->headersFor($agent, 'GET', '/api/local-agent/publish-jobs/next');
@@ -209,9 +210,10 @@ class PublishJobFlowTest extends TestCase
     public function test_agent_reports_a_failed_publish(): void
     {
         $agent = LocalAgent::factory()->approved()->create();
-        $project = Project::factory()->create();
+        $project = $this->mappedProject($agent);
+        $project->localProjectMappings()->first()->update(['local_head_sha' => str_repeat('a', 40), 'working_tree_dirty' => true]);
         $job = app(PublishJobService::class)->queue($agent, $project, PublishJob::ACTION_STATUS_CHECK, 'dev@example.test');
-        app(PublishJobService::class)->reportStatusCheck($job, ['app/Foo.php']);
+        app(PublishJobService::class)->reportStatusCheck($job, ['app/Foo.php'], [], str_repeat('a', 40), 'main', false);
         app(PublishJobService::class)->approve($job, 'Fix the widget', 'dev@example.test');
         app(PublishJobService::class)->claimNext($agent);
 
