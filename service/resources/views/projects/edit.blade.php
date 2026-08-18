@@ -44,6 +44,14 @@
         <textarea id="artifact_preserve_paths_text" name="artifact_preserve_paths_text" rows="4" dir="ltr" style="text-align:left;">{{ old('artifact_preserve_paths_text', implode("\n", $project->artifact_preserve_paths ?? [])) }}</textarea>
         <p class="muted">One relative runtime path per line. Paths must not be absolute or contain <code>..</code>.</p>
 
+        <label for="artifact_persistent_paths_text">Artifact persistent paths</label>
+        <textarea id="artifact_persistent_paths_text" name="artifact_persistent_paths_text" rows="4" dir="ltr" style="text-align:left;">{{ old('artifact_persistent_paths_text', implode("\n", $project->artifact_persistent_paths ?? [])) }}</textarea>
+        <p class="muted">One relative runtime path per line — symlinked from the persistent root into each release instead of copied. Must not overlap preserve paths.</p>
+
+        <label for="artifact_persistent_root">Artifact persistent root</label>
+        <input type="text" id="artifact_persistent_root" name="artifact_persistent_root" value="{{ old('artifact_persistent_root', $project->artifact_persistent_root) }}" dir="ltr" style="text-align:left;">
+        <p class="muted">Absolute directory on the target server holding the persistent state (configured there in agent config.php; the Hub never learns server paths).</p>
+
         <input type="hidden" name="requires_complete_artifact" value="0">
         <label>
             <input type="checkbox" name="requires_complete_artifact" value="1" style="width:auto;display:inline-block;" {{ old('requires_complete_artifact', $project->requires_complete_artifact) ? 'checked' : '' }}>

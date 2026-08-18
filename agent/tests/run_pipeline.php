@@ -669,6 +669,114 @@ $logFailStop = readHubLog($hub['logPath']);
 $failStopStatuses = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-fail-stop/status' ? ($e['body']['status'] ?? null) : null, $logFailStop)));
 check('a failed step: final status is failed', end($failStopStatuses) === 'failed', $failures, $passCount);
 
+@unlink($hub['logPath']);
+file_put_contents($hub['logPath'], '');
+
+// ============================================================
+// Scenario 7: artifact with a before_activation maintenance entry — the
+// step runs against the CURRENT release BEFORE the atomic swap, activation
+// follows, and every later step runs against the NEW release. The closing
+// `exit maintenance mode` re-enters the site after the swap (with
+// persistent storage, maintenance survives the swap — this is the single
+// guaranteed re-entry point).
+// ============================================================
+$maintenanceSiteDir = $workspace . '/maintenance-site';
+mkdir($maintenanceSiteDir, 0777, true);
+// Simulate the currently-active release's code (what maintenance entry must
+// observe) versus the artifact's brand-new code (what post-activation steps
+// must observe).
+file_put_contents("{$maintenanceSiteDir}/index.php", "<?php // OLD RELEASE\n");
+$maintenanceBeforeMarker = $workspace . '/maintenance-before.marker';
+$maintenanceAfterMarker = $workspace . '/maintenance-after.marker';
+$maintenanceExitMarker = $workspace . '/maintenance-exit.marker';
+
+$maintenanceZip = buildFixtureZip($workspace, 'maintenance-artifact');
+registerManifestEntry($hub['manifestPath'], 'artifact-maintenance', $maintenanceZip['path']);
+
+$jobMaintenanceFirst = [
+    'id' => 'job-maintenance-first',
+    'action' => 'deploy',
+    'project_key' => 'artifact-project',
+    'commit_hash' => str_repeat('m', 40),
+    'branch' => 'main',
+    'artifact' => ['public_id' => 'artifact-maintenance', 'checksum_sha256' => $maintenanceZip['checksum'], 'size_bytes' => $maintenanceZip['size']],
+    'pipeline' => [
+        // before_activation: must run while working_directory is STILL the
+        // old release, i.e. it must capture the OLD index.php.
+        ['name' => 'maintenance mode', 'command' => 'node -e "require(\'fs\').writeFileSync(process.argv[1], require(\'fs\').readFileSync(process.cwd() + \'/index.php\'))" ' . escapeshellarg($maintenanceBeforeMarker), 'before_activation' => true],
+        ['name' => 'git pull', 'command' => 'node -e "process.exit(0)"', 'skip_when_artifact' => true],
+        // Post-activation: must observe the NEW release's index.php.
+        ['name' => 'migrate', 'command' => 'node -e "require(\'fs\').writeFileSync(process.argv[1], require(\'fs\').readFileSync(process.cwd() + \'/index.php\'))" ' . escapeshellarg($maintenanceAfterMarker)],
+        ['name' => 'exit maintenance mode', 'command' => 'node -e "require(\'fs\').writeFileSync(process.argv[1], \'ran\')" ' . escapeshellarg($maintenanceExitMarker)],
+    ],
+];
+$pipelineExecutor->execute($jobMaintenanceFirst, ['working_directory' => $maintenanceSiteDir, 'allowed_services' => []], 30);
+
+check('maintenance-first: the before_activation step ran against the CURRENT release', file_get_contents($maintenanceBeforeMarker) === "<?php // OLD RELEASE\n", $failures, $passCount);
+check('maintenance-first: the previous release was renamed aside as one backup', count(glob("{$workspace}/maintenance-site.backup-*")) === 1, $failures, $passCount);
+check('maintenance-first: post-activation steps run against the NEW release', file_get_contents($maintenanceAfterMarker) === "<?php\n// artifact content\n", $failures, $passCount);
+check('maintenance-first: the closing exit-maintenance step ran', is_file($maintenanceExitMarker), $failures, $passCount);
+
+$maintenanceLogEntries = array_values(array_filter(readHubLog($hub['logPath']), static fn ($e) => $e['path'] === '/api/agent/jobs/job-maintenance-first/log'));
+check('maintenance-first: Hub log order is maintenance entry, artifact activation, then post-activation steps', array_map(static fn ($e) => $e['body']['step_name'] ?? null, $maintenanceLogEntries) === ['maintenance mode', 'deploy artifact', 'migrate', 'exit maintenance mode'], $failures, $passCount);
+$maintenanceStatuses = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-maintenance-first/status' ? ($e['body']['status'] ?? null) : null, readHubLog($hub['logPath']))));
+check('maintenance-first: reports running then succeeded', $maintenanceStatuses === ['running', 'succeeded'], $failures, $passCount);
+
+@unlink($hub['logPath']);
+file_put_contents($hub['logPath'], '');
+
+
+// ============================================================
+// Scenario 8: a pipeline step FAILS after activation — the agent restores
+// the previous release (code rollback; persistent state is never touched)
+// and runs the guaranteed maintenance cleanup (`artisan up`) so a failed
+// deploy can never leave the site permanently down.
+// ============================================================
+$rollbackSiteDir = $workspace . '/rollback-site';
+mkdir($rollbackSiteDir, 0777, true);
+file_put_contents("{$rollbackSiteDir}/index.php", "<?php // OLD RELEASE\n");
+// A present artisan binary lets the guaranteed cleanup actually run (it may
+// exit non-zero here — this is not a real Laravel tree — but the cleanup
+// report must still be posted to the Hub).
+file_put_contents("{$rollbackSiteDir}/artisan", "<?php\n");
+$rollbackMaintenanceMarker = $workspace . '/rollback-maintenance.marker';
+$rollbackAfterMarker = $workspace . '/rollback-after.marker';
+
+$rollbackZip = buildFixtureZip($workspace, 'rollback-artifact');
+registerManifestEntry($hub['manifestPath'], 'artifact-rollback', $rollbackZip['path']);
+
+$jobRollback = [
+    'id' => 'job-rollback',
+    'action' => 'deploy',
+    'project_key' => 'artifact-project',
+    'commit_hash' => str_repeat('r', 40),
+    'branch' => 'main',
+    'artifact' => ['public_id' => 'artifact-rollback', 'checksum_sha256' => $rollbackZip['checksum'], 'size_bytes' => $rollbackZip['size']],
+    'pipeline' => [
+        // The trailing `echo artisan down` literal is what the agent detects
+        // (str_contains) to remember that maintenance mode was entered.
+        ['name' => 'maintenance mode', 'command' => 'node -e "require(\'fs\').writeFileSync(process.argv[1], \'down\')" ' . escapeshellarg($rollbackMaintenanceMarker) . ' && echo artisan down', 'before_activation' => true],
+        ['name' => 'broken migrate', 'command' => 'node -e "process.exit(1)"'],
+        ['name' => 'never reached', 'command' => 'node -e "require(\'fs\').writeFileSync(process.argv[1], \'ran\')" ' . escapeshellarg($rollbackAfterMarker)],
+    ],
+];
+$pipelineExecutor->execute($jobRollback, ['working_directory' => $rollbackSiteDir, 'allowed_services' => []], 30);
+
+check('rollback: maintenance was entered before activation', is_file($rollbackMaintenanceMarker), $failures, $passCount);
+check('rollback: the post-failure step never ran', !is_file($rollbackAfterMarker), $failures, $passCount);
+check('rollback: the previous release was restored as the live working directory', file_get_contents("{$rollbackSiteDir}/index.php") === "<?php // OLD RELEASE\n", $failures, $passCount);
+check('rollback: the failed release left no backup or failed-release directory behind', count(glob("{$workspace}/rollback-site.backup-*")) === 0 && count(glob("{$workspace}/rollback-site.failed-*")) === 0, $failures, $passCount);
+
+$rollbackLogEntries = array_values(array_filter(readHubLog($hub['logPath']), static fn ($e) => $e['path'] === '/api/agent/jobs/job-rollback/log'));
+$rollbackStepNames = array_map(static fn ($e) => $e['body']['step_name'] ?? null, $rollbackLogEntries);
+check('rollback: maintenance cleanup entry was reported (guaranteed artisan up)', in_array('maintenance cleanup', $rollbackStepNames, true), $failures, $passCount);
+check('rollback: the failing step is the last application step in the log', array_slice($rollbackStepNames, 0, -1) === ['maintenance mode', 'deploy artifact', 'broken migrate'], $failures, $passCount);
+$rollbackStatuses = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-rollback/status' ? ($e['body']['status'] ?? null) : null, readHubLog($hub['logPath']))));
+check('rollback: final status is failed', end($rollbackStatuses) === 'failed', $failures, $passCount);
+
+@unlink($hub['logPath']);
+file_put_contents($hub['logPath'], '');
+
 // Typed privileged operations are a closed argv allowlist.  This source-level
 // contract test is intentionally platform-independent: Windows CI has no
 // sudo, while production must never substitute a shell command here.

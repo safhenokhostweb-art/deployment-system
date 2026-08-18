@@ -238,7 +238,13 @@ class OneClickAgentInstallerTest extends TestCase
         $server = Server::factory()->create();
         $script = $this->generateInstallerScript($server, 'agt_x', 'sec_x');
 
+        // Mirror ServerController::buildOneClickInstallerContent()'s exact
+        // documented normalization (CRLF -> LF, one trailing newline) so the
+        // expected checksum always describes the bytes the embedded heredoc
+        // reproduces — a Windows checkout (CRLF on disk) must not fail this.
         $realAgentPhp = file_get_contents(base_path('../agent/agent.php'));
+        $realAgentPhp = str_replace(["\r\n", "\r"], "\n", $realAgentPhp);
+        $realAgentPhp = rtrim($realAgentPhp, "\n") . "\n";
         $expectedChecksum = hash('sha256', $realAgentPhp);
 
         $this->assertStringContainsString('verify_checksum "$INSTALL_DIR/agent.php" "' . $expectedChecksum . '"', $script);

@@ -12,6 +12,12 @@ case "$1" in
     deployment-system)
         /usr/bin/systemctl reload php8.3-fpm
         /usr/bin/systemctl reload nginx
+        # The activated release's queue workers must load the new code.
+        # Workers are long-running processes that keep their old bytecode
+        # until restarted, so `artisan queue:restart` alone (soft signal
+        # after the current job) is not enough for an immediate swap —
+        # restart the exact supervisor group selector.
+        /usr/bin/supervisorctl restart 'deployment-service-worker:*'
         ;;
     saas-platform)
         /usr/bin/systemctl reload php8.3-fpm

@@ -40,7 +40,19 @@ class ProjectController extends Controller
      * publish flow keeps running every one of these steps exactly as
      * before.
      */
+    /** Used whenever a Project has no explicit artifact_preserve_paths — mirrors ArtifactManager::DEFAULT_PRESERVE_PATHS (agent side). */
+    private const DEFAULT_PRESERVE_PATHS = ['.env', 'storage', 'public/storage'];
+
     private const PIPELINE_PRESET_LARAVEL = [
+        // Maintenance-first ordering: `before_activation` marks the step to
+        // run against the CURRENT release before an attached artifact is
+        // atomically activated (the site is never exposed to a half-swapped
+        // release — and with persistent storage, maintenance survives the
+        // swap, so `exit maintenance mode` below is the guaranteed re-entry
+        // point after activation). For a plain git-pipeline project (no
+        // artifact) the flag is ignored by the agent and the step simply
+        // runs first in the normal order.
+        ['name' => 'maintenance mode', 'command' => '{php_binary} artisan down || true', 'before_activation' => true],
         ['name' => 'git pull', 'command' => 'git fetch origin {branch} && git reset --hard {commit}', 'skip_when_artifact' => true],
         ['name' => 'composer install', 'command' => 'composer install --no-dev --optimize-autoloader --no-interaction', 'skip_when_artifact' => true],
         ['name' => 'migrate', 'command' => '{php_binary} artisan migrate --force'],
@@ -49,6 +61,7 @@ class ProjectController extends Controller
         ['name' => 'restart services', 'type' => 'service_reload', 'command' => ''],
         ['name' => 'asset build', 'command' => 'npm ci --include=dev && npm run build', 'skip_when_artifact' => true],
         ['name' => 'queue restart', 'command' => '{php_binary} artisan queue:restart'],
+        ['name' => 'exit maintenance mode', 'command' => '{php_binary} artisan up'],
     ];
 
     private const PIPELINE_PRESET_STATIC = [
@@ -298,6 +311,14 @@ class ProjectController extends Controller
                 )),
             ]);
         }
+        if ($request->has('artifact_persistent_paths_text')) {
+            $request->merge([
+                'artifact_persistent_paths' => array_values(array_filter(
+                    preg_split('/\R/', (string) $request->input('artifact_persistent_paths_text')) ?: [],
+                    static fn (string $path): bool => trim($path) !== '',
+                )),
+            ]);
+        }
 
         $validated = $this->validateProject($request, $project);
 
@@ -311,6 +332,8 @@ class ProjectController extends Controller
             'pipeline' => $validated['pipeline'],
             'deployment_recipe' => $validated['deployment_recipe'],
             'artifact_preserve_paths' => $validated['artifact_preserve_paths'] ?? $project->artifact_preserve_paths,
+            'artifact_persistent_paths' => $validated['artifact_persistent_paths'] ?? $project->artifact_persistent_paths,
+            'artifact_persistent_root' => $validated['artifact_persistent_root'] ?? $project->artifact_persistent_root,
             'requires_complete_artifact' => $validated['requires_complete_artifact'] ?? $project->requires_complete_artifact,
             'application_root' => $validated['application_root'],
             'auto_deploy' => $request->boolean('auto_deploy'),
@@ -407,6 +430,9 @@ class ProjectController extends Controller
             'deployment_recipe' => 'nullable|string',
             'artifact_preserve_paths' => 'sometimes|nullable|array|max:20',
             'artifact_preserve_paths.*' => 'required|string|max:255',
+            'artifact_persistent_paths' => 'sometimes|nullable|array|max:20',
+            'artifact_persistent_paths.*' => 'required|string|max:255',
+            'artifact_persistent_root' => 'nullable|string|max:255',
             'requires_complete_artifact' => 'sometimes|boolean',
             // Keep this as an array rule. The expression contains `|`, which
             // Laravel treats as a rule separator when it is embedded in a
@@ -457,6 +483,29 @@ class ProjectController extends Controller
         if (array_key_exists('artifact_preserve_paths', $validated)) {
             $validated['artifact_preserve_paths'] = $this->normalizeArtifactPreservePaths($validated['artifact_preserve_paths']);
         }
+        if (array_key_exists('artifact_persistent_paths', $validated)) {
+            $validated['artifact_persistent_paths'] = $this->normalizeArtifactPersistentPaths($validated['artifact_persistent_paths']);
+        }
+
+        // Mirrors the agent's fail-closed persistent contract
+        // (ArtifactManager::preparePersistentReferences) so an ambiguous or
+        // incomplete configuration is rejected here, before any deploy.
+        if (($validated['artifact_persistent_paths'] ?? null) !== null && $validated['artifact_persistent_paths'] !== []) {
+            $persistent = $validated['artifact_persistent_paths'];
+            $preserve = $validated['artifact_preserve_paths'] ?? null;
+            // The agent computes the effective preserve list the same way:
+            // an empty/absent preserve list means the built-in defaults.
+            $effectivePreserve = ($preserve === null || $preserve === []) ? self::DEFAULT_PRESERVE_PATHS : $preserve;
+            $overlap = self::persistentOverlapError($effectivePreserve, $persistent);
+            if ($overlap !== null) {
+                throw ValidationException::withMessages(['artifact_persistent_paths' => $overlap]);
+            }
+            if (trim((string) ($validated['artifact_persistent_root'] ?? '')) === '') {
+                throw ValidationException::withMessages([
+                    'artifact_persistent_root' => 'artifact_persistent_root is required when artifact_persistent_paths are set.',
+                ]);
+            }
+        }
 
         if ($project !== null) {
             $validated['project_key'] = $project->project_key;
@@ -468,6 +517,18 @@ class ProjectController extends Controller
     /** @param array<int, string>|null $paths @return array<int, string>|null */
     private function normalizeArtifactPreservePaths(?array $paths): ?array
     {
+        return $this->normalizeArtifactRelativePaths($paths, 'artifact_preserve_paths');
+    }
+
+    /** @param array<int, string>|null $paths @return array<int, string>|null */
+    private function normalizeArtifactPersistentPaths(?array $paths): ?array
+    {
+        return $this->normalizeArtifactRelativePaths($paths, 'artifact_persistent_paths');
+    }
+
+    /** @param array<int, string>|null $paths @return array<int, string>|null */
+    private function normalizeArtifactRelativePaths(?array $paths, string $field): ?array
+    {
         if ($paths === null) {
             return null;
         }
@@ -478,18 +539,52 @@ class ProjectController extends Controller
             if ($path === '' || str_starts_with($path, '/') || preg_match('/^[A-Za-z]:\//', $path) === 1
                 || preg_match('#(^|/)\.\.(/|$)#', $path) === 1 || str_contains($path, "\0")) {
                 throw ValidationException::withMessages([
-                    'artifact_preserve_paths' => 'Preserve paths must be relative paths without traversal segments.',
+                    $field => 'Paths must be relative paths without traversal segments.',
                 ]);
             }
             if (in_array($path, $normalized, true)) {
                 throw ValidationException::withMessages([
-                    'artifact_preserve_paths' => 'Preserve paths must not contain duplicates.',
+                    $field => 'Paths must not contain duplicates.',
                 ]);
             }
             $normalized[] = $path;
         }
 
         return $normalized;
+    }
+
+    /**
+     * Mirrors ArtifactManager::persistentOverlapError() so the Hub rejects an
+     * ambiguous preserve+persistent contract before a deploy ever fails on the
+     * server: an exact duplicate, or an ancestor/descendant relationship,
+     * between a persistent path and an effective preserve path is ambiguous
+     * (the same project path can never be both copied and symlinked).
+     *
+     * @param array<int, string> $preservePaths
+     * @param array<int, string> $persistentPaths
+     */
+    private static function persistentOverlapError(array $preservePaths, array $persistentPaths): ?string
+    {
+        foreach ($persistentPaths as $persistent) {
+            $p = rtrim(str_replace('\\', '/', trim($persistent)), '/');
+            foreach ($preservePaths as $preserve) {
+                $s = rtrim(str_replace('\\', '/', trim($preserve)), '/');
+                if ($s === '' || $p === '') {
+                    continue;
+                }
+                if ($p === $s) {
+                    return "Persistent path '{$p}' exactly overlaps preserve path '{$s}' — remove it from one contract.";
+                }
+                if (str_starts_with($p . '/', $s . '/')) {
+                    return "Persistent path '{$p}' is inside preserve path '{$s}' — overlapping contracts are ambiguous.";
+                }
+                if (str_starts_with($s . '/', $p . '/')) {
+                    return "Preserve path '{$s}' is inside persistent path '{$p}' — overlapping contracts are ambiguous.";
+                }
+            }
+        }
+
+        return null;
     }
 
     /**

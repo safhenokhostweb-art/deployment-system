@@ -12,7 +12,14 @@ project_key="${1:-missing}"
 case "$project_key" in
   deployment-system)
     ROOT=/var/www/deployment-system/service
-    paths=("$ROOT/storage" "$ROOT/bootstrap/cache" "$ROOT/database")
+    # Persistent state lives OUTSIDE the swappable release — a sibling
+    # directory the artifact flow references via symlink, never copies
+    # (see ArtifactManager::preparePersistentReferences). It holds the
+    # real runtime data and must stay www-data-writable across every
+    # release swap, so this helper normalizes it exactly like the
+    # in-release runtime directories.
+    PERSISTENT_ROOT=/var/www/deployment-system/persistent
+    paths=("$ROOT/storage" "$ROOT/bootstrap/cache" "$ROOT/database" "$PERSISTENT_ROOT")
     files=("$ROOT/database/database.sqlite")
     ;;
   saas-platform)
@@ -35,7 +42,16 @@ export project_key
 validate_path() {
   local path="$1"
   resolved="$(realpath -e -- "$path")" || fail "$project_key" validate "$path" realpath 66
-  case "$resolved" in "$ROOT"/*) ;; *) fail "$project_key" validate "$path" 'path confinement' 67 ;; esac
+  case "$resolved" in "$ROOT"/*) return 0 ;; esac
+  # A configured persistent root is the one approved path family OUTSIDE the
+  # release tree (sibling of the working directory, symlinked into each
+  # release — never copied). Its own confinement keeps persistent state from
+  # ever being reached through a broader path. Empty for projects with no
+  # persistent configuration, in which case only $ROOT confinement applies.
+  if [ -n "${PERSISTENT_ROOT:-}" ]; then
+    case "$resolved" in "$PERSISTENT_ROOT"|"$PERSISTENT_ROOT"/*) return 0 ;; esac
+  fi
+  fail "$project_key" validate "$path" 'path confinement' 67
 }
 
 for path in "${paths[@]}"; do

@@ -29,11 +29,42 @@ final class ArtifactManager
     }
 
     /**
+     * Legacy convenience wrapper that prepares and immediately activates a
+     * staged artifact — kept for direct callers (and the existing agent
+     * test harness) that do not need the two-phase maintenance-first
+     * lifecycle. Production PipelineExecutor now uses prepare()/activate()
+     * separately so maintenance can be entered before the live swap.
+     *
      * @param array{public_id: string, checksum_sha256: string, size_bytes: int} $artifactDescriptor
-     * @param array<int, string> $preservePaths project-relative paths to carry over from the currently-active version
+     * @param array<int, string> $preservePaths project-relative paths to carry over from the currently-active version (copy semantics, unchanged)
+     * @param array<int, string> $persistentPaths project-relative paths that live OUTSIDE the swappable release and are referenced via symlink, never copied
+     * @param string|null $persistentRoot trusted absolute persistent root (server-local config, never Hub-supplied)
      * @return array{status: 'succeeded'|'failed', message: ?string, failureCode: ?string}
      */
-    public function deploy(array $artifactDescriptor, string $workingDirectory, array $preservePaths, int $retentionCount, ?callable $onTick = null): array
+    public function deploy(array $artifactDescriptor, string $workingDirectory, array $preservePaths, int $retentionCount, array $persistentPaths = [], ?string $persistentRoot = null, ?callable $onTick = null): array
+    {
+        $prepared = $this->prepare($artifactDescriptor, $workingDirectory, $preservePaths, $persistentPaths, $persistentRoot, $onTick);
+
+        if ($prepared['status'] !== 'succeeded' || $prepared['stagingPath'] === null) {
+            return ['status' => 'failed', 'message' => $prepared['message'], 'failureCode' => $prepared['failureCode']];
+        }
+
+        return $this->activate($workingDirectory, $prepared['stagingPath'], $retentionCount);
+    }
+
+    /**
+     * Phase 1 of the two-phase artifact lifecycle. Downloads, verifies,
+     * extracts, carries over legacy preserve paths, and installs persistent
+     * references into a staging directory. NO live release mutation happens
+     * here — the current release stays fully active until activate() is
+     * called, so every failure in this phase leaves the live site untouched.
+     *
+     * @param array{public_id: string, checksum_sha256: string, size_bytes: int} $artifactDescriptor
+     * @param array<int, string> $preservePaths
+     * @param array<int, string> $persistentPaths
+     * @return array{status: 'succeeded'|'failed', stagingPath: string|null, message: ?string, failureCode: ?string}
+     */
+    public function prepare(array $artifactDescriptor, string $workingDirectory, array $preservePaths, array $persistentPaths = [], ?string $persistentRoot = null, ?callable $onTick = null): array
     {
         $tempArchivePath = tempnam(sys_get_temp_dir(), 'da-artifact-') . '.zip';
         @unlink($tempArchivePath);
@@ -47,14 +78,14 @@ final class ArtifactManager
         }
 
         if ($downloadResult['status'] !== 200) {
-            return $this->failed('artifact_download_failed', "Artifact download failed: HTTP {$downloadResult['status']}" . ($downloadResult['error'] !== null ? " ({$downloadResult['error']})" : '') . '.');
+            return ['status' => 'failed', 'stagingPath' => null, 'message' => "Artifact download failed: HTTP {$downloadResult['status']}" . ($downloadResult['error'] !== null ? " ({$downloadResult['error']})" : '') . '.', 'failureCode' => 'artifact_download_failed'];
         }
 
         $actualChecksum = hash_file('sha256', $tempArchivePath);
         if ($actualChecksum !== $artifactDescriptor['checksum_sha256']) {
             @unlink($tempArchivePath);
 
-            return $this->failed('artifact_checksum_mismatch', "Downloaded artifact checksum mismatch: expected {$artifactDescriptor['checksum_sha256']}, got {$actualChecksum}.");
+            return ['status' => 'failed', 'stagingPath' => null, 'message' => "Downloaded artifact checksum mismatch: expected {$artifactDescriptor['checksum_sha256']}, got {$actualChecksum}.", 'failureCode' => 'artifact_checksum_mismatch'];
         }
 
         $stagingPath = rtrim($workingDirectory, '/') . '.staging-' . bin2hex(random_bytes(4));
@@ -63,7 +94,7 @@ final class ArtifactManager
             $zip = new \ZipArchive();
             $openResult = $zip->open($tempArchivePath);
             if ($openResult !== true) {
-                return $this->failed('artifact_extract_failed', "Could not open downloaded artifact as a zip (error code {$openResult}).");
+                return ['status' => 'failed', 'stagingPath' => null, 'message' => "Could not open downloaded artifact as a zip (error code {$openResult}).", 'failureCode' => 'artifact_extract_failed'];
             }
 
             mkdir($stagingPath, 0755, true);
@@ -73,37 +104,127 @@ final class ArtifactManager
             if (!$extracted) {
                 self::recursiveDelete($stagingPath);
 
-                return $this->failed('artifact_extract_failed', 'Failed to extract the downloaded artifact.');
+                return ['status' => 'failed', 'stagingPath' => null, 'message' => 'Failed to extract the downloaded artifact.', 'failureCode' => 'artifact_extract_failed'];
             }
 
             if (self::isEffectivelyEmpty($stagingPath)) {
                 self::recursiveDelete($stagingPath);
 
-                return $this->failed('artifact_extract_failed', 'Extracted artifact is empty — refusing to activate it.');
+                return ['status' => 'failed', 'stagingPath' => null, 'message' => 'Extracted artifact is empty — refusing to activate it.', 'failureCode' => 'artifact_extract_failed'];
             }
 
             $missingPath = $this->firstMissingRequiredPath($stagingPath, $artifactDescriptor['required_paths'] ?? []);
             if ($missingPath !== null) {
                 self::recursiveDelete($stagingPath);
 
-                return $this->failed('artifact_required_path_missing', "Artifact is incomplete: required runtime path '{$missingPath}' is missing. Live release was not changed.");
+                return ['status' => 'failed', 'stagingPath' => null, 'message' => "Artifact is incomplete: required runtime path '{$missingPath}' is missing. Live release was not changed.", 'failureCode' => 'artifact_required_path_missing'];
             }
         } finally {
             @unlink($tempArchivePath);
         }
 
-        $this->copyPreservedPaths($workingDirectory, $stagingPath, $preservePaths);
+        // Legacy copy-style carry-over (unchanged): small effectively-static
+        // files such as .env are copied from the current release.
+        $effectivePreserve = $this->effectivePreservePaths($preservePaths);
+        $this->copyPreservedPaths($workingDirectory, $stagingPath, $effectivePreserve);
 
+        // Persistent references: never copied. The release exposes a symlink
+        // to the trusted persistent root. Fails BEFORE activation when a
+        // target is missing so a missing DB/upload tree can never be
+        // silently replaced by an empty reference.
+        $persistentError = $this->preparePersistentReferences($stagingPath, $persistentPaths, $persistentRoot, $effectivePreserve);
+        if ($persistentError !== null) {
+            self::recursiveDelete($stagingPath);
+
+            return ['status' => 'failed', 'stagingPath' => null, 'message' => $persistentError['message'], 'failureCode' => $persistentError['code']];
+        }
+
+        return ['status' => 'succeeded', 'stagingPath' => $stagingPath, 'message' => null, 'failureCode' => null];
+    }
+
+    /**
+     * Phase 2 of the two-phase artifact lifecycle: atomically swaps the
+     * prepared staging directory into the live path (the previously-active
+     * release is renamed aside, never deleted until retention prunes it),
+     * then prunes old backups to the retention window. Backups contain code
+     * and symlinks only — persistent targets are never inside a release, so
+     * retention can never delete them.
+     *
+     * @return array{status: 'succeeded'|'failed', message: ?string, failureCode: ?string}
+     */
+    public function activate(string $workingDirectory, string $stagingPath, int $retentionCount): array
+    {
         $swapResult = $this->atomicSwap($workingDirectory, $stagingPath);
         if ($swapResult !== null) {
             self::recursiveDelete($stagingPath);
 
-            return $this->failed('activation_failed', $swapResult);
+            return ['status' => 'failed', 'message' => $swapResult, 'failureCode' => 'activation_failed'];
         }
 
         $this->cleanupOldBackups($workingDirectory, $retentionCount);
 
         return ['status' => 'succeeded', 'message' => null, 'failureCode' => null];
+    }
+
+    /**
+     * Deletes a prepared staging directory that will never be activated
+     * (the pre-activation failure path). Only ever touches a staging sibling
+     * of the working directory — never a live release, never a persistent
+     * target (staging contains only code + unlinked symlinks at this point).
+     */
+    public function discardStaging(string $stagingPath): void
+    {
+        if ($stagingPath !== '' && is_dir($stagingPath)) {
+            self::recursiveDelete($stagingPath);
+        }
+    }
+
+    /**
+     * Best-effort code rollback: restores the newest backup as the live
+     * release and removes the failed activated release. Persistent targets
+     * are never touched — the restored release's symlinks reference the same
+     * persistent state, so the database/storage/upload data stays current.
+     *
+     * @return string|null null on success, an error message when nothing could be restored
+     */
+    public function rollback(string $workingDirectory): ?string
+    {
+        $parent = dirname($workingDirectory);
+        $prefix = basename($workingDirectory) . '.backup-';
+
+        if (!is_dir($parent)) {
+            return 'No release parent directory to roll back within.';
+        }
+
+        $backups = [];
+        foreach (scandir($parent) ?: [] as $entry) {
+            if (str_starts_with($entry, $prefix)) {
+                $backups[] = $parent . '/' . $entry;
+            }
+        }
+
+        if ($backups === []) {
+            return 'No previous release backup exists to restore.';
+        }
+
+        usort($backups, static fn (string $a, string $b): int => (filemtime($b) ?: 0) <=> (filemtime($a) ?: 0));
+        $backup = $backups[0];
+
+        $failedLive = rtrim($workingDirectory, '/') . '.failed-' . bin2hex(random_bytes(4));
+
+        if (!@rename($workingDirectory, $failedLive)) {
+            return "Could not move the activated release aside for rollback (target: {$failedLive}).";
+        }
+
+        if (!@rename($backup, $workingDirectory)) {
+            @rename($failedLive, $workingDirectory);
+
+            return "Could not restore the previous release from {$backup} — the activated release was put back.";
+        }
+
+        self::recursiveDelete($failedLive);
+
+        return null;
     }
 
     /** @param array<int, mixed> $requiredPaths */
@@ -163,6 +284,164 @@ final class ArtifactManager
                 copy($source, $destination);
             }
         }
+    }
+
+    /** @return array<int, string> */
+    private function effectivePreservePaths(array $preservePaths): array
+    {
+        return $preservePaths === [] ? self::DEFAULT_PRESERVE_PATHS : $preservePaths;
+    }
+
+    /**
+     * Installs release-visible persistent references in the staging release.
+     * Each configured project-relative path becomes a symlink inside staging
+     * pointing at {persistentRoot}/{path} — never a copy. Fail-closed:
+     * an invalid path, a missing/escaping target, or an overlap with the
+     * effective preserve list aborts BEFORE activation.
+     *
+     * @param array<int, string> $persistentPaths
+     * @param array<int, string> $effectivePreservePaths
+     * @return array{code: string, message: string}|null null on success
+     */
+    private function preparePersistentReferences(string $stagingPath, array $persistentPaths, ?string $persistentRoot, array $effectivePreservePaths): ?array
+    {
+        if ($persistentPaths === []) {
+            return null;
+        }
+
+        if (!is_string($persistentRoot) || trim($persistentRoot) === '') {
+            return ['code' => 'artifact_persistent_root_missing', 'message' => 'artifact_persistent_root must be configured when artifact_persistent_paths are set.'];
+        }
+
+        $rootReal = realpath(rtrim($persistentRoot, '/'));
+        if ($rootReal === false || !is_dir($rootReal)) {
+            return ['code' => 'artifact_persistent_root_missing', 'message' => "Persistent root '{$persistentRoot}' does not exist — refusing to activate without persistent state."];
+        }
+
+        $rootPrefix = rtrim($rootReal, '/') . '/';
+
+        foreach ($persistentPaths as $relativePath) {
+            $error = self::validateRelativePersistentPath($relativePath);
+            if ($error !== null) {
+                return ['code' => 'artifact_persistent_path_invalid', 'message' => "Invalid persistent path '{$relativePath}': {$error}."];
+            }
+
+            $normalized = rtrim(str_replace('\\', '/', trim($relativePath)), '/');
+            if ($normalized === '') {
+                return ['code' => 'artifact_persistent_path_invalid', 'message' => 'Persistent path must not be empty.'];
+            }
+
+            $target = $rootPrefix . $normalized;
+            $targetReal = realpath($target);
+            if ($targetReal === false || !file_exists($targetReal)) {
+                return ['code' => 'artifact_persistent_target_missing', 'message' => "Persistent target '{$target}' does not exist — refusing to activate (missing persistent state would be silently replaced). Create it first (installer/runtime helper)."];
+            }
+
+            if ($targetReal !== $rootReal && !str_starts_with($targetReal, $rootPrefix)) {
+                return ['code' => 'artifact_persistent_path_invalid', 'message' => "Persistent target '{$target}' escapes the persistent root."];
+            }
+
+            $stagingEntry = rtrim($stagingPath, '/') . '/' . $normalized;
+
+            // The artifact may legitimately ship content at a persistent path
+            // (e.g. an empty storage/ dir baked into the archive). Remove ONLY
+            // that release-side staging entry — never anything external — and
+            // replace it with the reference. recursiveDelete() unlinks
+            // symlinks without following them, so a malicious zip entry can
+            // never redirect deletion outside staging.
+            if (is_link($stagingEntry)) {
+                @unlink($stagingEntry);
+            } elseif (is_dir($stagingEntry)) {
+                self::recursiveDelete($stagingEntry);
+            } elseif (file_exists($stagingEntry)) {
+                @unlink($stagingEntry);
+            }
+
+            $parent = dirname($stagingEntry);
+            if (!is_dir($parent)) {
+                mkdir($parent, 0755, true);
+            }
+
+            if (!@symlink($targetReal, $stagingEntry)) {
+                return ['code' => 'artifact_persistent_path_invalid', 'message' => "Could not create persistent reference for '{$normalized}' in the staging release."];
+            }
+
+            $linkReal = realpath($stagingEntry);
+            if ($linkReal === false || ($linkReal !== $rootReal && !str_starts_with($linkReal, $rootPrefix))) {
+                @unlink($stagingEntry);
+
+                return ['code' => 'artifact_persistent_path_invalid', 'message' => "Persistent reference '{$normalized}' failed confinement verification."];
+            }
+        }
+
+        // Deterministic fail-closed overlap rule: persistent and preserve must
+        // never ambiguously overlap (exact duplicate or ancestor/descendant).
+        $overlap = self::persistentOverlapError($effectivePreservePaths, $persistentPaths);
+        if ($overlap !== null) {
+            return ['code' => 'artifact_persistent_overlap', 'message' => $overlap];
+        }
+
+        return null;
+    }
+
+    /**
+     * @return string|null an actionable error when a persistent path overlaps
+     *                     a preserve path, null when the two contracts are disjoint
+     * @param array<int, string> $preservePaths
+     * @param array<int, string> $persistentPaths
+     */
+    private static function persistentOverlapError(array $preservePaths, array $persistentPaths): ?string
+    {
+        foreach ($persistentPaths as $persistent) {
+            $p = rtrim(str_replace('\\', '/', trim($persistent)), '/');
+            foreach ($preservePaths as $preserve) {
+                $s = rtrim(str_replace('\\', '/', trim($preserve)), '/');
+                if ($s === '' || $p === '') {
+                    continue;
+                }
+                if ($p === $s) {
+                    return "Persistent path '{$p}' exactly overlaps preserve path '{$s}' — remove it from one contract.";
+                }
+                if (str_starts_with($p . '/', $s . '/')) {
+                    return "Persistent path '{$p}' is inside preserve path '{$s}' — overlapping contracts are ambiguous.";
+                }
+                if (str_starts_with($s . '/', $p . '/')) {
+                    return "Preserve path '{$s}' is inside persistent path '{$p}' — overlapping contracts are ambiguous.";
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @return string|null an error describing the first rule a relative path
+     *                     violates, null when the path is a valid relative,
+     *                     non-traversing project path
+     */
+    private static function validateRelativePersistentPath(string $path): ?string
+    {
+        $path = trim($path);
+        if ($path === '') {
+            return 'must not be empty';
+        }
+        if (str_starts_with($path, '/')) {
+            return 'must be relative (no leading slash)';
+        }
+        if (str_starts_with($path, '\\')) {
+            return 'must be relative (no leading separator)';
+        }
+        if (preg_match('/^[A-Za-z]:[\\\\\\/]/', $path) === 1) {
+            return 'must not be a Windows drive path';
+        }
+        if (str_contains($path, "\0")) {
+            return 'must not contain NUL bytes';
+        }
+        if (preg_match('#(^|[\\\\\\/])\\.\\.([\\\\\\/]|$)#', $path) === 1) {
+            return 'must not contain traversal segments';
+        }
+
+        return null;
     }
 
     /**

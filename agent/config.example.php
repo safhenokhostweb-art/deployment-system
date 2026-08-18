@@ -87,6 +87,39 @@ return [
         //     // omitted (see ArtifactManager::DEFAULT_PRESERVE_PATHS).
         //     'artifact_preserve_paths' => ['.env', 'storage', 'public/storage'],
         //
+        //     // --- persistent state (see ArtifactManager::prepare() /
+        //     // preparePersistentReferences) ---
+        //     //
+        //     // A path listed here is NOT copied per release. Instead it
+        //     // becomes a symlink inside each staged release pointing at
+        //     // {artifact_persistent_root}/{path} — the real runtime data
+        //     // (e.g. a separately-mounted database or uploads volume)
+        //     // stays outside the swappable release and survives every
+        //     // swap/rollback untouched, and the release tree itself stays
+        //     // small. Both keys are strictly server-local: the Hub never
+        //     // learns them. Every configured path must already exist at
+        //     // {artifact_persistent_root}/{path} before the first deploy
+        //     // (a missing target fails closed — a fresh release must
+        //     // never silently start against empty state).
+        //     //
+        //     // Fail-closed contract (enforced in preparePersistentReferences
+        //     // AND by the Hub's project validator, whichever is reached
+        //     // first):
+        //     //  - relative, non-traversing project paths only (same rules
+        //     //    as artifact_preserve_paths);
+        //     //  - a persistent path must NOT exactly overlap, contain, or
+        //     //    be contained by any effective preserve path (that would
+        //     //    be an ambiguous contract: copied AND symlinked);
+        //     //  - artifact_persistent_root must be an existing absolute
+        //     //    directory (fail-closed if missing).
+        //     //
+        //     // The runtime-permissions sudo helper normalizes the
+        //     // persistent root's entries to www-data alongside the
+        //     // in-release runtime directories (see
+        //     // install/deployment-runtime-permissions).
+        //     // 'artifact_persistent_paths' => ['storage', 'database'],
+        //     // 'artifact_persistent_root' => '/var/www/deployment-system/persistent',
+        //
         //     // How many previous releases (renamed aside as
         //     // `working_directory.backup-*`, never deleted outright) to
         //     // keep on disk before the oldest are cleaned up.

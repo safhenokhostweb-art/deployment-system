@@ -138,4 +138,127 @@ class ProjectArtifactSettingsUpdateTest extends TestCase
             ->assertSee('requires_complete_artifact', false)
             ->assertSee(".env\nstorage", false);
     }
+
+    public function test_admin_can_persist_artifact_persistent_configuration(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = Project::factory()->create();
+
+        $this->actingAs($admin)->put(route('projects.update', $project), $this->payload($project, [
+            'artifact_persistent_paths' => ['database'],
+            'artifact_persistent_root' => '/var/www/deployment-system/persistent',
+        ]))->assertRedirect(route('projects.show', $project));
+
+        $project->refresh();
+        $this->assertSame(['database'], $project->artifact_persistent_paths);
+        $this->assertSame('/var/www/deployment-system/persistent', $project->artifact_persistent_root);
+    }
+
+    public function test_persistent_paths_normalize_backslashes(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = Project::factory()->create();
+
+        $this->actingAs($admin)->put(route('projects.update', $project), $this->payload($project, [
+            'artifact_persistent_paths' => ['database' . chr(92) . 'main'],
+            'artifact_persistent_root' => '/var/www/deployment-system/persistent',
+        ]))->assertRedirect(route('projects.show', $project));
+
+        $this->assertSame(['database/main'], $project->fresh()->artifact_persistent_paths);
+    }
+
+    public function test_invalid_artifact_persistent_paths_are_rejected(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+
+        foreach (['/absolute/path', '../secret', 'storage/../secret', 'C:\\\\temp'] as $path) {
+            $project = Project::factory()->create();
+            $this->actingAs($admin)->from(route('projects.edit', $project))
+                ->put(route('projects.update', $project), $this->payload($project, [
+                    'artifact_persistent_paths' => [$path],
+                    'artifact_persistent_root' => '/var/www/deployment-system/persistent',
+                ]))
+                ->assertRedirect(route('projects.edit', $project))
+                ->assertSessionHasErrors('artifact_persistent_paths');
+        }
+    }
+
+    public function test_persistent_paths_require_a_persistent_root(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = Project::factory()->create();
+
+        $this->actingAs($admin)->from(route('projects.edit', $project))
+            ->put(route('projects.update', $project), $this->payload($project, [
+                'artifact_persistent_paths' => ['database'],
+            ]))
+            ->assertRedirect(route('projects.edit', $project))
+            ->assertSessionHasErrors('artifact_persistent_root');
+    }
+
+    public function test_persistent_path_overlapping_default_preserve_paths_is_rejected(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = Project::factory()->create();
+
+        // No explicit preserve list means the built-in defaults (.env,
+        // storage, public/storage) — 'storage' as persistent is an
+        // ambiguous contract and must be rejected exactly like the agent's
+        // fail-closed prepare() would.
+        $this->actingAs($admin)->from(route('projects.edit', $project))
+            ->put(route('projects.update', $project), $this->payload($project, [
+                'artifact_persistent_paths' => ['storage'],
+                'artifact_persistent_root' => '/var/www/deployment-system/persistent',
+            ]))
+            ->assertRedirect(route('projects.edit', $project))
+            ->assertSessionHasErrors('artifact_persistent_paths');
+    }
+
+    public function test_persistent_path_overlapping_explicit_preserve_paths_is_rejected(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = Project::factory()->create();
+
+        $this->actingAs($admin)->from(route('projects.edit', $project))
+            ->put(route('projects.update', $project), $this->payload($project, [
+                'artifact_preserve_paths' => ['storage'],
+                'artifact_persistent_paths' => ['storage/app'],
+                'artifact_persistent_root' => '/var/www/deployment-system/persistent',
+            ]))
+            ->assertRedirect(route('projects.edit', $project))
+            ->assertSessionHasErrors('artifact_persistent_paths');
+    }
+
+    public function test_persistent_configuration_is_preserved_by_unrelated_project_updates(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = Project::factory()->create([
+            'artifact_persistent_paths' => ['database'],
+            'artifact_persistent_root' => '/var/www/deployment-system/persistent',
+        ]);
+
+        $this->actingAs($admin)->put(route('projects.update', $project), $this->payload($project, [
+            'application_root' => '.',
+        ]))->assertRedirect(route('projects.show', $project));
+
+        $project->refresh();
+        $this->assertSame(['database'], $project->artifact_persistent_paths);
+        $this->assertSame('/var/www/deployment-system/persistent', $project->artifact_persistent_root);
+    }
+
+    public function test_edit_form_exposes_persistent_settings_controls(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = Project::factory()->create([
+            'artifact_persistent_paths' => ['database'],
+            'artifact_persistent_root' => '/var/www/deployment-system/persistent',
+        ]);
+
+        $this->actingAs($admin)->get(route('projects.edit', $project))
+            ->assertOk()
+            ->assertSee('artifact_persistent_paths_text', false)
+            ->assertSee('artifact_persistent_root', false)
+            ->assertSee('database', false)
+            ->assertSee('/var/www/deployment-system/persistent', false);
+    }
 }

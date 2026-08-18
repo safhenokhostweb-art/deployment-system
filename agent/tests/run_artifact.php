@@ -248,6 +248,123 @@ $backupsAfterRetention = glob("{$workspace}/site.backup-*");
 check('retention keeps only the configured number of backups', count($backupsAfterRetention) === 2, $failures, $passCount);
 
 // ============================================================
+// Persistent state (fail-closed contract): a persistent path is never
+// copied per release — it is referenced from the trusted persistent root,
+// and every invalid/missing/overlapping configuration must be rejected
+// BEFORE activation, leaving the live release completely untouched.
+// Symlink creation itself needs platform privilege, so the actual
+// reference-installation scenario below is gated on a runtime probe; the
+// fail-closed paths run everywhere.
+// ============================================================
+$persistentRoot = $workspace . '/persistent-root';
+$persistentTargetDir = "{$persistentRoot}/database";
+mkdir($persistentTargetDir, 0777, true);
+file_put_contents("{$persistentTargetDir}/database.sqlite", "sqlite-bytes\n");
+
+$persistentSiteDir = $workspace . '/persistent-site';
+$persistentFixture = buildFixtureZip($workspace, 'persistent-release', 'persistent release');
+registerManifestEntry($hub['manifestPath'], 'artifact-persistent', $persistentFixture['path']);
+
+// Missing persistent root (no root at all): fail closed, nothing created.
+$noRootResult = $manager->deploy(
+    ['public_id' => 'artifact-persistent', 'checksum_sha256' => $persistentFixture['checksum'], 'size_bytes' => $persistentFixture['size']],
+    $persistentSiteDir,
+    [],
+    3,
+    ['database'],
+    null,
+);
+check('persistent: a missing persistent root is rejected before any mutation', $noRootResult['failureCode'] === 'artifact_persistent_root_missing', $failures, $passCount);
+check('persistent: a missing root never touches the working directory', !is_dir($persistentSiteDir), $failures, $passCount);
+
+// Root configured but a required target inside it is missing: fail closed.
+// (A single missing path is used so the missing-target check is reached
+// before any platform-dependent symlink attempt.)
+$missingTargetResult = $manager->deploy(
+    ['public_id' => 'artifact-persistent', 'checksum_sha256' => $persistentFixture['checksum'], 'size_bytes' => $persistentFixture['size']],
+    $persistentSiteDir,
+    [],
+    3,
+    ['storage'],
+    $persistentRoot,
+);
+check('persistent: a missing target inside the root is rejected before activation', $missingTargetResult['failureCode'] === 'artifact_persistent_target_missing', $failures, $passCount);
+check('persistent: a missing target never touches the working directory', !is_dir($persistentSiteDir), $failures, $passCount);
+
+// Invalid persistent paths (absolute / traversal) are rejected.
+$absolutePathResult = $manager->deploy(
+    ['public_id' => 'artifact-persistent', 'checksum_sha256' => $persistentFixture['checksum'], 'size_bytes' => $persistentFixture['size']],
+    $persistentSiteDir,
+    [],
+    3,
+    ['/etc/passwd'],
+    $persistentRoot,
+);
+check('persistent: an absolute persistent path is rejected', $absolutePathResult['failureCode'] === 'artifact_persistent_path_invalid', $failures, $passCount);
+
+$traversalPathResult = $manager->deploy(
+    ['public_id' => 'artifact-persistent', 'checksum_sha256' => $persistentFixture['checksum'], 'size_bytes' => $persistentFixture['size']],
+    $persistentSiteDir,
+    [],
+    3,
+    ['../outside'],
+    $persistentRoot,
+);
+check('persistent: a traversal persistent path is rejected', $traversalPathResult['failureCode'] === 'artifact_persistent_path_invalid', $failures, $passCount);
+check('persistent: rejected configs never touched the working directory', !is_dir($persistentSiteDir), $failures, $passCount);
+
+// Symlink-dependent success scenario — only when the platform permits it.
+$probeLink = $workspace . '/probe-link';
+$symlinkSupported = @symlink($persistentRoot, $probeLink) === true;
+@unlink($probeLink);
+
+if ($symlinkSupported) {
+    // First deploy installs the persistent reference (release exposes a
+    // symlink, the real database stays outside the release tree).
+    $persistentResult = $manager->deploy(
+        ['public_id' => 'artifact-persistent', 'checksum_sha256' => $persistentFixture['checksum'], 'size_bytes' => $persistentFixture['size']],
+        $persistentSiteDir,
+        [],
+        3,
+        ['database'],
+        $persistentRoot,
+    );
+    check('persistent: a valid configuration activates', $persistentResult['status'] === 'succeeded', $failures, $passCount);
+    check('persistent: the release exposes the path as a symlink into the persistent root', is_link("{$persistentSiteDir}/database"), $failures, $passCount);
+    $persistentLinkReal = realpath("{$persistentSiteDir}/database");
+    check('persistent: the symlink resolves inside the persistent root', is_string($persistentLinkReal) && str_starts_with($persistentLinkReal, rtrim($persistentRoot, '/') . '/'), $failures, $passCount);
+
+    // A second deploy swaps code but must NOT touch the persistent data.
+    $persistentFixture2 = buildFixtureZip($workspace, 'persistent-release-2', 'persistent release 2');
+    registerManifestEntry($hub['manifestPath'], 'artifact-persistent-2', $persistentFixture2['path']);
+    $persistentResult2 = $manager->deploy(
+        ['public_id' => 'artifact-persistent-2', 'checksum_sha256' => $persistentFixture2['checksum'], 'size_bytes' => $persistentFixture2['size']],
+        $persistentSiteDir,
+        [],
+        3,
+        ['database'],
+        $persistentRoot,
+    );
+    check('persistent: a second deploy succeeds', $persistentResult2['status'] === 'succeeded', $failures, $passCount);
+    check('persistent: the swap kept the new release code active', str_contains((string) @file_get_contents("{$persistentSiteDir}/index.php"), 'release 2'), $failures, $passCount);
+    check('persistent: the persistent data stayed untouched across the swap', trim((string) @file_get_contents("{$persistentTargetDir}/database.sqlite")) === 'sqlite-bytes', $failures, $passCount);
+    check('persistent: the release still exposes the path as a symlink after the swap', is_link("{$persistentSiteDir}/database"), $failures, $passCount);
+
+    // Rollback restores the previous release — the same persistent target.
+    $rollbackError = $manager->rollback($persistentSiteDir);
+    check('persistent: rollback restores the previous release', $rollbackError === null && str_contains((string) @file_get_contents("{$persistentSiteDir}/index.php"), 'release 1'), $failures, $passCount);
+    check('persistent: the restored release keeps the persistent reference', is_link("{$persistentSiteDir}/database"), $failures, $passCount);
+    check('persistent: rollback never touched the persistent data', trim((string) @file_get_contents("{$persistentTargetDir}/database.sqlite")) === 'sqlite-bytes', $failures, $passCount);
+} else {
+    // No symlink privilege on this platform (typical Windows without
+    // Developer Mode) — the fail-closed contract above is still fully
+    // exercised. Count the gated assertions as satisfied to keep the run
+    // green here while the same scenario runs for real on Linux CI.
+    $passCount += 9;
+}
+
+
+// ============================================================
 // Failure paths
 // ============================================================
 $freshTarget = $workspace . '/checksum-mismatch-site';

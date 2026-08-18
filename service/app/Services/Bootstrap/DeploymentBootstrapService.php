@@ -353,13 +353,20 @@ class DeploymentBootstrapService
      * not abort the deploy, but a failure leaving it should be visible
      * (silently swallowing that would leave the site down with no error).
      *
-     * @return array<int, array{name: string, command: string}>
+     * When the Hub attaches a matching Local-Agent-built artifact, the
+     * maintenance entry is marked `before_activation` so the agent runs it
+     * against the CURRENT release before the atomic swap, and `git pull`
+     * is skipped entirely (the artifact already contains the exact
+     * source/vendor/build for {commit} — resetting the repo checkout after
+     * activation would only fight the freshly-activated release).
+     *
+     * @return array<int, array{name: string, command: string, before_activation?: bool, skip_when_artifact?: bool}>
      */
     public function buildPipeline(DeploymentBootstrapConfig $config): array
     {
         $steps = [
-            ['name' => 'maintenance mode', 'command' => "cd {$config->laravelPath} && {$config->phpBinary} artisan down || true"],
-            ['name' => 'git pull', 'command' => "cd {$config->repositoryPath} && git fetch origin {branch} && git reset --hard {commit}"],
+            ['name' => 'maintenance mode', 'command' => "cd {$config->laravelPath} && {$config->phpBinary} artisan down || true", 'before_activation' => true],
+            ['name' => 'git pull', 'command' => "cd {$config->repositoryPath} && git fetch origin {branch} && git reset --hard {commit}", 'skip_when_artifact' => true],
         ];
 
         if ($config->runComposerInstall) {

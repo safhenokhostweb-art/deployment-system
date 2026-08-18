@@ -69,12 +69,85 @@ final class PipelineExecutor
         $runtimePermissionsNormalized = false;
         if (!empty($job['artifact'])) {
             $sequence++;
-            $artifactResult = $this->artifactManager->deploy(
+
+            // PHASE 1 — PREPARE: download/verify/extract + carry over legacy
+            // preserve paths + install persistent references into a staging
+            // sibling. No live release mutation happens here — every failure
+            // in this phase leaves the currently-active release completely
+            // untouched, and maintenance has not been entered yet.
+            $prepared = $this->artifactManager->prepare(
                 $job['artifact'],
                 $workingDirectory,
                 $projectConfig['artifact_preserve_paths'] ?? [],
-                (int) ($projectConfig['artifact_retention_count'] ?? 3),
+                $projectConfig['artifact_persistent_paths'] ?? [],
+                $projectConfig['artifact_persistent_root'] ?? null,
             );
+
+            if ($prepared['status'] !== 'succeeded' || $prepared['stagingPath'] === null) {
+                $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+                    'sequence' => $sequence,
+                    'step_name' => 'deploy artifact',
+                    'command' => "prepare artifact {$job['artifact']['public_id']}",
+                    'output' => mb_substr((string) ($prepared['message'] ?? 'Artifact preparation failed.'), -50000),
+                    'exit_code' => 1,
+                    'duration_ms' => null,
+                    'timed_out' => false,
+                    'failure_code' => $prepared['failureCode'] ?? null,
+                ]);
+                $this->logger->error("Job {$job['id']}: artifact preparation failed: {$prepared['message']}");
+                $this->client->request('POST', "/api/agent/jobs/{$job['id']}/status", [
+                    'status' => 'failed',
+                    'message' => $prepared['message'],
+                    'failure_code' => $prepared['failureCode'] ?? null,
+                ]);
+
+                return;
+            }
+
+            // Before-activation steps (e.g. `artisan down` maintenance entry
+            // marked 'before_activation') run against the CURRENT release
+            // while the prepared staging is not yet live. A failure here means
+            // maintenance may have been entered but the release was never
+            // touched: discard the staging, clean up maintenance, fail.
+            foreach ($job['pipeline'] as $step) {
+                if (($step['before_activation'] ?? false) !== true) {
+                    continue;
+                }
+
+                $sequence++;
+                $command = strtr($step['command'], $replacements);
+                $result = $this->executor->run($command, $workingDirectory, $stepTimeout);
+                $this->logger->info("Job {$job['id']} step {$sequence} ({$step['name']}) [before activation]: {$command}");
+
+                if (str_contains($command, 'artisan down') && $result['exitCode'] === 0) {
+                    $maintenanceEnabled = true;
+                }
+
+                $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+                    'sequence' => $sequence,
+                    'step_name' => $step['name'],
+                    'command' => $command,
+                    'output' => mb_substr($result['output'], -50000),
+                    'exit_code' => $result['exitCode'],
+                    'duration_ms' => $result['durationMs'],
+                    'timed_out' => $result['timedOut'],
+                ]);
+
+                if ($result['exitCode'] !== 0) {
+                    $this->logger->error("Job {$job['id']} pre-activation step {$sequence} ({$step['name']}) failed with exit code {$result['exitCode']}");
+                    $this->runMaintenanceCleanup($job, $sequence, $workingDirectory, $projectConfig, $stepTimeout, $maintenanceEnabled);
+                    $this->artifactManager->discardStaging($prepared['stagingPath']);
+                    $this->client->request('POST', "/api/agent/jobs/{$job['id']}/status", [
+                        'status' => 'failed',
+                        'message' => "Pre-activation step '{$step['name']}' failed — the live release was not changed.",
+                    ]);
+
+                    return;
+                }
+            }
+
+            // PHASE 2 — ACTIVATE: atomic swap of the prepared staging.
+            $artifactResult = $this->artifactManager->activate($workingDirectory, $prepared['stagingPath'], (int) ($projectConfig['artifact_retention_count'] ?? 3));
 
             $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
                 'sequence' => $sequence,
@@ -87,7 +160,8 @@ final class PipelineExecutor
             ]);
 
             if ($artifactResult['status'] !== 'succeeded') {
-                $this->logger->error("Job {$job['id']}: artifact deployment failed: {$artifactResult['message']}");
+                $this->logger->error("Job {$job['id']}: artifact activation failed: {$artifactResult['message']}");
+                $this->runMaintenanceCleanup($job, $sequence, $workingDirectory, $projectConfig, $stepTimeout, $maintenanceEnabled);
                 $this->client->request('POST', "/api/agent/jobs/{$job['id']}/status", [
                     'status' => 'failed',
                     'message' => $artifactResult['message'],
@@ -158,6 +232,11 @@ final class PipelineExecutor
         }
 
         foreach ($job['pipeline'] as $step) {
+            if ($usedArtifact && ($step['before_activation'] ?? false) === true) {
+                $this->logger->info("Job {$job['id']}: skipping step '{$step['name']}' — it already ran before artifact activation.");
+
+                continue;
+            }
             if ($usedArtifact && ($step['skip_when_artifact'] ?? false)) {
                 $this->logger->info("Job {$job['id']}: skipping step '{$step['name']}' — its work was already done by the artifact deploy above.");
 
@@ -203,15 +282,15 @@ final class PipelineExecutor
             if ($result['exitCode'] !== 0) {
                 $failed = true;
                 $this->logger->error("Job {$job['id']} step {$sequence} ({$step['name']}) failed with exit code {$result['exitCode']}");
-                if ($maintenanceEnabled && is_file(rtrim($workingDirectory, '/') . '/artisan')) {
-                    $cleanup = $this->executor->runArgv([$projectConfig['php_binary'] ?? 'php', 'artisan', 'up'], $workingDirectory, min($stepTimeout, 60));
-                    $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
-                        'sequence' => ++$sequence, 'step_name' => 'maintenance cleanup', 'command' => 'artisan up',
-                        'output' => mb_substr($cleanup['output'], -50000), 'exit_code' => $cleanup['exitCode'],
-                        'duration_ms' => $cleanup['durationMs'], 'timed_out' => $cleanup['timedOut'],
-                    ]);
-                    $this->logger->error("Job {$job['id']}: maintenance cleanup " . ($cleanup['exitCode'] === 0 ? 'succeeded' : 'failed') . ' after the original failure.');
+                // Post-activation failure: best-effort restore of the previous
+                // release so the site never keeps running a half-activated
+                // release, then the guaranteed maintenance cleanup. Persistent
+                // DB/storage stay current — rollback switches code only.
+                if ($usedArtifact) {
+                    $rollbackError = $this->artifactManager->rollback($workingDirectory);
+                    $this->logger->error("Job {$job['id']}: post-activation restore " . ($rollbackError === null ? 'succeeded (previous release restored)' : "failed: {$rollbackError}"));
                 }
+                $this->runMaintenanceCleanup($job, $sequence, $workingDirectory, $projectConfig, $stepTimeout, $maintenanceEnabled);
                 break;
             }
         }
@@ -221,6 +300,36 @@ final class PipelineExecutor
         ]);
 
         $this->logger->info("Job {$job['id']} finished: " . ($failed ? 'failed' : 'succeeded'));
+    }
+
+    /**
+     * Guaranteed maintenance cleanup: `artisan up` runs whenever maintenance
+     * mode was entered and the current release still has an artisan binary.
+     * Used on every failure path (pre-activation, activation, or a later
+     * pipeline step) so a failed deploy can never leave the site permanently
+     * down. Maintenance mode lives in persistent storage when the project is
+     * persistent-configured, so it survives the release swap and this
+     * cleanup is the single point that exits it.
+     *
+     * @param array<string, mixed> $job
+     * @param array<string, mixed> $projectConfig
+     */
+    private function runMaintenanceCleanup(array $job, int &$sequence, string $workingDirectory, array $projectConfig, int $stepTimeout, bool $maintenanceEnabled): void
+    {
+        if (!$maintenanceEnabled) {
+            return;
+        }
+        if (!is_file(rtrim($workingDirectory, '/') . '/artisan')) {
+            return;
+        }
+
+        $cleanup = $this->executor->runArgv([$projectConfig['php_binary'] ?? 'php', 'artisan', 'up'], $workingDirectory, min($stepTimeout, 60));
+        $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+            'sequence' => ++$sequence, 'step_name' => 'maintenance cleanup', 'command' => 'artisan up',
+            'output' => mb_substr($cleanup['output'], -50000), 'exit_code' => $cleanup['exitCode'],
+            'duration_ms' => $cleanup['durationMs'], 'timed_out' => $cleanup['timedOut'],
+        ]);
+        $this->logger->error("Job {$job['id']}: maintenance cleanup " . ($cleanup['exitCode'] === 0 ? 'succeeded' : 'failed') . ' after the original failure.');
     }
 
     /** @param array<int, mixed> $pipeline */
