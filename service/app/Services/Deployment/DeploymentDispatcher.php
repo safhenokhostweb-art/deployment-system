@@ -94,6 +94,40 @@ class DeploymentDispatcher
         return $deployment;
     }
 
+    /**
+     * Root-cause fix (no-source-change publish lifecycle gap): the one
+     * deployment-creation path that is NOT webhook-driven. A publish with
+     * no source changes succeeds without a git push, so no GitHub push
+     * webhook ever fires; PublishJobService::bridgeNoSourceChangeDeployment()
+     * calls this instead. It reuses the exact same legacy/multi-target
+     * creation semantics as the webhook path — status/approval follow the
+     * project's auto_deploy flag exactly like a push, the matching available
+     * Artifact is attached, and the trigger is recorded as
+     * TRIGGER_PUBLISH (with publish_job_id in the audit metadata) so the
+     * audit trail says why/how this deployment was created.
+     */
+    public function createFromPublish(Project $project, string $commitHash, string $branch, string $triggeredBy, ?int $publishJobId = null): Deployment
+    {
+        $targets = $this->resolver->resolveTargetsFor($project);
+
+        if ($this->isLegacyTargetSet($targets)) {
+            return $this->createLegacyFromPublish($project, $commitHash, $branch, $triggeredBy, $publishJobId);
+        }
+
+        return $this->createMultiTarget(
+            project: $project,
+            targets: $targets,
+            commitHash: $commitHash,
+            branch: $branch,
+            trigger: Deployment::TRIGGER_PUBLISH,
+            triggeredBy: $triggeredBy,
+            autoApprove: $project->auto_deploy,
+            auditAction: $project->auto_deploy ? 'deployment.created_from_publish' : 'deployment.created_from_publish_pending_approval',
+            auditActorType: AuditLogEntry::ACTOR_AGENT,
+            auditMetadata: ['publish_job_id' => $publishJobId],
+        );
+    }
+
     public function approve(Deployment $deployment, string $approvedBy): Deployment
     {
         abort_unless($deployment->status === Deployment::STATUS_PENDING_APPROVAL, 409, 'Only pending_approval deployments can be approved.');
@@ -196,79 +230,113 @@ class DeploymentDispatcher
         return count($targets) === 1 && $targets[0]->isSynthesized;
     }
 
-    // --- Legacy path: unmodified bodies of the pre-3-C.2 methods --------
+    // --- Legacy path: one shared body, three trigger variants -------------
+    // The webhook/manual variants below are the exact pre-Phase-3-C.2
+    // method bodies, extracted into one shared createLegacy() so the
+    // publish bridge reuses them instead of duplicating a third
+    // near-identical creation. Both existing variants' behavior is
+    // unchanged — each wrapper passes exactly the values its original
+    // body hardcoded.
 
     private function createLegacyFromWebhook(Project $project, string $commitHash, string $branch, ?string $pusher): Deployment
     {
-        return DB::transaction(function () use ($project, $commitHash, $branch, $pusher) {
+        return $this->createLegacy(
+            project: $project,
+            commitHash: $commitHash,
+            branch: $branch,
+            trigger: Deployment::TRIGGER_WEBHOOK,
+            triggeredBy: $pusher ?? 'github',
+            autoApprove: $project->auto_deploy,
+            approvedBy: 'auto_deploy',
+            auditAction: $project->auto_deploy ? 'deployment.created_and_auto_approved' : 'deployment.created_pending_approval',
+            auditActorType: AuditLogEntry::ACTOR_GITHUB,
+            auditActorIdentifier: $pusher,
+            auditMetadata: ['project_id' => $project->id, 'commit_hash' => $commitHash, 'branch' => $branch],
+        );
+    }
+
+    private function createLegacyManual(Project $project, string $commitHash, string $triggeredBy): Deployment
+    {
+        return $this->createLegacy(
+            project: $project,
+            commitHash: $commitHash,
+            branch: $project->branch,
+            trigger: Deployment::TRIGGER_MANUAL,
+            triggeredBy: $triggeredBy,
+            autoApprove: true,
+            approvedBy: $triggeredBy,
+            auditAction: 'deployment.created_manual',
+            auditActorType: AuditLogEntry::ACTOR_USER,
+            auditActorIdentifier: $triggeredBy,
+            auditMetadata: ['project_id' => $project->id, 'commit_hash' => $commitHash],
+        );
+    }
+
+    private function createLegacyFromPublish(Project $project, string $commitHash, string $branch, string $triggeredBy, ?int $publishJobId): Deployment
+    {
+        return $this->createLegacy(
+            project: $project,
+            commitHash: $commitHash,
+            branch: $branch,
+            trigger: Deployment::TRIGGER_PUBLISH,
+            triggeredBy: $triggeredBy,
+            autoApprove: $project->auto_deploy,
+            approvedBy: 'auto_deploy',
+            auditAction: $project->auto_deploy ? 'deployment.created_from_publish' : 'deployment.created_from_publish_pending_approval',
+            auditActorType: AuditLogEntry::ACTOR_AGENT,
+            auditActorIdentifier: $triggeredBy,
+            auditMetadata: ['publish_job_id' => $publishJobId, 'project_id' => $project->id, 'commit_hash' => $commitHash, 'branch' => $branch],
+        );
+    }
+
+    /**
+     * @param array<string, mixed> $auditMetadata
+     */
+    private function createLegacy(
+        Project $project,
+        string $commitHash,
+        string $branch,
+        string $trigger,
+        string $triggeredBy,
+        bool $autoApprove,
+        string $approvedBy,
+        string $auditAction,
+        string $auditActorType,
+        ?string $auditActorIdentifier,
+        array $auditMetadata,
+    ): Deployment {
+        return DB::transaction(function () use ($project, $commitHash, $branch, $trigger, $triggeredBy, $autoApprove, $approvedBy, $auditAction, $auditActorType, $auditActorIdentifier, $auditMetadata) {
             $previousCommit = $project->latestSuccessfulDeployment()?->commit_hash;
 
             $deployment = Deployment::create([
                 'project_id' => $project->id,
                 'server_id' => $project->server_id,
                 'action' => Deployment::ACTION_DEPLOY,
-                'status' => $project->auto_deploy ? Deployment::STATUS_QUEUED : Deployment::STATUS_PENDING_APPROVAL,
+                'status' => $autoApprove ? Deployment::STATUS_QUEUED : Deployment::STATUS_PENDING_APPROVAL,
                 'commit_hash' => $commitHash,
                 'previous_commit_hash' => $previousCommit,
                 'branch' => $branch,
-                'trigger' => Deployment::TRIGGER_WEBHOOK,
-                'triggered_by' => $pusher ?? 'github',
-                'queued_at' => $project->auto_deploy ? now() : null,
-                'approved_by' => $project->auto_deploy ? 'auto_deploy' : null,
-                'approved_at' => $project->auto_deploy ? now() : null,
+                'trigger' => $trigger,
+                'triggered_by' => $triggeredBy,
+                'queued_at' => $autoApprove ? now() : null,
+                'approved_by' => $autoApprove ? $approvedBy : null,
+                'approved_at' => $autoApprove ? now() : null,
             ]);
 
             $this->attachArtifactIfAvailable($deployment, $project);
 
             AuditLogEntry::record(
-                actorType: AuditLogEntry::ACTOR_GITHUB,
-                actorIdentifier: $pusher,
-                action: $project->auto_deploy ? 'deployment.created_and_auto_approved' : 'deployment.created_pending_approval',
+                actorType: $auditActorType,
+                actorIdentifier: $auditActorIdentifier,
+                action: $auditAction,
                 subjectType: Deployment::class,
                 subjectId: $deployment->id,
-                metadata: ['project_id' => $project->id, 'commit_hash' => $commitHash, 'branch' => $branch],
+                metadata: $auditMetadata,
             );
 
             if ($deployment->status === Deployment::STATUS_QUEUED) {
                 event(new DeploymentStarted($deployment));
             }
-
-            return $deployment;
-        });
-    }
-
-    private function createLegacyManual(Project $project, string $commitHash, string $triggeredBy): Deployment
-    {
-        return DB::transaction(function () use ($project, $commitHash, $triggeredBy) {
-            $previousCommit = $project->latestSuccessfulDeployment()?->commit_hash;
-
-            $deployment = Deployment::create([
-                'project_id' => $project->id,
-                'server_id' => $project->server_id,
-                'action' => Deployment::ACTION_DEPLOY,
-                'status' => Deployment::STATUS_QUEUED,
-                'commit_hash' => $commitHash,
-                'previous_commit_hash' => $previousCommit,
-                'branch' => $project->branch,
-                'trigger' => Deployment::TRIGGER_MANUAL,
-                'triggered_by' => $triggeredBy,
-                'approved_by' => $triggeredBy,
-                'approved_at' => now(),
-                'queued_at' => now(),
-            ]);
-
-            $this->attachArtifactIfAvailable($deployment, $project);
-
-            AuditLogEntry::record(
-                actorType: AuditLogEntry::ACTOR_USER,
-                actorIdentifier: $triggeredBy,
-                action: 'deployment.created_manual',
-                subjectType: Deployment::class,
-                subjectId: $deployment->id,
-                metadata: ['project_id' => $project->id, 'commit_hash' => $commitHash],
-            );
-
-            event(new DeploymentStarted($deployment));
 
             return $deployment;
         });
@@ -287,6 +355,9 @@ class DeploymentDispatcher
         string $trigger,
         string $triggeredBy,
         bool $autoApprove,
+        ?string $auditAction = null,
+        ?string $auditActorType = null,
+        array $auditMetadata = [],
     ): Deployment {
         if (count($targets) === 0) {
             AuditLogEntry::record(
@@ -303,7 +374,7 @@ class DeploymentDispatcher
             abort(422, "Project '{$project->name}' has an Environment configured but no active deployment targets.");
         }
 
-        return DB::transaction(function () use ($project, $targets, $commitHash, $branch, $trigger, $triggeredBy, $autoApprove) {
+        return DB::transaction(function () use ($project, $targets, $commitHash, $branch, $trigger, $triggeredBy, $autoApprove, $auditAction, $auditActorType, $auditMetadata) {
             $previousCommit = $project->latestSuccessfulDeployment()?->commit_hash;
 
             $deployment = Deployment::create([
@@ -323,7 +394,7 @@ class DeploymentDispatcher
                 'trigger' => $trigger,
                 'triggered_by' => $triggeredBy,
                 'queued_at' => $autoApprove ? now() : null,
-                'approved_by' => $autoApprove ? ($trigger === Deployment::TRIGGER_WEBHOOK ? 'auto_deploy' : $triggeredBy) : null,
+                'approved_by' => $autoApprove ? ($trigger === Deployment::TRIGGER_WEBHOOK || $trigger === Deployment::TRIGGER_PUBLISH ? 'auto_deploy' : $triggeredBy) : null,
                 'approved_at' => $autoApprove ? now() : null,
             ]);
 
@@ -333,13 +404,16 @@ class DeploymentDispatcher
                 $this->createTasksForDeployment($deployment, $targets);
             }
 
+            $action = $auditAction ?? ($autoApprove ? 'deployment.created_multi_target_and_auto_approved' : 'deployment.created_multi_target_pending_approval');
+            $actorType = $auditActorType ?? ($trigger === Deployment::TRIGGER_WEBHOOK ? AuditLogEntry::ACTOR_GITHUB : AuditLogEntry::ACTOR_USER);
+
             AuditLogEntry::record(
-                actorType: $trigger === Deployment::TRIGGER_WEBHOOK ? AuditLogEntry::ACTOR_GITHUB : AuditLogEntry::ACTOR_USER,
+                actorType: $actorType,
                 actorIdentifier: $triggeredBy,
-                action: $autoApprove ? 'deployment.created_multi_target_and_auto_approved' : 'deployment.created_multi_target_pending_approval',
+                action: $action,
                 subjectType: Deployment::class,
                 subjectId: $deployment->id,
-                metadata: ['project_id' => $project->id, 'commit_hash' => $commitHash, 'branch' => $branch, 'target_count' => count($targets)],
+                metadata: array_merge(['project_id' => $project->id, 'commit_hash' => $commitHash, 'branch' => $branch, 'target_count' => count($targets)], $auditMetadata),
             );
 
             if ($autoApprove) {

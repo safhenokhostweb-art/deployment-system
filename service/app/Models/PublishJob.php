@@ -113,6 +113,7 @@ class PublishJob extends Model
         'reviewed_mapping_id',
         'reviewed_working_tree_clean',
         'result_commit_hash',
+        'deployment_id',
         'requested_by',
         'approved_by',
         'approved_at',
@@ -157,6 +158,17 @@ class PublishJob extends Model
     public function project(): BelongsTo
     {
         return $this->belongsTo(Project::class);
+    }
+
+    /**
+     * The one Deployment created for this publish when it succeeded with no
+     * source changes and therefore no push/webhook (see
+     * PublishJobService::bridgeNoSourceChangeDeployment()). Null for every
+     * push-based publish — those remain webhook-driven and uncorrelated.
+     */
+    public function deployment(): BelongsTo
+    {
+        return $this->belongsTo(Deployment::class);
     }
 
     public function isTerminal(): bool

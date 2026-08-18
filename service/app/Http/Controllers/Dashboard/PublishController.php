@@ -86,16 +86,27 @@ class PublishController extends Controller
 
         // Phase 5.5: PublishJob and Deployment are deliberately independent
         // (a publish only ever pushes — the GitHub webhook is what actually
-        // creates a Deployment, completely unrelated code). This is a
-        // read-only lookup by the one thing they share, the commit hash, so
-        // the operator can see what happened after their push without this
-        // controller reaching into the webhook/pipeline domain at all.
+        // creates a Deployment for a push, completely unrelated code).
+        // Root-cause fix (no-source-change publish gap): a publish that
+        // succeeded WITHOUT a push has no webhook, so PublishJobService's
+        // bridge created exactly one Deployment and correlated it here
+        // (deployment_id). For a no-source-change publish the explicit
+        // correlation is the ONLY valid display — falling back to a
+        // commit-hash guess would surface an unrelated historical
+        // deployment for the same SHA (e.g. the old failed attempt that
+        // this publish is re-deploying), which is exactly the misleading
+        // association this fix exists to eliminate. Push-based publishes
+        // have no correlation and keep the read-only commit-hash lookup so
+        // the operator sees the webhook-created deployment.
         $resultingDeployment = null;
         if ($publishJob->status === PublishJob::STATUS_SUCCEEDED && $publishJob->result_commit_hash) {
-            $resultingDeployment = Deployment::where('project_id', $project->id)
-                ->where('commit_hash', $publishJob->result_commit_hash)
-                ->latest()
-                ->first();
+            $resultingDeployment = $publishJob->no_source_change
+                ? $publishJob->deployment
+                : ($publishJob->deployment
+                    ?? Deployment::where('project_id', $project->id)
+                        ->where('commit_hash', $publishJob->result_commit_hash)
+                        ->latest()
+                        ->first());
         }
 
         // Live evidence validity for an awaiting_approval review: null for

@@ -13,6 +13,7 @@ use App\Models\LocalChangeDetectionJob;
 use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use App\Models\PublishJob;
+use App\Services\Deployment\DeploymentDispatcher;
 use App\Services\Security\SecretRedactor;
 use Illuminate\Support\Facades\DB;
 
@@ -36,6 +37,7 @@ class PublishJobService
 {
     public function __construct(
         private readonly SecretRedactor $redactor,
+        private readonly DeploymentDispatcher $deployments,
     ) {
     }
 
@@ -593,9 +595,127 @@ class PublishJobService
             metadata: ['commit_hash' => $commitHash],
         );
 
+        // No-source-change publish bridge: this publish succeeded WITHOUT a
+        // git push (the commit already existed remotely), so no GitHub push
+        // webhook will ever fire and no Deployment would be created by the
+        // normal webhook-driven path. Create the one intended Deployment
+        // attempt here, idempotently, and correlate it to this publish.
+        $this->bridgeNoSourceChangeDeployment($job);
+
         event(new PublishJobSucceeded($job->refresh()));
 
         return $job;
+    }
+
+    /**
+     * The explicit, idempotent publish-to-deployment bridge for the one
+     * case the webhook path cannot cover: a `publish` that succeeded with
+     * `no_source_change` (verified existing commit, no git commit/push, no
+     * GitHub push webhook). Reuses DeploymentDispatcher::createFromPublish()
+     * — the same legacy/multi-target creation semantics as a push — with
+     * trigger `publish`, auto_deploy/approval semantics identical to the
+     * webhook path, and the matching available Artifact attached.
+     *
+     * The matching AVAILABLE artifact is REQUIRED: for a no-source-change
+     * publish the uploaded artifact IS the deployable payload (no push
+     * happened, so the git path the server agent would otherwise fall back
+     * to is exactly the GitHub dependency this system exists to eliminate,
+     * and it could deploy content not represented by the reviewed artifact
+     * build). If no artifact matches, the bridge skips deterministically and
+     * records publish_job.deployment_bridge_failed (reason
+     * artifact_unavailable) — no polling, no timing race, no git fallback.
+     *
+     * Exactly one Deployment is created per PublishJob: the row is locked
+     * and deployment_id re-checked inside a transaction, and a repeated
+     * success report for an already-terminal job never reaches this bridge
+     * at all. A webhook that fires for the same commit remains a separate,
+     * legitimate event (a real push) and is never touched by this bridge.
+     */
+    private function bridgeNoSourceChangeDeployment(PublishJob $job): void
+    {
+        if ($job->action !== PublishJob::ACTION_PUBLISH || !$job->no_source_change || $job->deployment_id !== null) {
+            return;
+        }
+
+        $result = DB::transaction(function () use ($job) {
+            $locked = PublishJob::query()->lockForUpdate()->find($job->id);
+
+            if ($locked === null
+                || $locked->deployment_id !== null
+                || $locked->action !== PublishJob::ACTION_PUBLISH
+                || !$locked->no_source_change) {
+                return null;
+            }
+
+            $artifact = Artifact::query()
+                ->where('project_id', $locked->project_id)
+                ->where('commit_hash', $locked->result_commit_hash)
+                ->where('status', Artifact::STATUS_AVAILABLE)
+                ->first();
+
+            if ($artifact === null) {
+                $this->recordDeploymentBridgeFailure(
+                    $locked,
+                    'No available artifact matches the reviewed commit — the no-source-change publish bridge requires the uploaded artifact and will not fall back to the legacy git pipeline.',
+                    'artifact_unavailable',
+                );
+
+                return null;
+            }
+
+            try {
+                $deployment = $this->deployments->createFromPublish(
+                    $locked->project,
+                    (string) $locked->result_commit_hash,
+                    (string) $locked->reviewed_branch,
+                    (string) ($locked->localAgent?->public_id ?? 'local-agent'),
+                    $locked->id,
+                );
+            } catch (\Throwable $e) {
+                // The publish itself succeeded — only the deployment bridge
+                // failed (e.g. a multi-target project with no active
+                // targets). Record why, keep the publish terminal, and let
+                // the UI show that no deployment attempt exists.
+                $this->recordDeploymentBridgeFailure($locked, $e->getMessage());
+
+                return null;
+            }
+
+            $locked->update(['deployment_id' => $deployment->id]);
+
+            AuditLogEntry::record(
+                actorType: AuditLogEntry::ACTOR_AGENT,
+                actorIdentifier: $locked->localAgent?->public_id,
+                action: 'publish_job.deployment_bridged',
+                subjectType: PublishJob::class,
+                subjectId: $locked->id,
+                metadata: ['deployment_id' => $deployment->id, 'commit_hash' => $locked->result_commit_hash, 'branch' => $locked->reviewed_branch],
+            );
+
+            return $deployment;
+        });
+
+        if ($result === null) {
+            return;
+        }
+    }
+
+    private function recordDeploymentBridgeFailure(PublishJob $job, string $error, ?string $reason = null): void
+    {
+        AuditLogEntry::record(
+            actorType: AuditLogEntry::ACTOR_SYSTEM,
+            actorIdentifier: null,
+            action: 'publish_job.deployment_bridge_failed',
+            subjectType: PublishJob::class,
+            subjectId: $job->id,
+            metadata: array_filter([
+                'project_id' => $job->project_id,
+                'commit_hash' => $job->result_commit_hash,
+                'branch' => $job->reviewed_branch,
+                'reason' => $reason,
+                'error' => $error,
+            ]),
+        );
     }
 
     public function reportFailure(PublishJob $job, string $message, ?string $output = null, ?string $failureCode = null): PublishJob

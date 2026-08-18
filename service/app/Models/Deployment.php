@@ -50,6 +50,12 @@ class Deployment extends Model
     public const TRIGGER_WEBHOOK = 'webhook';
     public const TRIGGER_MANUAL = 'manual';
     public const TRIGGER_ROLLBACK = 'rollback';
+    /**
+     * Created by the publish-to-deployment bridge (PublishJobService) for a
+     * no-source-change publish that succeeded without a git push — the one
+     * case where the GitHub push webhook cannot be the deployment trigger.
+     */
+    public const TRIGGER_PUBLISH = 'publish';
 
     public const FAILURE_CODE_BUILD_FAILED = 'build_failed';
     public const FAILURE_CODE_MIGRATION_FAILED = 'migration_failed';
