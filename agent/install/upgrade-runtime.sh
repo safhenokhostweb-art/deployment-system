@@ -16,6 +16,14 @@ ETC_BACKUP="/root/deployment-agent-runtime-${STAMP}"
 php -l "$SOURCE_DIR/agent.php" >/dev/null
 for file in "$SOURCE_DIR"/lib/*.php; do php -l "$file" >/dev/null; done
 
+# Identity compatibility: config.php is preserved untouched by design, and
+# agent.php resolves the canonical `agent_id` with legacy `server_id` /
+# `local_agent_id` fallbacks, so a legacy-only config keeps working after
+# this upgrade. Inform only — never fail an upgrade over a legacy config.
+if ! grep -q "'agent_id'" "$INSTALL_DIR/config.php"; then
+    echo "NOTICE: $INSTALL_DIR/config.php has no canonical 'agent_id' — using its legacy identity key (server_id/local_agent_id). Rotate to 'agent_id' when possible."
+fi
+
 cp -a "$INSTALL_DIR" "$BACKUP"
 mkdir -p "$ETC_BACKUP"
 for path in /usr/local/sbin/deployment-runtime-permissions /usr/local/sbin/deployment-service-reload /etc/sudoers.d/deployment-runtime-permissions /etc/sudoers.d/deployment-service-reload /etc/systemd/system/deployment-agent.service.d/10-privileged-helpers.conf; do

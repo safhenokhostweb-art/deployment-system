@@ -60,9 +60,19 @@ if (!is_file($configPath)) {
 $config = require $configPath;
 $logger = new Logger($config['log_dir']);
 
-$agentIdentity = $config['agent_id'] ?? $config['server_id'] ?? null;
+// Identity resolution: `agent_id` is the canonical approved-Agent public_id.
+// An official in-place upgrade preserves config.php untouched
+// (install/upgrade-runtime.sh), so a legacy config that still holds a
+// pre-Agent identity key must keep booting: fall back to the legacy
+// Server-agent key `server_id`, then the legacy Local-Agent key
+// `local_agent_id`. These are upgrade-compatibility fallbacks only — the
+// operator should rotate config.php to `agent_id` at the next opportunity.
+$agentIdentity = $config['agent_id']
+    ?? $config['server_id']
+    ?? $config['local_agent_id']
+    ?? null;
 if (!is_string($agentIdentity) || $agentIdentity === '') {
-    fwrite(STDERR, "config.php requires agent_id (the approved Agent public_id).\n");
+    fwrite(STDERR, "config.php requires agent_id (the approved Agent public_id); legacy server_id/local_agent_id are honored only as upgrade fallbacks.\n");
     exit(1);
 }
 $client = new Client(

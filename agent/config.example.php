@@ -17,7 +17,12 @@ return [
     // Identifier for this server, issued by the Deployment Service when
     // the server was registered in its dashboard.
     // New Agent-authenticated installs use the approved Agent public_id.
-    // Legacy installs may keep server_id temporarily, but cannot claim DeploymentTasks.
+    // Legacy installs may keep `server_id` (Server-agent installs) or
+    // `local_agent_id` (Local-Agent installs) temporarily — agent.php falls
+    // back to them, in that order, so an official in-place upgrade that
+    // preserves config.php never breaks an existing installation. Those
+    // legacy identities cannot claim DeploymentTasks; rotate this key to
+    // the approved Agent public_id at the next opportunity.
     'agent_id' => 'CHANGE_ME_AGENT_PUBLIC_ID',
 
     // Bearer token issued by the Deployment Service for this server.
