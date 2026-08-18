@@ -199,6 +199,20 @@ sed \
     -e "s#/usr/bin/php #${PHP_BIN} #g" \
     "$SCRIPT_DIR/files/systemd/deployment-agent.service.example" > "$UNIT_PATH"
 
+# The deployment pipeline runs tightly constrained sudo helpers (see
+# agent/install/upgrade-runtime.sh). sudo requires NoNewPrivileges=false;
+# the sudoers allowlists still reject every other elevation attempt. Same
+# dedicated drop-in pattern as upgrade-runtime.sh and the production fix.
+# Written idempotently (cat > overwrites) so re-running this installer is
+# safe and never duplicates anything or touches user-created drop-ins.
+install -d -o root -g root -m 0755 "/etc/systemd/system/${SERVICE_NAME}.service.d"
+cat > "/etc/systemd/system/${SERVICE_NAME}.service.d/10-privileged-helpers.conf" <<'EOF'
+[Service]
+# sudo is constrained to two literal root-owned helpers in /etc/sudoers.d.
+NoNewPrivileges=false
+EOF
+chmod 0644 "/etc/systemd/system/${SERVICE_NAME}.service.d/10-privileged-helpers.conf"
+
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME" >/dev/null
 systemctl restart "$SERVICE_NAME"

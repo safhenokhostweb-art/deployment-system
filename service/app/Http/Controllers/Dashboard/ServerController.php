@@ -25,7 +25,7 @@ class ServerController extends Controller
      * actually running on this box" is answerable by reading the
      * installer's own log instead of guessing.
      */
-    private const INSTALLER_VERSION = 'devops-hub-v1-ready-4';
+    private const INSTALLER_VERSION = 'devops-hub-v1-ready-5';
 
     public function __construct(
         private readonly AgentCredentialService $credentials,
@@ -529,6 +529,7 @@ cleanup_on_failure() {
         systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
         systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
         rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+        rm -f "/etc/systemd/system/${SERVICE_NAME}.service.d/10-privileged-helpers.conf"
         systemctl daemon-reload >/dev/null 2>&1 || true
         rm -rf "$INSTALL_DIR"
         if [ "$CREATED_USER" = "1" ]; then
@@ -622,6 +623,20 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 SYSTEMD_UNIT_EOF
+
+# The agent's deployment pipeline runs tightly constrained sudo helpers
+# (see agent/install/upgrade-runtime.sh); sudo requires NoNewPrivileges=false
+# while the sudoers allowlists still reject every other elevation attempt.
+# Same dedicated drop-in pattern as upgrade-runtime.sh and the production
+# fix. Written idempotently (cat > overwrites) so re-running this installer
+# is safe and never duplicates anything or touches user-created drop-ins.
+mkdir -p "/etc/systemd/system/${SERVICE_NAME}.service.d"
+cat > "/etc/systemd/system/${SERVICE_NAME}.service.d/10-privileged-helpers.conf" <<'PRIVILEGED_HELPERS_EOF'
+[Service]
+# sudo is constrained to two literal root-owned helpers in /etc/sudoers.d.
+NoNewPrivileges=false
+PRIVILEGED_HELPERS_EOF
+chmod 0644 "/etc/systemd/system/${SERVICE_NAME}.service.d/10-privileged-helpers.conf"
 
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME" >/dev/null 2>&1

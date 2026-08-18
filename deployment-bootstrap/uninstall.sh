@@ -73,6 +73,15 @@ if [ -f "$UNIT_PATH" ]; then
     say "واحد systemd ($UNIT_PATH) حذف شد."
 fi
 
+# حذف فقط drop-in ای که همین installer ساخته؛ drop-in های بی‌ربط کاربر در
+# همان دایرکتوری دست‌نخورده می‌مانند (خود دایرکتوری فقط در صورت خالی بودن حذف می‌شود).
+DROPIN_PATH="/etc/systemd/system/${SERVICE_NAME}.service.d/10-privileged-helpers.conf"
+if [ -f "$DROPIN_PATH" ]; then
+    rm -f "$DROPIN_PATH"
+    rmdir "/etc/systemd/system/${SERVICE_NAME}.service.d" 2>/dev/null || true
+    say "drop-in systemd ($DROPIN_PATH) حذف شد."
+fi
+
 SUDOERS_PATH="/etc/sudoers.d/${SERVICE_USER}"
 if [ -f "$SUDOERS_PATH" ]; then
     rm -f "$SUDOERS_PATH"

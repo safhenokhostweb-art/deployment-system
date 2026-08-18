@@ -30,6 +30,7 @@ $runtimeSudoers = (string) file_get_contents(__DIR__ . '/../install/deployment-r
 $service = (string) file_get_contents(__DIR__ . '/../install/deployment-service-reload');
 $serviceSudoers = (string) file_get_contents(__DIR__ . '/../install/deployment-service-reload.sudoers');
 $pipeline = (string) file_get_contents(__DIR__ . '/../lib/PipelineExecutor.php');
+$upgrade = str_replace(["\r\n", "\r"], "\n", (string) file_get_contents(__DIR__ . '/../install/upgrade-runtime.sh'));
 
 check('deployment-system remains an explicit runtime-permissions project key', str_contains($runtime, 'deployment-system)'), $failures, $passCount);
 check('saas-platform is an explicit runtime-permissions project key', str_contains($runtime, 'saas-platform)'), $failures, $passCount);
@@ -65,6 +66,10 @@ check('a running restore group is restarted with its exact group selector', str_
 check('unexpected restore state fails closed', str_contains($service, 'Unexpected saas-restore-worker state: $restore_state') && str_contains($service, 'exit 70'), $failures, $passCount);
 check('unrelated Supervisor programs are absent from the service helper', !str_contains($service, 'customer-site-worker') && !str_contains($service, 'deployment-service-worker'), $failures, $passCount);
 check('service sudoers allows only the two literal approved arguments', str_contains($serviceSudoers, 'deployment-service-reload deployment-system') && str_contains($serviceSudoers, 'deployment-service-reload saas-platform'), $failures, $passCount);
+check('runtime upgrade keeps the privileged-helper drop-in for the agent service', str_contains($upgrade, 'deployment-agent.service.d/10-privileged-helpers.conf') && str_contains($upgrade, 'NoNewPrivileges=false'), $failures, $passCount);
+check('runtime upgrade writes the drop-in idempotently via overwrite, never append', str_contains($upgrade, "cat > /etc/systemd/system/deployment-agent.service.d/10-privileged-helpers.conf <<'EOF'") && !str_contains($upgrade, '>> /etc/systemd/system/deployment-agent.service.d/10-privileged-helpers.conf'), $failures, $passCount);
+check('runtime upgrade targets the deployment-agent service, never root', str_contains($upgrade, 'SERVICE=deployment-agent'), $failures, $passCount);
+check('runtime upgrade never removes systemd drop-in directories', !str_contains($upgrade, 'rm -rf /etc/systemd/system') && !str_contains($upgrade, 'rm -f /etc/systemd/system'), $failures, $passCount);
 check('PipelineExecutor resolves saas runtime permissions only through the fixed helper argv', str_contains($pipeline, "['sudo', '-n', '/usr/local/sbin/deployment-runtime-permissions', \$job['project_key']]"), $failures, $passCount);
 check('PipelineExecutor resolves saas service reload only through the fixed helper argv', str_contains($pipeline, "['sudo', '-n', '/usr/local/sbin/deployment-service-reload', \$job['project_key']]"), $failures, $passCount);
 

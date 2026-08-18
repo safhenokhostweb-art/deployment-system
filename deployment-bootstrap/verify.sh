@@ -190,6 +190,15 @@ if command -v systemctl >/dev/null 2>&1; then
     else
         bad "سرویس $SERVICE_NAME enable نشده است."
     fi
+
+    # drop-in مخصوص sudo helpers محدود — بدون آن (NoNewPrivileges=true)
+    # حتی sudo های کاملاً محدود شده هم در Pipeline کار نمی‌کنند.
+    DROPIN_PATH="/etc/systemd/system/${SERVICE_NAME}.service.d/10-privileged-helpers.conf"
+    if [ -f "$DROPIN_PATH" ] && grep -q '^NoNewPrivileges=false$' "$DROPIN_PATH"; then
+        ok "drop-in sudo helpers ($DROPIN_PATH) نصب و NoNewPrivileges=false است."
+    else
+        bad "drop-in $DROPIN_PATH پیدا نشد یا NoNewPrivileges=false ندارد — sudo های محدود Pipeline کار نخواهند کرد."
+    fi
 else
     bad "systemd روی این سیستم پیدا نشد."
 fi
