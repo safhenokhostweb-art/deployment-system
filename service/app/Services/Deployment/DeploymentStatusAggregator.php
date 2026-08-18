@@ -35,6 +35,18 @@ class DeploymentStatusAggregator
 
         $attributes = ['status' => $newStatus];
 
+        if ($newStatus === Deployment::STATUS_SUCCEEDED) {
+            // Root-cause fix (deployment details observability): mirror the
+            // legacy AgentJobService::updateStatus() Phase 5 semantics —
+            // every task succeeded means activation and every recipe
+            // health-check step already passed (the agent fails the instant
+            // any step fails), so an all-tasks-succeeded aggregate genuinely
+            // IS "verified deployed". Without this, a successful multi-target
+            // deployment showed "verified deployed: no" on the details page
+            // even though it passed every health check.
+            $attributes['deployed_at'] = now();
+        }
+
         if (in_array($newStatus, [Deployment::STATUS_SUCCEEDED, Deployment::STATUS_FAILED, Deployment::STATUS_PARTIAL_SUCCESS], true)) {
             $attributes['finished_at'] = now();
             $this->releaseEnvironmentLock($deployment);

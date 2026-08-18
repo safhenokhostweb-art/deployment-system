@@ -445,7 +445,7 @@ return [
         'queued' => 'زمان صف',
         'started' => 'زمان شروع',
         'finished' => 'زمان پایان',
-        'verified_deployed' => 'استقرار تایید شده',
+        'verified_deployed' => 'تأیید سلامت استقرار',
         'verified_deployed_yes' => 'بله',
         'verified_deployed_no' => 'تایید نشده',
         'failure' => 'خطا',

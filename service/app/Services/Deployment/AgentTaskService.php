@@ -121,6 +121,8 @@ class AgentTaskService
 
     private function claim(DeploymentTask $task, Agent $agent): array
     {
+        $now = now();
+
         $task->update(['status' => DeploymentTask::STATUS_RUNNING, 'next_retry_at' => null]);
 
         $attemptNumber = $task->agentJobs()->count() + 1;
@@ -130,9 +132,23 @@ class AgentTaskService
             'agent_id' => $agent->id,
             'attempt' => $attemptNumber,
             'status' => AgentJob::STATUS_RUNNING,
-            'started_at' => now(),
-            'last_activity_at' => now(),
+            'started_at' => $now,
+            'last_activity_at' => $now,
         ]);
+
+        // Root-cause fix (deployment details observability): the
+        // deployment-level started_at was never stamped on the multi-target
+        // path — the legacy claim path (AgentJobService::claimNextJob) sets
+        // it, but this new-domain path only set AgentJob.started_at and
+        // flipped the task to running, so a fully successful multi-target
+        // deployment reached finished_at with started_at still null and the
+        // details page could not show a start time or a duration. This claim
+        // IS the deployment's authoritative start event (an agent actually
+        // picked the job up), so stamp it here exactly once: the whereNull
+        // guard is atomic, so two near-simultaneous claims of different
+        // targets of the same rollout cannot double-write, and a later
+        // retry attempt never rewrites the original start time.
+        Deployment::whereKey($task->deployment_id)->whereNull('started_at')->update(['started_at' => $now]);
 
         AuditLogEntry::record(
             actorType: AuditLogEntry::ACTOR_AGENT,

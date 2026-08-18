@@ -232,6 +232,10 @@ class Deployment extends Model
     /**
      * Wall-clock duration once the deployment has actually started —
      * null while still pending_approval/queued (nothing to measure yet).
+     * Carbon 3's diffInSeconds($date) returns ($date - $this) — the
+     * opposite sign of Carbon 2 — so the duration is computed FROM the
+     * earlier timestamp (started_at) to the later one (finished_at /
+     * now) to yield the intended positive execution time.
      */
     public function durationSeconds(): ?int
     {
@@ -239,6 +243,6 @@ class Deployment extends Model
             return null;
         }
 
-        return ($this->finished_at ?? now())->diffInSeconds($this->started_at);
+        return $this->started_at->diffInSeconds($this->finished_at ?? now());
     }
 }
