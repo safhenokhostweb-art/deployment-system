@@ -58,6 +58,20 @@ if (!is_file($configPath)) {
 }
 
 $config = require $configPath;
+
+// Legacy-config compatibility for official in-place upgrades: config.php is
+// preserved untouched by install/upgrade-runtime.sh, so a predecessor
+// Local-Agent config uses `hub_url` where the canonical key is
+// `service_base_url`, and has no `default_step_timeout_seconds`. Canonical
+// keys always win when both exist (`??=` never overwrites a present value).
+$config['service_base_url'] ??= $config['hub_url'] ?? null;
+$config['default_step_timeout_seconds'] ??= 900; // mirrors config.example.php's documented default
+
+if (!is_string($config['service_base_url']) || $config['service_base_url'] === '') {
+    fwrite(STDERR, "config.php requires service_base_url (the Deployment Hub URL); legacy hub_url is honored as an upgrade fallback.\n");
+    exit(1);
+}
+
 $logger = new Logger($config['log_dir']);
 
 // Identity resolution: `agent_id` is the canonical approved-Agent public_id.

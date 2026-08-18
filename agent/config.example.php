@@ -12,6 +12,10 @@
 
 return [
     // Base URL of the Deployment Service this agent reports to.
+    // Legacy installs may keep `hub_url` (the predecessor Local-Agent key) —
+    // agent.php falls back to it when this canonical key is absent, so an
+    // official in-place upgrade that preserves config.php never breaks an
+    // existing installation. Canonical keys always win when both are present.
     'service_base_url' => 'https://CHANGE-ME.example.invalid',
 
     // Identifier for this server, issued by the Deployment Service when
