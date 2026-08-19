@@ -24,3 +24,5 @@ config.php
 
 service.backup-*/
 service.failed-*/
+persistent/
+database.backup-*
