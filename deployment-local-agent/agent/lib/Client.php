@@ -32,64 +32,94 @@ final class Client
      * @param array<string, mixed>|null $payload
      * @return array{status: int, body: array<string, mixed>}
      */
+    /**
+     * Root-cause fix (Local Agent network resilience): the Hub is reached
+     * through a CDN (and, on a VPN-routed machine like this one, a tunnel)
+     * whose DNS resolution and HTTPS round trips are intermittently slow
+     * or briefly failing. A single immediate retry with a FRESH
+     * timestamp/nonce/signature — a re-signed request is required because
+     * if the first attempt actually reached the Hub but its response was
+     * lost, its nonce was already consumed — turns those transient stalls
+     * into successes without ever weakening the bearer/HMAC scheme. Only
+     * transport-level failures are retried; an HTTP status response is a
+     * valid answer and is returned to the caller unchanged.
+     */
+    private const MAX_TRANSPORT_ATTEMPTS = 2;
+
+    /**
+     * @param array<string, mixed>|null $payload
+     * @return array{status: int, body: array<string, mixed>}
+     */
     public function request(string $method, string $path, ?array $payload = null): array
     {
         $body = $payload === null ? '' : json_encode($payload, JSON_THROW_ON_ERROR);
-        $timestamp = (string) time();
-        $nonce = Security::nonce();
-        $signature = Security::sign($method, $path, $timestamp, $nonce, $body, $this->signingSecret);
-
         $url = rtrim($this->baseUrl, '/') . $path;
 
-        $headers = [
-            'Authorization: Bearer ' . $this->agentToken,
-            'X-Deployment-Local-Agent-Id: ' . $this->localAgentId,
-            'X-Deployment-Timestamp: ' . $timestamp,
-            'X-Deployment-Nonce: ' . $nonce,
-            'X-Deployment-Signature: ' . $signature,
-            'Content-Type: application/json',
-            'Accept: application/json',
-        ];
+        for ($attempt = 1; $attempt <= self::MAX_TRANSPORT_ATTEMPTS; $attempt++) {
+            $timestamp = (string) time();
+            $nonce = Security::nonce();
+            $signature = Security::sign($method, $path, $timestamp, $nonce, $body, $this->signingSecret);
 
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_CUSTOMREQUEST => strtoupper($method),
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => $this->timeoutSeconds,
-            CURLOPT_CONNECTTIMEOUT => $this->timeoutSeconds,
-            CURLOPT_SSL_VERIFYPEER => true,
-            CURLOPT_SSL_VERIFYHOST => 2,
-        ]);
+            $headers = [
+                'Authorization: Bearer ' . $this->agentToken,
+                'X-Deployment-Local-Agent-Id: ' . $this->localAgentId,
+                'X-Deployment-Timestamp: ' . $timestamp,
+                'X-Deployment-Nonce: ' . $nonce,
+                'X-Deployment-Signature: ' . $signature,
+                'Content-Type: application/json',
+                'Accept: application/json',
+            ];
 
-        if ($body !== '') {
-            curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
-        }
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_CUSTOMREQUEST => strtoupper($method),
+                CURLOPT_HTTPHEADER => $headers,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => $this->timeoutSeconds,
+                CURLOPT_CONNECTTIMEOUT => $this->timeoutSeconds,
+                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_SSL_VERIFYHOST => 2,
+            ]);
 
-        $response = curl_exec($ch);
-
-        if ($response === false) {
-            $error = curl_error($ch);
-            curl_close($ch);
-            $this->logger->error("Request to {$path} failed: {$error}");
-
-            throw new \RuntimeException("Connection to Deployment Hub failed: {$error}");
-        }
-
-        $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-
-        $decoded = [];
-        if ($response !== '') {
-            try {
-                $decoded = json_decode($response, true, 512, JSON_THROW_ON_ERROR);
-            } catch (\JsonException) {
-                $this->logger->error("Non-JSON response from {$path} (HTTP {$status}): " . self::redactForLog(substr($response, 0, 500)));
-                $decoded = [];
+            if ($body !== '') {
+                curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
             }
+
+            $response = curl_exec($ch);
+
+            if ($response === false) {
+                $error = curl_error($ch);
+                curl_close($ch);
+
+                if ($attempt < self::MAX_TRANSPORT_ATTEMPTS) {
+                    $this->logger->warn("Request to {$path} failed (attempt {$attempt}/" . self::MAX_TRANSPORT_ATTEMPTS . "): {$error} — retrying with a fresh signature.");
+                    sleep(1);
+
+                    continue;
+                }
+
+                $this->logger->error("Request to {$path} failed: {$error}");
+
+                throw new \RuntimeException("Connection to Deployment Hub failed: {$error}");
+            }
+
+            $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+
+            $decoded = [];
+            if ($response !== '') {
+                try {
+                    $decoded = json_decode($response, true, 512, JSON_THROW_ON_ERROR);
+                } catch (\JsonException) {
+                    $this->logger->error("Non-JSON response from {$path} (HTTP {$status}): " . self::redactForLog(substr($response, 0, 500)));
+                    $decoded = [];
+                }
+            }
+
+            return ['status' => $status, 'body' => is_array($decoded) ? $decoded : []];
         }
 
-        return ['status' => $status, 'body' => is_array($decoded) ? $decoded : []];
+        throw new \RuntimeException('Connection to Deployment Hub failed: unreachable state.');
     }
 
     /**

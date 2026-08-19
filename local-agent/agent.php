@@ -883,7 +883,7 @@ function installCommand(array $args, string $configPath): void
         . "    'agent_token' => 'CHANGE_ME_AGENT_TOKEN',\n"
         . "    'signing_secret' => 'CHANGE_ME_SIGNING_SECRET',\n"
         . "    'poll_interval_seconds' => 15,\n"
-        . "    'request_timeout_seconds' => 10,\n"
+        . "    'request_timeout_seconds' => 30,\n"
         . "    'projects' => [],\n"
         . "    'log_dir' => __DIR__ . '/storage/logs',\n"
         . "];\n";

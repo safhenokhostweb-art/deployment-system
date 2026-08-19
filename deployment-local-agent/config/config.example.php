@@ -40,7 +40,7 @@ return [
     'poll_interval_seconds' => 15,
 
     // HTTP timeout for each request to the Hub.
-    'request_timeout_seconds' => 10,
+    'request_timeout_seconds' => 30,
 
     // Which local checkouts this agent may publish from is no longer
     // configured here — it is downloaded from the Hub's Local Project

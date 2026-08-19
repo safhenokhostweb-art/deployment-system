@@ -349,8 +349,14 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
             // survived — the operator should see a blocked .env the same
             // way they see an allowed file, never just silence.
             $blockedFiles = array_values(array_diff($rawFiles, $changedFiles));
-            $client->request('POST', $reportPath, ['changed_files' => $changedFiles, 'blocked_files' => $blockedFiles]);
-            $logger->info("Job {$job['id']}: reported " . count($changedFiles) . ' changed file(s), ' . count($blockedFiles) . ' blocked file(s)');
+            $reportResponse = $client->request('POST', $reportPath, [
+                'changed_files' => $changedFiles,
+                'blocked_files' => $blockedFiles,
+                'head_sha' => $git->lastCommitHash($repositoryPath),
+                'branch' => $git->currentBranch($repositoryPath),
+                'working_tree_clean' => $changedFiles === [] && $blockedFiles === [],
+            ]);
+            $logger->info("Job {$job['id']}: reported " . count($changedFiles) . ' changed file(s), ' . count($blockedFiles) . ' blocked file(s)' . ($reportResponse['status'] === 200 ? '' : ' (Hub HTTP ' . $reportResponse['status'] . ')'));
 
             return;
         }
@@ -846,7 +852,7 @@ function installCommand(array $args, string $configPath): void
         . "    'agent_token' => 'CHANGE_ME_AGENT_TOKEN',\n"
         . "    'signing_secret' => 'CHANGE_ME_SIGNING_SECRET',\n"
         . "    'poll_interval_seconds' => 15,\n"
-        . "    'request_timeout_seconds' => 10,\n"
+        . "    'request_timeout_seconds' => 30,\n"
         . "    'projects' => [],\n"
         . "    'log_dir' => __DIR__ . '/storage/logs',\n"
         . "];\n";
