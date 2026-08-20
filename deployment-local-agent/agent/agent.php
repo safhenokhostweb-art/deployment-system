@@ -86,7 +86,7 @@ use LocalAgent\WorkspaceSourcePreparer;
  * Hub side for why this never triggers an automatic download). Bump
  * when agent.php or lib/* changes in a way that matters operationally.
  */
-const LOCAL_AGENT_VERSION = '1.4.2';
+const LOCAL_AGENT_VERSION = '1.4.3';
 
 $configPath = __DIR__ . '/config.php';
 
@@ -174,6 +174,7 @@ $artifactUploader = new ArtifactUploader(
     $logger,
     $workspaceBaseDir,
     $workspaceTtlSeconds,
+    agentVersion: LOCAL_AGENT_VERSION,
 );
 $jobMaxRuntimeSeconds = (int) ($config['job_max_runtime_seconds'] ?? 600);
 
@@ -700,7 +701,7 @@ function sendHeartbeat(Client $client, Logger $logger, array $projectStates = []
             'hostname' => gethostname() ?: null,
             'operating_system' => PHP_OS_FAMILY,
             'agent_version' => LOCAL_AGENT_VERSION,
-            'capabilities' => ['git' => true, 'php' => PHP_VERSION],
+            'capabilities' => ['git' => true, 'php' => PHP_VERSION, 'laravel_release_manifest' => true],
             'project_states' => $projectStates,
         ]);
 

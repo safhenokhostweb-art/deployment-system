@@ -9,6 +9,7 @@ use App\Models\AuditLogEntry;
 use App\Models\Deployment;
 use App\Models\DeploymentLogEntry;
 use App\Models\Server;
+use App\Services\Deployment\Artifact\ArtifactService;
 use App\Services\Security\JobPayloadSigner;
 use App\Services\Security\SecretRedactor;
 use Illuminate\Support\Facades\DB;
@@ -18,6 +19,7 @@ class AgentJobService
     public function __construct(
         private readonly JobPayloadSigner $jobPayloadSigner,
         private readonly SecretRedactor $redactor,
+        private readonly ArtifactService $artifacts,
     ) {
     }
 
@@ -53,6 +55,44 @@ class AgentJobService
                 return null;
             }
 
+            // Root-cause fix (artifact-to-webhook correlation): the Local
+            // Agent can finish uploading the exact-commit artifact a few
+            // seconds AFTER the webhook created this deployment. Re-attach
+            // here, at the last pre-execution boundary, so the job carries
+            // the artifact instead of silently falling back to the
+            // live-directory git pipeline.
+            $this->artifacts->attachToDeploymentIfAvailable($deployment);
+            $deployment->load('artifact');
+
+            // Root-cause fix (Laravel release completeness): a project with
+            // requires_complete_artifact=true must NEVER fall back to the
+            // live-directory git pipeline. No exact-commit AVAILABLE artifact
+            // after the re-attach attempt -> fail closed with an explicit code.
+            if (
+                $deployment->project->requires_complete_artifact
+                && $deployment->action === Deployment::ACTION_DEPLOY
+                && $deployment->artifact === null
+            ) {
+                $deployment->update([
+                    'status' => Deployment::STATUS_FAILED,
+                    'finished_at' => now(),
+                    'last_activity_at' => now(),
+                    'failure_code' => Deployment::FAILURE_CODE_ARTIFACT_REQUIRED_MISSING,
+                    'failure_message' => "Project '{$deployment->project->project_key}' requires a complete artifact for commit {$deployment->commit_hash}, but none is available. The live-directory git pipeline is forbidden for this project.",
+                ]);
+
+                AuditLogEntry::record(
+                    actorType: AuditLogEntry::ACTOR_AGENT,
+                    actorIdentifier: $server->public_id,
+                    action: 'deployment.rejected_artifact_required_missing',
+                    subjectType: Deployment::class,
+                    subjectId: $deployment->id,
+                    metadata: ['project_key' => $deployment->project->project_key, 'commit_hash' => $deployment->commit_hash],
+                );
+
+                return null;
+            }
+
             $now = now();
             $leaseSeconds = (int) config('deployment.deployment_job_lease_seconds');
 
@@ -75,6 +115,37 @@ class AgentJobService
 
             $project = $deployment->project;
             $usesRecipe = $project->usesDeploymentRecipe();
+
+            // Phase: Laravel Release Completeness — the new fail-closed
+            // pre-activation release gate is enforced by the Server Agent
+            // itself (agent/lib/ReleaseValidator.php). A release that
+            // requires that contract must NEVER be dispatched to an agent
+            // too old to enforce it: fail the deployment here, at claim
+            // time, before the artifact is ever handed to the agent, instead
+            // of trusting a gate the installed agent build does not run.
+            if ($deployment->artifact !== null && !$this->serverAgentEnforcesReleaseGate($server)) {
+                $reportedVersion = $server->agents()->first()?->agent_version;
+                $requiredVersion = (string) config('deployment.min_server_agent_version_for_artifact');
+
+                $deployment->update([
+                    'status' => Deployment::STATUS_FAILED,
+                    'finished_at' => now(),
+                    'last_activity_at' => now(),
+                    'failure_code' => Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE,
+                    'failure_message' => "The server agent (version " . ($reportedVersion ?? 'unknown') . ") is too old to enforce the Laravel release-completeness gate. Upgrade the agent to at least {$requiredVersion} before artifact-based deployments.",
+                ]);
+
+                AuditLogEntry::record(
+                    actorType: AuditLogEntry::ACTOR_AGENT,
+                    actorIdentifier: $server->public_id,
+                    action: 'deployment.rejected_agent_incompatible',
+                    subjectType: Deployment::class,
+                    subjectId: $deployment->id,
+                    metadata: ['agent_version' => $reportedVersion, 'required_version' => $requiredVersion],
+                );
+
+                return null;
+            }
 
             $job = [
                 'id' => $deployment->public_id,
@@ -119,6 +190,16 @@ class AgentJobService
                     'public_id' => $deployment->artifact->public_id,
                     'checksum_sha256' => $deployment->artifact->checksum_sha256,
                     'size_bytes' => $deployment->artifact->size_bytes,
+                    // Root-cause fix (Laravel release completeness): the
+                    // Server Agent's pre-activation gate needs the exact
+                    // commit and required runtime paths the artifact was
+                    // built from. Before this fix the legacy claim path
+                    // omitted them, so ArtifactManager received an empty
+                    // required_paths list and silently skipped its
+                    // completeness check (fail-open). Mirror
+                    // AgentTaskService's task payload.
+                    'commit_hash' => $deployment->artifact->commit_hash,
+                    'required_paths' => $deployment->artifact->required_paths ?? [],
                 ] : null,
                 'issued_at' => now()->timestamp,
             ];
@@ -273,4 +354,23 @@ class AgentJobService
         Deployment::STATUS_FAILED,
         Deployment::STATUS_ROLLED_BACK,
     ];
+
+    /**
+     * Whether the claiming server's installed agent build is known to
+     * enforce the Laravel release-completeness gate (agent/lib/
+     * ReleaseValidator.php). Version is taken from the Agent identity the
+     * server reports on every heartbeat (never the stale legacy
+     * Server.agent_version column), and an unknown/absent version is
+     * treated as incompatible — never assumed current.
+     */
+    private function serverAgentEnforcesReleaseGate(Server $server): bool
+    {
+        $agentVersion = $server->agents()->first()?->agent_version;
+
+        if (!is_string($agentVersion) || $agentVersion === '') {
+            return false;
+        }
+
+        return version_compare($agentVersion, (string) config('deployment.min_server_agent_version_for_artifact'), '>=');
+    }
 }

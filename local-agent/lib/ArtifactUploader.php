@@ -41,6 +41,8 @@ final class ArtifactUploader
         /** @var array<string, array{application_root?: string}> */
         private readonly array $buildProfiles = [],
         private readonly ?RetryPolicy $retryPolicy = null,
+        /** Agent build that produced the artifact — written into the artifact's release manifest. */
+        private readonly ?string $agentVersion = null,
     ) {
     }
 
@@ -66,9 +68,21 @@ final class ArtifactUploader
             $this->logger->info("Artifact {$jobId}: local build completed for {$commitHash}: " . (empty($buildResult['log']) ? 'nothing to build' : implode(' && ', $buildResult['log'])));
 
             $this->logger->info("Artifact {$jobId}: artifact creation started.");
-            $archive = $this->builder->build($applicationDirectory, $workspace->root(), $prepared['commitTimestamp'], $buildResult, function (string $stage) use ($jobId): void {
-                $this->logger->info("Artifact {$jobId}: {$stage}.");
-            });
+            $archive = $this->builder->build(
+                $applicationDirectory,
+                $workspace->root(),
+                $prepared['commitTimestamp'],
+                $buildResult,
+                function (string $stage) use ($jobId): void {
+                    $this->logger->info("Artifact {$jobId}: {$stage}.");
+                },
+                [
+                    'project_key' => $projectKey,
+                    'commit_sha' => $commitHash,
+                    'branch' => $branch,
+                    'agent_version' => $this->agentVersion ?? 'unknown',
+                ],
+            );
             $archivePath = $archive['path'];
             $this->logger->info("Artifact {$jobId}: artifact creation completed.");
 

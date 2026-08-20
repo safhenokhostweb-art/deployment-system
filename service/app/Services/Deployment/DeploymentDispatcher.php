@@ -136,7 +136,7 @@ class DeploymentDispatcher
         // deployment is awaiting human approval. Resolve it at the final
         // pre-queue boundary so the queued job has one deterministic
         // artifact_id before either claim path can make it executable.
-        $this->attachArtifactIfAvailable($deployment, $deployment->project);
+        $this->attachArtifactIfAvailable($deployment);
 
         $deployment->update([
             'status' => Deployment::STATUS_QUEUED,
@@ -209,17 +209,9 @@ class DeploymentDispatcher
      * omits `artifact` from the job payload and the agent runs the
      * exact legacy git-based pipeline, unchanged.
      */
-    private function attachArtifactIfAvailable(Deployment $deployment, Project $project): void
+    private function attachArtifactIfAvailable(Deployment $deployment): void
     {
-        if ($deployment->action !== Deployment::ACTION_DEPLOY || $deployment->artifact_id !== null) {
-            return;
-        }
-
-        $artifact = $this->artifacts->findMatching($project, $deployment->commit_hash);
-
-        if ($artifact !== null) {
-            $deployment->update(['artifact_id' => $artifact->id]);
-        }
+        $this->artifacts->attachToDeploymentIfAvailable($deployment);
     }
 
     /**
@@ -323,7 +315,7 @@ class DeploymentDispatcher
                 'approved_at' => $autoApprove ? now() : null,
             ]);
 
-            $this->attachArtifactIfAvailable($deployment, $project);
+            $this->attachArtifactIfAvailable($deployment);
 
             AuditLogEntry::record(
                 actorType: $auditActorType,
@@ -398,7 +390,7 @@ class DeploymentDispatcher
                 'approved_at' => $autoApprove ? now() : null,
             ]);
 
-            $this->attachArtifactIfAvailable($deployment, $project);
+            $this->attachArtifactIfAvailable($deployment);
 
             if ($autoApprove) {
                 $this->createTasksForDeployment($deployment, $targets);

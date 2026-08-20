@@ -117,7 +117,7 @@ return [
     | that keeps these three from drifting apart again.
     |
     */
-    'latest_local_agent_version' => env('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION', '1.4.2'),
+    'latest_local_agent_version' => env('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION', '1.4.3'),
 
     /*
     |--------------------------------------------------------------------------
@@ -216,5 +216,34 @@ return [
     'artifact_retention_count_per_project' => (int) env('DEPLOYMENT_ARTIFACT_RETENTION_COUNT', 3),
     'artifact_retention_days' => (int) env('DEPLOYMENT_ARTIFACT_RETENTION_DAYS', 14),
     'artifact_max_size_mb' => (int) env('DEPLOYMENT_ARTIFACT_MAX_SIZE_MB', 500),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Laravel release completeness (permanent fix)
+    |--------------------------------------------------------------------------
+    |
+    | The fail-closed Laravel release gate (agent/lib/ReleaseValidator.php)
+    | is enforced by the Server Agent itself, so an artifact-based
+    | deployment must never be dispatched to an agent build older than the
+    | one that carries that gate. AgentJobService::claimNextJob() fails the
+    | deployment at claim time (failure_code = agent_protocol_incompatible)
+    | when the server's heartbeated Agent version is missing or below this
+    | value.
+    |
+    */
+    'min_server_agent_version_for_artifact' => (string) env('DEPLOYMENT_MIN_SERVER_AGENT_VERSION_FOR_ARTIFACT', '1.2.0'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Laravel release completeness — Local Agent minimum (permanent fix)
+    |--------------------------------------------------------------------------
+    |
+    | Artifacts must be produced by a Local Agent build that embeds the
+    | in-artifact release manifest (.deployment/release-manifest.json) and
+    | runs the build-time vendor/build gate. LocalAgentArtifactController
+    | rejects uploads from an older/unknown Local Agent (fail-closed).
+    |
+    */
+    'min_local_agent_version_for_artifact' => (string) env('DEPLOYMENT_MIN_LOCAL_AGENT_VERSION_FOR_ARTIFACT', '1.4.3'),
 
 ];

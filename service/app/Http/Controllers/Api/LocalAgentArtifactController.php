@@ -35,6 +35,19 @@ class LocalAgentArtifactController extends Controller
         $agent = $request->attributes->get('deployment_local_agent');
         abort_unless($agent instanceof LocalAgent, 403, 'Uploading an artifact requires an authenticated Local Agent.');
 
+        // Phase: Laravel Release Completeness — artifacts must be built by
+        // a Local Agent that embeds the in-artifact release manifest
+        // (Local Agent >= min_local_agent_version_for_artifact). An older
+        // agent produces artifacts without release metadata; reject the
+        // upload fail-closed here instead of letting an unverifiable
+        // artifact reach the server-side pre-activation gate. Never assume
+        // an installed agent is current: a missing/unknown version is
+        // rejected too.
+        $minLocalAgent = (string) config('deployment.min_local_agent_version_for_artifact');
+        if (!is_string($agent->agent_version) || $agent->agent_version === '' || version_compare($agent->agent_version, $minLocalAgent, '<')) {
+            abort(409, "This Local Agent (version " . ($agent->agent_version ?? 'unknown') . ") is too old to produce artifacts with release metadata. Upgrade to at least {$minLocalAgent} before uploading artifacts.");
+        }
+
         $validated = $request->validate([
             'project_key' => 'required|string|max:255',
             'commit_hash' => 'required|string|size:40|regex:/^[0-9a-f]{40}$/',

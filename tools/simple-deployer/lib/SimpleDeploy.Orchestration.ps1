@@ -164,7 +164,30 @@ function Invoke-ProjectDeploy {
         # git-only: the git-archived tracked source alone (already in the
         # workspace) is exactly what gets packaged — no extra step needed.
 
-        $artifactPath = Join-Path $workspace.Root 'artifact.zip'
+        # Root-cause fix (Laravel release completeness): run the project's own
+        # fail-closed release gate (scripts/validate-release.php) against the
+        # FINAL staged workspace tree BEFORE the artifact is sealed. A non-zero
+        # exit aborts the build: no artifact is created, nothing is uploaded,
+        # nothing is activated - the currently active release stays untouched.
+        $releaseGateScript = Join-Path $cfg.local_path 'scripts\validate-release.php'
+        if (Test-Path -LiteralPath (Join-Path $workspace.ProjectDir 'composer.json')) {
+            if (-not (Test-Path -LiteralPath $releaseGateScript)) {
+                throw "Release gate script not found: $releaseGateScript - a Composer release must be validated before it can be sealed."
+            }
+            $gatePhp = Resolve-CommandPrefix -ConfiguredValue $cfg.php_binary -DefaultExecutable 'php'
+            $gateManifestDir = Join-Path $workspace.ProjectDir '.deployment'
+            if (-not (Test-Path -LiteralPath $gateManifestDir)) { New-Item -ItemType Directory -Path $gateManifestDir -Force | Out-Null }
+            $gateManifest = Join-Path $gateManifestDir 'release-manifest.json'
+            Write-Step 'Release gate (validate-release.php)'
+            $gateArgs = @($releaseGateScript, $workspace.ProjectDir, "--commit-sha=$sha", "--manifest-out=$gateManifest") + @($gatePhp | Select-Object -Skip 1)
+            $gateResult = Invoke-ExternalCommand -FilePath $gatePhp[0] -ArgumentList $gateArgs -WorkingDirectory $workspace.ProjectDir -TimeoutSeconds 600
+            if ($gateResult.StdOut) { Write-Host $gateResult.StdOut }
+            if ($gateResult.TimedOut) { throw "Release gate timed out - artifact NOT sealed, nothing activated." }
+            if ($gateResult.ExitCode -ne 0) {
+                throw "Release gate REJECTED the staged tree (exit $($gateResult.ExitCode)): artifact NOT sealed, nothing activated."
+            }
+            Write-Success 'Release gate PASS - staged tree is a complete, self-contained release.'
+        }
         $artifact = New-DeploymentArtifact -WorkspaceProjectDir $workspace.ProjectDir -OutputZipPath $artifactPath
         Write-Success "Artifact ساخته شد ($([math]::Round($artifact.SizeBytes / 1KB, 1)) KB، checksum $($artifact.ChecksumSha256.Substring(0,16))...)"
 
@@ -184,6 +207,22 @@ function Invoke-ProjectDeploy {
         Invoke-ScpUpload -SshKeyPath $cfg.ssh_key_path -KnownHostsPath $knownHostsPath -LocalFilePath $activateScriptLocal `
             -ServerUser $cfg.server_user -ServerHost $cfg.server_host -RemoteDestinationPath $remoteTempScript -ServerPort $serverPort
         Write-Success 'انتقال اسکریپت فعال‌سازی کامل شد.'
+
+        # Root-cause fix (Laravel release completeness): when the project
+        # ships the canonical release-gate validator (scripts/validate-release.php),
+        # upload it alongside the activation script so the server can
+        # re-validate the EXTRACTED staged tree immediately before the swap -
+        # defense-in-depth on top of the build-time gate already run above.
+        # No secrets are ever uploaded with it.
+        $remoteValidatorUploaded = $false
+        $remoteTempValidator = "/tmp/simpledeploy-validator-${jobId}.php"
+        $releaseGateScript = Join-Path $cfg.local_path 'scripts\validate-release.php'
+        if (Test-Path -LiteralPath $releaseGateScript) {
+            Invoke-ScpUpload -SshKeyPath $cfg.ssh_key_path -KnownHostsPath $knownHostsPath -LocalFilePath $releaseGateScript `
+                -ServerUser $cfg.server_user -ServerHost $cfg.server_host -RemoteDestinationPath $remoteTempValidator -ServerPort $serverPort
+            $remoteValidatorUploaded = $true
+            Write-Success 'انتقال release validator کانونیکال کامل شد.'
+        }        Write-Success 'انتقال اسکریپت فعال‌سازی کامل شد.'
 
         Write-Step 'فعال‌سازی روی سرور'
         # --php-binary below is a LINUX server path (e.g. /usr/bin/php8.3),
@@ -208,8 +247,10 @@ function Invoke-ProjectDeploy {
             '--health-check-url', (ConvertTo-PosixShellQuotedString $(if (Test-PlaceholderValue $cfg.health_check_url) { '' } else { $cfg.health_check_url })),
             '--database-backup', (ConvertTo-PosixShellQuotedString $(if ($cfg.database_backup) { 'true' } else { 'false' }))
         )
-        $remoteCommand = ($remoteCommandParts -join ' ') + '; STATUS=$?; rm -f ' + (ConvertTo-PosixShellQuotedString $remoteTempArchive) + ' ' + (ConvertTo-PosixShellQuotedString $remoteTempScript) + '; exit $STATUS'
-
+        if ($remoteValidatorUploaded) {
+            $remoteCommandParts += @('--validator-script', (ConvertTo-PosixShellQuotedString $remoteTempValidator))
+        }
+        $remoteCommand = ($remoteCommandParts -join ' ') + '; STATUS=$?; rm -f ' + (ConvertTo-PosixShellQuotedString $remoteTempArchive) + ' ' + (ConvertTo-PosixShellQuotedString $remoteTempScript) + ' ' + (ConvertTo-PosixShellQuotedString $(if ($remoteValidatorUploaded) { $remoteTempValidator } else { '' })) + '; exit $STATUS'
         $activateResult = Invoke-SshRemoteCommand -SshKeyPath $cfg.ssh_key_path -KnownHostsPath $knownHostsPath `
             -ServerUser $cfg.server_user -ServerHost $cfg.server_host -RemoteCommand $remoteCommand -ServerPort $serverPort -TimeoutSeconds 600
 

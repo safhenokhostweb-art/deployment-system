@@ -51,6 +51,7 @@ RUN_MIGRATIONS="false"
 PHP_BINARY="php"
 HEALTH_CHECK_URL=""
 DATABASE_BACKUP="false"
+VALIDATOR_SCRIPT=""
 
 log() { printf '[activate-release] %s\n' "$1"; }
 fail() { printf '[activate-release] خطا: %s\n' "$1" >&2; exit 1; }
@@ -68,6 +69,7 @@ while [ $# -gt 0 ]; do
         --php-binary) PHP_BINARY="$2"; shift 2 ;;
         --health-check-url) HEALTH_CHECK_URL="$2"; shift 2 ;;
         --database-backup) DATABASE_BACKUP="$2"; shift 2 ;;
+        --validator-script) VALIDATOR_SCRIPT="$2"; shift 2 ;;
         *) fail "آرگومان ناشناخته: $1" ;;
     esac
 done
@@ -180,6 +182,48 @@ if [ "$DATABASE_BACKUP" = "true" ] && [ -f "${STAGING_DIR}/.env" ]; then
     fi
 fi
 
+# ---- Root-cause fix (Laravel release completeness): fail-closed gate ----
+# The staged tree must be a COMPLETE, self-contained Composer release BEFORE
+# the atomic swap. This is the same contract the Server Agent enforces via
+# agent/lib/ReleaseValidator.php; the SimpleDeploy path enforces it here
+# because it never runs the Server Agent. Every check below aborts BEFORE
+# perform_swap -- the currently-active release stays completely intact.
+if [ -f "${STAGING_DIR}/composer.json" ]; then
+    log "بررسی کامل بودن release (fail-closed) قبل از swap..."
+    for f in composer.json composer.lock vendor/autoload.php vendor/composer/installed.json artisan bootstrap/app.php public/index.php; do
+        if [ ! -e "${STAGING_DIR}/${f}" ]; then
+            fail "release ناقص است: '${f}' در staging پیدا نشد — فعال‌سازی انجام نمی‌شود و release فعلی دست‌نخورده می‌ماند."
+        fi
+    done
+    if [ -f "${STAGING_DIR}/vite.config.js" ] || [ -f "${STAGING_DIR}/vite.config.ts" ]; then
+        if [ ! -f "${STAGING_DIR}/public/build/manifest.json" ]; then
+            fail "release ناقص است: 'public/build/manifest.json' (Vite) پیدا نشد — فعال‌سازی انجام نمی‌شود."
+        fi
+    fi
+    if [ ! -f "${STAGING_DIR}/.deployment/release-manifest.json" ]; then
+        fail "release ناقص است: '.deployment/release-manifest.json' پیدا نشد — release از gate عبور نکرده است؛ فعال‌سازی انجام نمی‌شود."
+    fi
+    if ! grep -q '"status"[[:space:]]*:[[:space:]]*"pass"' "${STAGING_DIR}/.deployment/release-manifest.json"; then
+        fail "release manifest وضعیت 'pass' ندارد — release از gate عبور نکرده است؛ فعال‌سازی انجام نمی‌شود."
+    fi
+    if [ -n "$COMMIT_SHA" ]; then
+        if ! grep -q "\"commit_sha\"[[:space:]]*:[[:space:]]*\"$COMMIT_SHA\"" "${STAGING_DIR}/.deployment/release-manifest.json"; then
+            fail "release manifest با commit فعلی ($COMMIT_SHA) مطابقت ندارد — فعال‌سازی انجام نمی‌شود."
+        fi
+    fi
+    if [ -n "$VALIDATOR_SCRIPT" ]; then
+        if command -v "$PHP_BINARY" >/dev/null 2>&1 || [ -x "$PHP_BINARY" ]; then
+            log "اجرای validator کانونیکال روی staging (همان ReleaseValidator)..."
+            if ! "$PHP_BINARY" "$VALIDATOR_SCRIPT" "$STAGING_DIR" --commit-sha="$COMMIT_SHA" --manifest-out="$STAGING_DIR/.deployment/release-manifest.json"; then
+                fail "validator کانونیکال release را رد کرد — فعال‌سازی انجام نمی‌شود و release فعلی دست‌نخورده می‌ماند."
+            fi
+            log "validator کانونیکال PASS — staging یک release کامل و خودکفا است."
+        else
+            log "هشدار: PHP برای validator کانونیکال یافت نشد — فقط checks حضور اجرا شد."
+        fi
+    fi
+    log "release کامل و سازگار است — فعال‌سازی ادامه می‌یابد."
+fi
 # ---- Atomic swap ----
 BACKUP_DIR=""
 PREVIOUS_RELEASE_DIR=""

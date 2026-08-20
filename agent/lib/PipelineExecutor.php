@@ -81,6 +81,8 @@ final class PipelineExecutor
                 $projectConfig['artifact_preserve_paths'] ?? [],
                 $projectConfig['artifact_persistent_paths'] ?? [],
                 $projectConfig['artifact_persistent_root'] ?? null,
+                null,
+                $projectConfig['php_binary'] ?? 'php',
             );
 
             if ($prepared['status'] !== 'succeeded' || $prepared['stagingPath'] === null) {

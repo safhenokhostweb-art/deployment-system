@@ -30,7 +30,7 @@ class AgentTaskClaimTest extends TestCase
 
     private function makeClaimableTask(): array
     {
-        $agent = Agent::factory()->approved()->create();
+        $agent = Agent::factory()->approved()->create(['agent_version' => (string) config('deployment.min_server_agent_version_for_artifact')]);
         $project = Project::factory()->create(['pipeline' => [
             ['name' => 'echo', 'command' => 'echo hello'],
         ]]);

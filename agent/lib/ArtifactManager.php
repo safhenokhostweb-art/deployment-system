@@ -25,6 +25,7 @@ final class ArtifactManager
 
     public function __construct(
         private readonly Client $client,
+        private readonly ?ReleaseValidator $releaseValidator = null,
     ) {
     }
 
@@ -41,9 +42,9 @@ final class ArtifactManager
      * @param string|null $persistentRoot trusted absolute persistent root (server-local config, never Hub-supplied)
      * @return array{status: 'succeeded'|'failed', message: ?string, failureCode: ?string}
      */
-    public function deploy(array $artifactDescriptor, string $workingDirectory, array $preservePaths, int $retentionCount, array $persistentPaths = [], ?string $persistentRoot = null, ?callable $onTick = null): array
+    public function deploy(array $artifactDescriptor, string $workingDirectory, array $preservePaths, int $retentionCount, array $persistentPaths = [], ?string $persistentRoot = null, ?callable $onTick = null, ?string $phpBinary = null): array
     {
-        $prepared = $this->prepare($artifactDescriptor, $workingDirectory, $preservePaths, $persistentPaths, $persistentRoot, $onTick);
+        $prepared = $this->prepare($artifactDescriptor, $workingDirectory, $preservePaths, $persistentPaths, $persistentRoot, $onTick, $phpBinary);
 
         if ($prepared['status'] !== 'succeeded' || $prepared['stagingPath'] === null) {
             return ['status' => 'failed', 'message' => $prepared['message'], 'failureCode' => $prepared['failureCode']];
@@ -64,7 +65,7 @@ final class ArtifactManager
      * @param array<int, string> $persistentPaths
      * @return array{status: 'succeeded'|'failed', stagingPath: string|null, message: ?string, failureCode: ?string}
      */
-    public function prepare(array $artifactDescriptor, string $workingDirectory, array $preservePaths, array $persistentPaths = [], ?string $persistentRoot = null, ?callable $onTick = null): array
+    public function prepare(array $artifactDescriptor, string $workingDirectory, array $preservePaths, array $persistentPaths = [], ?string $persistentRoot = null, ?callable $onTick = null, ?string $phpBinary = null): array
     {
         $tempArchivePath = tempnam(sys_get_temp_dir(), 'da-artifact-') . '.zip';
         @unlink($tempArchivePath);
@@ -118,6 +119,29 @@ final class ArtifactManager
                 self::recursiveDelete($stagingPath);
 
                 return ['status' => 'failed', 'stagingPath' => null, 'message' => "Artifact is incomplete: required runtime path '{$missingPath}' is missing. Live release was not changed.", 'failureCode' => 'artifact_required_path_missing'];
+            }
+
+            // Root-cause fix (Laravel release completeness): before ANY
+            // preserve-copy / persistent-reference / activation work, run
+            // the fail-closed release-completeness gate against the final
+            // staged tree. The gate derives its requirements from the tree
+            // itself (composer.json/lock, vendor/autoload.php,
+            // vendor/composer/, the artisan bootstrap chain, every declared
+            // package, the Vite build manifest, junction/symlink escapes,
+            // an isolated autoload boot) and never fails open on a missing
+            // required_paths contract. A failure here discards staging and
+            // leaves the currently-active release completely untouched.
+            $validator = $this->releaseValidator ?? new ReleaseValidator($phpBinary ?? 'php');
+            $validation = $validator->validate($stagingPath, (string) ($artifactDescriptor['commit_hash'] ?? ''), $artifactDescriptor['required_paths'] ?? []);
+            if (!$validation['pass']) {
+                self::recursiveDelete($stagingPath);
+
+                return [
+                    'status' => 'failed',
+                    'stagingPath' => null,
+                    'message' => 'Release completeness validation failed before activation: ' . implode(', ', array_slice($validation['failures'], 0, 8)) . '. Live release was not changed.',
+                    'failureCode' => 'artifact_release_incomplete',
+                ];
             }
         } finally {
             @unlink($tempArchivePath);

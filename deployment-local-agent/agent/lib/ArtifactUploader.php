@@ -41,6 +41,8 @@ final class ArtifactUploader
         /** @var array<string, array{application_root?: string}> */
         private readonly array $buildProfiles = [],
         private readonly ?RetryPolicy $retryPolicy = null,
+        /** Agent build that produced the artifact — written into the artifact's release manifest. */
+        private readonly ?string $agentVersion = null,
     ) {
     }
 
@@ -62,7 +64,18 @@ final class ArtifactUploader
             $buildResult = $this->buildRunner->run($applicationDirectory, $onTick);
             $this->logger->info("Local build for commit {$commitHash}: " . (empty($buildResult['log']) ? 'nothing to build' : implode(' && ', $buildResult['log'])));
 
-            $archive = $this->builder->build($applicationDirectory, $workspace->root(), $prepared['commitTimestamp'], $buildResult);
+            $archive = $this->builder->build(
+                $applicationDirectory,
+                $workspace->root(),
+                $prepared['commitTimestamp'],
+                $buildResult,
+                [
+                    'project_key' => $projectKey,
+                    'commit_sha' => $commitHash,
+                    'branch' => $branch,
+                    'agent_version' => $this->agentVersion ?? 'unknown',
+                ],
+            );
             $archivePath = $archive['path'];
 
             $createResponse = $this->retryHub(fn () => $this->client->request('POST', '/api/local-agent/artifacts', [

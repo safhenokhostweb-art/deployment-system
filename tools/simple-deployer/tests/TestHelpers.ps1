@@ -112,6 +112,8 @@ function Wait-ForScheduledTaskState {
 function Write-TestSummaryAndExit {
     param([Parameter(Mandatory = $true)][string]$SuiteName)
 
+
+
     Write-Host ''
     foreach ($failure in $Global:TestFailures) {
         Write-Host "FAIL: $failure" -ForegroundColor Red
@@ -123,4 +125,54 @@ function Write-TestSummaryAndExit {
 
     if ($failCount -gt 0) { exit 1 }
     exit 0
+}
+
+<#
+.SYNOPSIS
+    Locates a bash.exe that can actually run the POSIX test scripts.
+
+    `Get-Command bash.exe` on Windows commonly resolves to the WSL shim
+    (C:\Windows\System32\bash.exe), which runs inside the WSL Linux
+    environment and has NO access to the Windows filesystem - every script
+    invocation then fails with exit 127. Git Bash's bash.exe
+    (C:\Program Files\Git\bin\bash.exe) is a native Windows binary that
+    reads C:/... and /c/... paths correctly. Prefer known Git install
+    paths; accept a PATH-discovered bash only when it is not the WSL shim.
+#>
+function Get-GitBashPath {
+    foreach ($candidate in @(
+        'C:\Program Files\Git\bin\bash.exe',
+        'C:\Program Files (x86)\Git\bin\bash.exe'
+    )) {
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    $cmd = Get-Command bash.exe -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source -notmatch '\\Windows\\(System32|SysWOW64)\\') {
+        return $cmd.Source
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Like New-TestTempDirectory, but under a LONG-form temp path.
+
+    $env:TEMP often carries the 8.3 short segment (e.g. C:\Users\FARSHA~1\...)
+    while $env:USERPROFILE is long (C:\Users\Farshad-IT\...). Git Bash/MSYS2
+    path handling becomes inconsistent when a path mixes the short 8.3 name:
+    unzip -d writes into a differently-resolved directory, so activate-release.sh
+    never finds composer.json in staging, silently skips the gate, and swaps an
+    empty tree. Resolving the temp dir through the long USERPROFILE keeps every
+    path in one consistent namespace.
+#>
+function New-LongTempDirectory {
+    param([Parameter(Mandatory = $false)][string]$Prefix = 'sdtest')
+    $base = $env:TEMP
+    if ($env:USERPROFILE -and $env:USERPROFILE -notmatch '~') {
+        $candidate = Join-Path $env:USERPROFILE 'AppData\Local\Temp'
+        if (Test-Path -LiteralPath $candidate) { $base = $candidate }
+    }
+    $dir = Join-Path $base "$Prefix-$([System.Guid]::NewGuid().ToString('N').Substring(0,10))"
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    return $dir
 }

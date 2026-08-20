@@ -28,6 +28,11 @@ class LocalAgentFactory extends Factory
             'hostname' => $this->faker->domainWord() . '-pc',
             'operating_system' => 'windows',
             'capabilities' => ['git' => true, 'php' => '8.4'],
+            // Phase: Laravel Release Completeness — an approved agent in
+            // tests is a current agent; the artifact-upload gate rejects
+            // older/unknown versions, so the factory mirrors the current
+            // minimum from config instead of leaving it null.
+            'agent_version' => (string) config('deployment.min_local_agent_version_for_artifact'),
         ];
     }
 

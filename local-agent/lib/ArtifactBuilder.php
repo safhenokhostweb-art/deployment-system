@@ -39,12 +39,23 @@ final class ArtifactBuilder
 {
     /**
      * @param array{ranComposer: bool, ranNpmBuild: bool} $buildResult what LocalBuildRunner reported — determines which validations below actually apply
+     * @param array{project_key?: string, commit_sha?: string, branch?: string, agent_version?: string} $provenance release provenance written into the artifact's own manifest
      * @return array{path: string, checksum: string, size: int, requiredPaths: array<int, string>}
      * @throws LocalBuildFailedException
      */
-    public function build(string $projectDir, string $workspaceRoot, int $commitTimestamp, array $buildResult, ?callable $onStage = null): array
+    public function build(string $projectDir, string $workspaceRoot, int $commitTimestamp, array $buildResult, ?callable $onStage = null, array $provenance = []): array
     {
         $this->validateStaging($projectDir, $buildResult);
+
+        // Root-cause fix (Laravel release completeness): embed a small
+        // provenance manifest describing the artifact that is actually
+        // being sealed — commit SHA, composer.lock SHA-256, the required
+        // runtime paths, and the build result — so the Server Agent's
+        // pre-activation gate can verify release metadata against the job
+        // before activation. Written into the isolated workspace tree, so
+        // it becomes part of the immutable zip (never the developer's live
+        // working tree).
+        $this->writeReleaseManifest($projectDir, $buildResult, $provenance);
 
         $finalZipPath = null;
         try {
@@ -113,7 +124,47 @@ final class ArtifactBuilder
         if ($buildResult['ranNpmBuild']) {
             $paths[] = 'public/build/manifest.json';
         }
+        $paths[] = '.deployment/release-manifest.json';
         return $paths;
+    }
+
+    /**
+     * Writes `.deployment/release-manifest.json` into the build workspace so
+     * it becomes part of the sealed artifact. Describes the artifact that is
+     * actually uploaded (not the developer working tree): the pinned commit,
+     * the composer.lock digest, the required runtime paths, and the build
+     * result. The Server Agent verifies this manifest during its
+     * pre-activation release gate.
+     *
+     * @param array{project_key?: string, commit_sha?: string, branch?: string, agent_version?: string} $provenance
+     */
+    private function writeReleaseManifest(string $projectDir, array $buildResult, array $provenance): void
+    {
+        $paths = array_values(array_unique(array_merge($this->requiredPaths($projectDir, $buildResult), ['.deployment/release-manifest.json'])));
+
+        $manifest = [
+            'format' => 'deployment-system-release-manifest',
+            'version' => 1,
+            'project_key' => $provenance['project_key'] ?? null,
+            'commit_sha' => $provenance['commit_sha'] ?? null,
+            'branch' => $provenance['branch'] ?? null,
+            'composer_lock_sha256' => is_file("{$projectDir}/composer.lock") ? hash_file('sha256', "{$projectDir}/composer.lock") : '',
+            'required_paths' => $paths,
+            'build_manifest_present' => is_file("{$projectDir}/public/build/manifest.json"),
+            'build_result' => [
+                'ran_composer' => (bool) ($buildResult['ranComposer'] ?? false),
+                'ran_npm_build' => (bool) ($buildResult['ranNpmBuild'] ?? false),
+            ],
+            'agent_version' => $provenance['agent_version'] ?? 'unknown',
+            'generated_at' => gmdate('c'),
+            'status' => 'pass',
+        ];
+
+        $manifestDir = "{$projectDir}/.deployment";
+        if (!is_dir($manifestDir)) {
+            mkdir($manifestDir, 0755, true);
+        }
+        file_put_contents("{$manifestDir}/release-manifest.json", json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
     }
 
     /**

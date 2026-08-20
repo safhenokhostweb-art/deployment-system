@@ -13,12 +13,11 @@ $ToolRoot = Split-Path -Parent $ScriptDir
 . (Join-Path $ScriptDir 'TestHelpers.ps1')
 . (Join-Path $ToolRoot 'lib\SimpleDeploy.Common.ps1')
 
-$bashCmd = Get-Command bash.exe -ErrorAction SilentlyContinue
-if (-not $bashCmd) {
-    Write-Host 'bash.exe not found on this system -- Test-ActivateRelease requires Git Bash. Skipping entirely.' -ForegroundColor Yellow
+$bashPath = Get-GitBashPath
+if (-not $bashPath) {
+    Write-Host 'Git Bash (bash.exe) not found on this system -- Test-ActivateRelease requires Git Bash. Skipping entirely.' -ForegroundColor Yellow
     Write-TestSummaryAndExit -SuiteName 'Test-ActivateRelease'
 }
-$bashPath = $bashCmd.Source
 $activateScriptPosix = (Join-Path $ToolRoot 'scripts\activate-release.sh').Replace('\', '/')
 
 function ConvertTo-Posix {

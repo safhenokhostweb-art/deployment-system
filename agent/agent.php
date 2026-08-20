@@ -28,6 +28,7 @@ require __DIR__ . '/lib/ServiceAllowlist.php';
 require __DIR__ . '/lib/ReleaseManager.php';
 require __DIR__ . '/lib/RecipeStepRunner.php';
 require __DIR__ . '/lib/ArtifactManager.php';
+require __DIR__ . '/lib/ReleaseValidator.php';
 require __DIR__ . '/lib/PipelineExecutor.php';
 
 use DeploymentAgent\ArtifactManager;
@@ -48,7 +49,7 @@ use DeploymentAgent\WorkspaceScanner;
  * can flag servers running an outdated agent. Bump this when agent.php or
  * lib/* changes in a way that matters operationally.
  */
-const AGENT_VERSION = '1.1.0';
+const AGENT_VERSION = '1.2.0';
 
 $configPath = __DIR__ . '/config.php';
 
@@ -362,6 +363,11 @@ function sendHeartbeat(Client $client, Logger $logger): void
 
         $client->request('POST', '/api/agent/heartbeat', array_merge(
             ['agent_version' => AGENT_VERSION],
+            // Phase: Laravel Release Completeness — the new fail-closed
+            // pre-activation release gate (ReleaseValidator) is enforced by
+            // exactly this agent build, so its capability is declared here
+            // for the Hub to gate artifact dispatch on.
+            ['capabilities' => ['laravel_release_validation' => true]],
             $health,
         ));
     } catch (\Throwable $e) {

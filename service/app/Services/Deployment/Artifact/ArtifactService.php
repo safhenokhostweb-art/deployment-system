@@ -4,6 +4,7 @@ namespace App\Services\Deployment\Artifact;
 
 use App\Models\Artifact;
 use App\Models\AuditLogEntry;
+use App\Models\Deployment;
 use App\Models\Project;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -242,6 +243,36 @@ class ArtifactService
     }
 
     /**
+     * Single source of truth for attaching the exact-commit artifact to a
+     * deployment. Only ever attaches the artifact whose (project, 40-char
+     * commit SHA) exactly matches this deployment - never a latest,
+     * branch-only, or other-commit artifact - and only for deploy actions.
+     *
+     * Called at every pre-queue boundary AND again at claim time (both the
+     * legacy AgentJobService path and the new-domain AgentTaskService path)
+     * so a Local Agent that finishes uploading the artifact a few seconds
+     * after the webhook fired still gets that exact artifact correlated
+     * with the webhook-created deployment instead of silently falling back
+     * to the live-directory git pipeline.
+     *
+     * @return Artifact|null the artifact now attached (or already present)
+     */
+    public function attachToDeploymentIfAvailable(Deployment $deployment): ?Artifact
+    {
+        if ($deployment->action !== Deployment::ACTION_DEPLOY || $deployment->artifact_id !== null) {
+            return $deployment->artifact;
+        }
+
+        $artifact = $this->findMatching($deployment->project, $deployment->commit_hash);
+
+        if ($artifact !== null) {
+            $deployment->update(['artifact_id' => $artifact->id]);
+        }
+
+        return $artifact;
+    }
+
+    /**
      * Keeps only the newest $retentionCount AVAILABLE artifacts for a
      * project, deleting both the row and its file for anything older —
      * called after every successful upload so disk usage never grows
@@ -280,6 +311,7 @@ class ArtifactService
             'public_id' => $artifact->public_id,
             'checksum_sha256' => $artifact->checksum_sha256,
             'size_bytes' => $artifact->size_bytes,
+            'commit_hash' => $artifact->commit_hash,
             'required_paths' => $artifact->required_paths ?? [],
         ];
     }

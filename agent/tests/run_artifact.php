@@ -18,6 +18,7 @@ require __DIR__ . '/../lib/Signer.php';
 require __DIR__ . '/../lib/Logger.php';
 require __DIR__ . '/../lib/Client.php';
 require __DIR__ . '/../lib/ArtifactManager.php';
+require __DIR__ . '/../lib/ReleaseValidator.php';
 
 use DeploymentAgent\ArtifactManager;
 use DeploymentAgent\Client;
@@ -91,6 +92,34 @@ function buildFixtureZip(string $dir, string $name, string $marker): array
 
     return ['path' => $zipPath, 'checksum' => hash_file('sha256', $zipPath), 'size' => filesize($zipPath)];
 }
+/** Builds a composer/Laravel fixture zip; entries in $omit are left out. */
+function buildLaravelZip(string $dir, string $name, array $omit = []): array
+{
+    $zipPath = "{$dir}/{$name}.zip";
+    $zip = new ZipArchive();
+    $zip->open($zipPath, ZipArchive::CREATE);
+    $entries = [
+        'composer.json' => json_encode(['require' => ['php' => '^8.2']]),
+        'composer.lock' => '{}',
+        'vendor/autoload.php' => "<?php\n// vendor autoload\n",
+        'vendor/composer/installed.json' => '{}',
+        'artisan' => "<?php\n// artisan\n",
+        'bootstrap/app.php' => "<?php\n// bootstrap\n",
+        'public/index.php' => "<?php\n// index\n",
+        'public/build/manifest.json' => '{}',
+    ];
+    foreach ($entries as $path => $content) {
+        if (in_array($path, $omit, true)) {
+            continue;
+        }
+        $zip->addFromString($path, $content);
+    }
+    $zip->close();
+
+    return ['path' => $zipPath, 'checksum' => hash_file('sha256', $zipPath), 'size' => filesize($zipPath)];
+}
+
+
 
 /**
  * @return array{process: resource, port: int, manifestPath: string}
@@ -379,6 +408,43 @@ $mismatchResult = $manager->deploy(
 check('a checksum mismatch is reported as failed', $mismatchResult['status'] === 'failed', $failures, $passCount);
 check('a checksum mismatch reports the correct failure code', $mismatchResult['failureCode'] === 'artifact_checksum_mismatch', $failures, $passCount);
 check('a checksum mismatch never touches the target directory', !is_dir($freshTarget), $failures, $passCount);
+// ============================================================
+// Laravel release-completeness gate (ReleaseValidator integration):
+// a Laravel artifact that passes checksum AND its (too-weak)
+// required_paths but is still missing runtime files must be rejected
+// by the pre-activation gate — with the live release untouched.
+// ============================================================
+$laravelRequired = ['composer.json', 'composer.lock', 'vendor/autoload.php', 'vendor/composer', 'artisan', 'bootstrap/app.php', 'public/index.php', 'public/build/manifest.json'];
+$laravelCommit = str_repeat('c', 40);
+
+$goodZip = buildLaravelZip($workspace, 'laravel-good', []);
+registerManifestEntry($hub['manifestPath'], 'artifact-laravel-good', $goodZip['path']);
+$laravelTarget = $workspace . '/laravel-site';
+$goodResult = $manager->deploy(
+    ['public_id' => 'artifact-laravel-good', 'checksum_sha256' => $goodZip['checksum'], 'size_bytes' => $goodZip['size'], 'commit_hash' => $laravelCommit, 'required_paths' => $laravelRequired],
+    $laravelTarget,
+    ['.env', 'storage'],
+    3,
+);
+check('a complete Laravel artifact passes the release gate', $goodResult['status'] === 'succeeded', $failures, $passCount);
+
+file_put_contents($laravelTarget . '/.env', 'DB_PASSWORD=must-survive');
+
+// Incomplete Laravel tree; required_paths only lists composer.json, so the
+// descriptor-level check passes and the ReleaseValidator must catch the rest.
+$badZip = buildLaravelZip($workspace, 'laravel-missing-vendor', ['vendor/autoload.php', 'vendor/composer/installed.json']);
+registerManifestEntry($hub['manifestPath'], 'artifact-laravel-missing-vendor', $badZip['path']);
+$badResult = $manager->deploy(
+    ['public_id' => 'artifact-laravel-missing-vendor', 'checksum_sha256' => $badZip['checksum'], 'size_bytes' => $badZip['size'], 'commit_hash' => $laravelCommit, 'required_paths' => ['composer.json']],
+    $laravelTarget,
+    ['.env', 'storage'],
+    3,
+);
+check('an incomplete Laravel artifact is rejected by the release gate', $badResult['status'] === 'failed' && $badResult['failureCode'] === 'artifact_release_incomplete', $failures, $passCount);
+check('the failed gate left the live release untouched (.env intact)', trim((string) @file_get_contents($laravelTarget . '/.env')) === 'DB_PASSWORD=must-survive', $failures, $passCount);
+check('no staging sibling remains after a failed gate', count(glob("{$laravelTarget}.staging-*")) === 0, $failures, $passCount);
+
+
 
 $notFoundTarget = $workspace . '/download-failure-site';
 $notFoundResult = $manager->deploy(
