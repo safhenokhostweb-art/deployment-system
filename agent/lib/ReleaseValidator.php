@@ -321,4 +321,3 @@ final class ReleaseValidator
         return ['exit' => proc_close($process), 'stdout' => $stdout, 'stderr' => $stderr];
     }
 }
-

@@ -133,64 +133,84 @@ final class Client
      *
      * @return array{status: int, body: array<string, mixed>}
      */
-    public function uploadRawBody(string $method, string $path, string $rawBody): array
-    {
-        $timestamp = (string) time();
-        $nonce = Security::nonce();
-        $signature = Security::sign($method, $path, $timestamp, $nonce, $rawBody, $this->signingSecret);
+   public function uploadRawBody(string $method, string $path, string $rawBody, ?callable $onTick = null): array
+{
+    $timestamp = (string) time();
+    $nonce = Security::nonce();
+    $signature = Security::sign($method, $path, $timestamp, $nonce, $rawBody, $this->signingSecret);
 
-        $url = rtrim($this->baseUrl, '/') . $path;
+    $url = rtrim($this->baseUrl, '/') . $path;
 
-        $headers = [
-            'Authorization: Bearer ' . $this->agentToken,
-            'X-Deployment-Local-Agent-Id: ' . $this->localAgentId,
-            'X-Deployment-Timestamp: ' . $timestamp,
-            'X-Deployment-Nonce: ' . $nonce,
-            'X-Deployment-Signature: ' . $signature,
-            'Content-Type: application/octet-stream',
-            'Accept: application/json',
-        ];
+    $headers = [
+        'Authorization: Bearer ' . $this->agentToken,
+        'X-Deployment-Local-Agent-Id: ' . $this->localAgentId,
+        'X-Deployment-Timestamp: ' . $timestamp,
+        'X-Deployment-Nonce: ' . $nonce,
+        'X-Deployment-Signature: ' . $signature,
+        'Content-Type: application/octet-stream',
+        'Accept: application/json',
+    ];
 
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_CUSTOMREQUEST => strtoupper($method),
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_POSTFIELDS => $rawBody,
-            CURLOPT_RETURNTRANSFER => true,
-            // A large artifact upload legitimately needs longer than this
-            // agent's normal, small-JSON-payload request timeout — the
-            // caller (ArtifactUploader) passes one sized for its file.
-            CURLOPT_TIMEOUT => max($this->timeoutSeconds, 120),
-            CURLOPT_CONNECTTIMEOUT => $this->timeoutSeconds,
-            CURLOPT_SSL_VERIFYPEER => true,
-            CURLOPT_SSL_VERIFYHOST => 2,
-        ]);
+    $ch = curl_init($url);
 
-        $response = curl_exec($ch);
+    curl_setopt_array($ch, [
+        CURLOPT_CUSTOMREQUEST => strtoupper($method),
+        CURLOPT_HTTPHEADER => $headers,
+        CURLOPT_POSTFIELDS => $rawBody,
+        CURLOPT_RETURNTRANSFER => true,
 
-        if ($response === false) {
-            $error = curl_error($ch);
-            curl_close($ch);
-            $this->logger->error("Artifact upload to {$path} failed: {$error}");
+        CURLOPT_TIMEOUT => max($this->timeoutSeconds, 120),
+        CURLOPT_CONNECTTIMEOUT => $this->timeoutSeconds,
 
-            throw new \RuntimeException("Connection to Deployment Hub failed: {$error}");
-        }
+        CURLOPT_NOPROGRESS => false,
 
-        $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        CURLOPT_PROGRESSFUNCTION => function () use ($onTick): int {
+            if ($onTick !== null) {
+                $onTick();
+            }
+
+            return 0;
+        },
+
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_SSL_VERIFYHOST => 2,
+    ]);
+
+    $response = curl_exec($ch);
+
+    if ($response === false) {
+        $error = curl_error($ch);
         curl_close($ch);
 
-        $decoded = [];
-        if ($response !== '') {
-            try {
-                $decoded = json_decode($response, true, 512, JSON_THROW_ON_ERROR);
-            } catch (\JsonException) {
-                $this->logger->error("Non-JSON response from {$path} (HTTP {$status}): " . self::redactForLog(substr($response, 0, 500)));
-                $decoded = [];
-            }
-        }
+        $this->logger->error("Artifact upload to {$path} failed: {$error}");
 
-        return ['status' => $status, 'body' => is_array($decoded) ? $decoded : []];
+        throw new \RuntimeException("Connection to Deployment Hub failed: {$error}");
     }
+
+    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+    curl_close($ch);
+
+    $decoded = [];
+
+    if ($response !== '') {
+        try {
+            $decoded = json_decode($response, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            $this->logger->error(
+                "Non-JSON response from {$path} (HTTP {$status}): " .
+                self::redactForLog(substr($response, 0, 500))
+            );
+
+            $decoded = [];
+        }
+    }
+
+    return [
+        'status' => $status,
+        'body' => is_array($decoded) ? $decoded : [],
+    ];
+}
 
     /**
      * Phase 5.5: this agent's own token/secret never reach a log line

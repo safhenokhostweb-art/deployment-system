@@ -38,8 +38,15 @@ return [
             'database' => env('DB_DATABASE', database_path('database.sqlite')),
             'prefix' => '',
             'foreign_key_constraints' => env('DB_FOREIGN_KEYS', true),
-            'busy_timeout' => null,
-            'journal_mode' => null,
+            // Root-cause fix (intermittent HTTP 504 on local-agent job
+            // heartbeat): with journal_mode=delete the whole SQLite file is
+            // locked on every write, and the PDO SQLite default busy_timeout
+            // of 60000ms made a blocked writer wait long enough for the CDN
+            // upstream to time out (504). WAL keeps readers/writers
+            // independent and commits short; a 5000ms busy_timeout fails fast
+            // instead of hanging into a 504. transaction_mode stays DEFERRED.
+            'busy_timeout' => 5000,
+            'journal_mode' => 'wal',
             'synchronous' => null,
             'transaction_mode' => 'DEFERRED',
         ],

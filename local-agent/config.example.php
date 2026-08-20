@@ -104,6 +104,10 @@ return [
     'git_push_timeout_seconds' => 180,
     'git_pull_timeout_seconds' => 180,
 
+    // Per-command build timeouts (default 30 min / 1800s) - large composer installs can exceed 10 min once they reach 'Generating optimized autoload files'. Raise via config.php if needed; job_max_runtime_seconds must stay above these.
+    'composer_timeout_seconds' => 1800,
+    'npm_install_timeout_seconds' => 1800,
+    'npm_build_timeout_seconds' => 1800,
     // How often (seconds), while a single git command is still running,
     // the agent pings the Hub with a Job-specific heartbeat — renewing
     // that PublishJob's lease so a slow-but-alive `git add`/`push` is
@@ -117,7 +121,7 @@ return [
     // timeout above — catches a publish/rollback that cumulatively ran
     // too long even though no individual step exceeded its own limit.
     // Checked between steps only, never mid-command.
-    'job_max_runtime_seconds' => 600,
+    'job_max_runtime_seconds' => 1800,
 
     // Root-cause fix (v1.4.1): a Windows Scheduled Task does NOT
     // necessarily inherit the same PATH an interactive PowerShell/terminal

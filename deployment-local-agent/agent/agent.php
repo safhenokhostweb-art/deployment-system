@@ -166,8 +166,26 @@ $workspaceTtlSeconds = (int) ($config['workspace_ttl_seconds'] ?? 86400);
 // time to a build whose own output already shows it succeeded; it never
 // weakens detection of an actually-stuck build.
 $npmGracePeriodSeconds = (int) ($config['npm_grace_period_seconds'] ?? 120);
+// Root-cause fix (customer-site large-project builds): the default
+// composer/npm build timeout is 1800s (30 min); each is configurable via
+// config.php for projects that legitimately need more. The previous
+// deployment-local-agent package default was 600s, which killed a large
+// `composer install` right after "Generating optimized autoload files".
+$composerTimeoutSeconds = (int) ($config['composer_timeout_seconds'] ?? 1800);
+$npmInstallTimeoutSeconds = (int) ($config['npm_install_timeout_seconds'] ?? 1800);
+$npmBuildTimeoutSeconds = (int) ($config['npm_build_timeout_seconds'] ?? 1800);
 $artifactUploader = new ArtifactUploader(
-    new LocalBuildRunner($git, $composerCommand, $npmCommand, $phpBinary, logger: $logger, npmGracePeriodSeconds: $npmGracePeriodSeconds),
+    new LocalBuildRunner(
+        $git,
+        $composerCommand,
+        $npmCommand,
+        $phpBinary,
+        composerTimeoutSeconds: $composerTimeoutSeconds,
+        npmInstallTimeoutSeconds: $npmInstallTimeoutSeconds,
+        npmBuildTimeoutSeconds: $npmBuildTimeoutSeconds,
+        logger: $logger,
+        npmGracePeriodSeconds: $npmGracePeriodSeconds,
+    ),
     new WorkspaceSourcePreparer($git),
     new ArtifactBuilder(),
     $client,
@@ -176,7 +194,7 @@ $artifactUploader = new ArtifactUploader(
     $workspaceTtlSeconds,
     agentVersion: LOCAL_AGENT_VERSION,
 );
-$jobMaxRuntimeSeconds = (int) ($config['job_max_runtime_seconds'] ?? 600);
+$jobMaxRuntimeSeconds = (int) ($config['job_max_runtime_seconds'] ?? 1800);
 
 // Project config is downloaded from the Hub (single source of truth) and
 // cached locally so the agent keeps working while the Hub is temporarily

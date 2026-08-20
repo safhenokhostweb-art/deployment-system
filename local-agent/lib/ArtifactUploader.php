@@ -112,7 +112,12 @@ final class ArtifactUploader
             }
 
             $this->logger->info("Artifact {$jobId}: upload started ({$archive['size']} bytes).");
-            $uploadResponse = $this->retryHub(fn () => $this->client->uploadRawBody('POST', "/api/local-agent/artifacts/{$artifactId}/content", $contents));
+            $uploadResponse = $this->retryHub(fn () => $this->client->uploadRawBody(
+    'POST',
+    "/api/local-agent/artifacts/{$artifactId}/content",
+    $contents,
+    $onTick
+));
 
             if ($uploadResponse['status'] !== 200) {
                 $message = $uploadResponse['body']['message'] ?? "HTTP {$uploadResponse['status']}";
