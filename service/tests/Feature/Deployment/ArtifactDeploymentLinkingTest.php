@@ -243,4 +243,70 @@ class ArtifactDeploymentLinkingTest extends TestCase
         $this->assertSame(Deployment::ACTION_ROLLBACK, $rollback->action);
         $this->assertNull($rollback->artifact_id);
     }
+
+    /**
+     * Regression test (fail-closed artifact-required gate): a project with
+     * requires_complete_artifact=true that has no matching artifact must have
+     * its deployment failed at creation — never queued, never pending
+     * approval, and with the agent-side failure code/message already set.
+     */
+    public function test_requires_complete_artifact_without_artifact_is_failed_and_never_queued(): void
+    {
+        $project = Project::factory()->create([
+            'auto_deploy' => true,
+            'requires_complete_artifact' => true,
+        ]);
+        $commitHash = str_repeat('c0', 20);
+
+        $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
+
+        $fresh = $deployment->fresh();
+        $this->assertSame(Deployment::STATUS_FAILED, $fresh->status);
+        $this->assertNotSame(Deployment::STATUS_QUEUED, $fresh->status);
+        $this->assertNull($fresh->artifact_id);
+        $this->assertSame(Deployment::FAILURE_CODE_ARTIFACT_REQUIRED_MISSING, $fresh->failure_code);
+        $this->assertStringContainsString($project->project_key, $fresh->failure_message);
+        $this->assertStringContainsString($commitHash, $fresh->failure_message);
+        $this->assertNotNull($fresh->finished_at);
+    }
+
+    public function test_requires_complete_artifact_with_matching_artifact_is_queued_normally(): void
+    {
+        $project = Project::factory()->create([
+            'auto_deploy' => true,
+            'requires_complete_artifact' => true,
+        ]);
+        $commitHash = str_repeat('d0', 20);
+        Artifact::factory()->create([
+            'project_id' => $project->id,
+            'commit_hash' => $commitHash,
+            'status' => Artifact::STATUS_AVAILABLE,
+        ]);
+
+        $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
+
+        $this->assertSame(Deployment::STATUS_QUEUED, $deployment->fresh()->status);
+        $this->assertNotNull($deployment->fresh()->artifact_id);
+    }
+
+    public function test_multi_target_requires_complete_artifact_without_artifact_is_failed_and_creates_no_tasks(): void
+    {
+        $project = Project::factory()->create([
+            'auto_deploy' => true,
+            'requires_complete_artifact' => true,
+        ]);
+        $environment = Environment::factory()->create(['project_id' => $project->id]);
+        DeploymentTarget::factory()->count(2)->create(['environment_id' => $environment->id]);
+        $commitHash = str_repeat('e0', 20);
+
+        $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
+
+        $fresh = $deployment->fresh();
+        $this->assertSame(Deployment::STATUS_FAILED, $fresh->status);
+        $this->assertNotSame(Deployment::STATUS_QUEUED, $fresh->status);
+        $this->assertSame(Deployment::FAILURE_CODE_ARTIFACT_REQUIRED_MISSING, $fresh->failure_code);
+        $this->assertNull($fresh->artifact_id);
+        $this->assertCount(0, $fresh->tasks);
+        $this->assertNotNull($fresh->finished_at);
+    }
 }
