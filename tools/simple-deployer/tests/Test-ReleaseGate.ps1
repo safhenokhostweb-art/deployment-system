@@ -173,7 +173,7 @@ Assert-That 'activate-release.sh requires the release manifest with status pass'
 # Part 2 — behavioral: activate-release.sh pre-swap gate via Git Bash
 # ---------------------------------------------------------------------------
 
-$base = New-TestTempDirectory -Prefix 'release-gate'
+$base = New-LongTempDirectory -Prefix 'release-gate'
 $commit = Get-CommitSha
 
 # t1 — a COMPLETE release (all mandatory files + release manifest) activates.
@@ -184,9 +184,6 @@ $t1Live = Join-Path $base 't1-live'
 New-Item -ItemType Directory -Path $t1Live -Force | Out-Null
 'old-release' | Set-Content -LiteralPath (Join-Path $t1Live 'marker.txt') -Encoding ASCII -NoNewline
 $t1 = Invoke-ActivateReleaseGate -ProjectPath $t1Live -ArchivePath $t1Zip.Path -Checksum $t1Zip.ChecksumSha256 -CommitSha $commit
-Write-Host "T1EXIT=$($t1.ExitCode) TIMEOUT=$($t1.TimedOut)"
-Write-Host "T1OUT: $($t1.StdOut)"
-Write-Host "T1ERR: $($t1.StdErr)"
 Assert-That 't1: complete release is activated (exit 0)' ($t1.ExitCode -eq 0)
 Assert-That 't1: the new release content is live' (
     (Get-Content -LiteralPath (Join-Path $t1Live 'marker.txt') -Raw) -eq 'marker'
