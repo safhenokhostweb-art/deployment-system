@@ -160,8 +160,15 @@ final class Client
             // A large artifact upload legitimately needs longer than this
             // agent's normal, small-JSON-payload request timeout — the
             // caller (ArtifactUploader) passes one sized for its file.
-            CURLOPT_TIMEOUT => max($this->timeoutSeconds, 120),
+            CURLOPT_TIMEOUT => max($this->timeoutSeconds, 300),
             CURLOPT_CONNECTTIMEOUT => $this->timeoutSeconds,
+            // Root-cause fix (artifact upload over a slow VPN path): a large
+            // upload can legitimately take minutes to push through the tunnel,
+            // but a transfer that is completely stalled (under 1 byte/sec for
+            // 60s) must fail fast instead of holding the connection until the
+            // full 300s timeout.
+            CURLOPT_LOW_SPEED_LIMIT => 1,
+            CURLOPT_LOW_SPEED_TIME => 60,
             CURLOPT_SSL_VERIFYPEER => true,
             CURLOPT_SSL_VERIFYHOST => 2,
         ]);
