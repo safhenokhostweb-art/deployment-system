@@ -8,6 +8,10 @@ use App\Models\DeploymentTarget;
 use App\Models\DeploymentTask;
 use App\Models\Environment;
 use App\Models\Project;
+use App\Models\Server;
+use App\Models\Agent;
+use App\Services\Deployment\AgentJobService;
+use App\Services\Deployment\AgentTaskService;
 use App\Services\Deployment\DeploymentDispatcher;
 use App\Services\Deployment\RollbackService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -245,12 +249,14 @@ class ArtifactDeploymentLinkingTest extends TestCase
     }
 
     /**
-     * Regression test (fail-closed artifact-required gate): a project with
-     * requires_complete_artifact=true that has no matching artifact must have
-     * its deployment failed at creation — never queued, never pending
-     * approval, and with the agent-side failure code/message already set.
+     * Regression test (artifact race condition): a project with
+     * requires_complete_artifact=true that has no matching artifact at
+     * CREATION time must NOT be failed at creation — the Local Agent may
+     * still be uploading the exact-commit artifact. The deployment stays
+     * queued so AgentJobService::claimNextJob() can re-attach it at claim
+     * time, and only then fails closed if it is still missing.
      */
-    public function test_requires_complete_artifact_without_artifact_is_failed_and_never_queued(): void
+    public function test_requires_complete_artifact_without_artifact_stays_queued_at_creation(): void
     {
         $project = Project::factory()->create([
             'auto_deploy' => true,
@@ -261,13 +267,51 @@ class ArtifactDeploymentLinkingTest extends TestCase
         $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
 
         $fresh = $deployment->fresh();
-        $this->assertSame(Deployment::STATUS_FAILED, $fresh->status);
-        $this->assertNotSame(Deployment::STATUS_QUEUED, $fresh->status);
+        // Race-condition fix: no fail-at-creation. The gate moved to claim time.
+        $this->assertSame(Deployment::STATUS_QUEUED, $fresh->status);
         $this->assertNull($fresh->artifact_id);
-        $this->assertSame(Deployment::FAILURE_CODE_ARTIFACT_REQUIRED_MISSING, $fresh->failure_code);
-        $this->assertStringContainsString($project->project_key, $fresh->failure_message);
-        $this->assertStringContainsString($commitHash, $fresh->failure_message);
-        $this->assertNotNull($fresh->finished_at);
+        $this->assertNull($fresh->failure_code);
+        $this->assertNull($fresh->finished_at);
+    }
+
+    /**
+     * Regression test (artifact race condition): the artifact lands a moment
+     * AFTER the webhook created the queued deployment — claimNextJob()
+     * re-attaches the exact-commit artifact and dispatches the job instead of
+     * failing it. This is the exact production race that used to fail
+     * deployments before the upload finished.
+     */
+    public function test_requires_complete_artifact_lands_after_creation_is_reattached_at_claim(): void
+    {
+        $server = Server::factory()->create();
+        $project = Project::factory()->create([
+            'server_id' => $server->id,
+            'auto_deploy' => true,
+            'requires_complete_artifact' => true,
+        ]);
+        $commitHash = str_repeat('f0', 20);
+        // The agent that will claim the job must belong to the same server.
+        $agent = Agent::factory()->approved()->create(['server_id' => $server->id, 'agent_version' => '1.2.0']);
+
+        // Webhook fires while the Local Agent is still uploading the artifact.
+        $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
+        $this->assertSame(Deployment::STATUS_QUEUED, $deployment->fresh()->status);
+        $this->assertNull($deployment->fresh()->artifact_id);
+
+        // Upload completes a moment later.
+        $artifact = Artifact::factory()->create([
+            'project_id' => $project->id,
+            'commit_hash' => $commitHash,
+            'status' => Artifact::STATUS_AVAILABLE,
+        ]);
+
+        // Server Agent claims the job — claim-time re-attach picks the
+        // artifact up and the job is dispatched (not failed).
+        $claimed = app(AgentJobService::class)->claimNextJob($server);
+
+        $this->assertNotNull($claimed);
+        $this->assertSame(Deployment::STATUS_RUNNING, $deployment->fresh()->status);
+        $this->assertSame($artifact->id, $deployment->fresh()->artifact_id);
     }
 
     public function test_requires_complete_artifact_with_matching_artifact_is_queued_normally(): void
@@ -289,24 +333,52 @@ class ArtifactDeploymentLinkingTest extends TestCase
         $this->assertNotNull($deployment->fresh()->artifact_id);
     }
 
-    public function test_multi_target_requires_complete_artifact_without_artifact_is_failed_and_creates_no_tasks(): void
+    public function test_multi_target_requires_complete_artifact_without_artifact_stays_queued_at_creation(): void
     {
         $project = Project::factory()->create([
             'auto_deploy' => true,
             'requires_complete_artifact' => true,
         ]);
+        $server = Server::factory()->create();
         $environment = Environment::factory()->create(['project_id' => $project->id]);
-        DeploymentTarget::factory()->count(2)->create(['environment_id' => $environment->id]);
+        $targets = DeploymentTarget::factory()->count(2)->create([
+            'environment_id' => $environment->id,
+            'server_id' => $server->id,
+        ]);
         $commitHash = str_repeat('e0', 20);
+        $agent = Agent::factory()->approved()->create(['server_id' => $server->id, 'agent_version' => '1.2.0']);
 
         $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
 
         $fresh = $deployment->fresh();
-        $this->assertSame(Deployment::STATUS_FAILED, $fresh->status);
-        $this->assertNotSame(Deployment::STATUS_QUEUED, $fresh->status);
-        $this->assertSame(Deployment::FAILURE_CODE_ARTIFACT_REQUIRED_MISSING, $fresh->failure_code);
+        // Race-condition fix: no fail-at-creation, tasks are created so the
+        // claim-time re-attach (AgentTaskService) can pick the artifact up.
+        $this->assertSame(Deployment::STATUS_QUEUED, $fresh->status);
         $this->assertNull($fresh->artifact_id);
-        $this->assertCount(0, $fresh->tasks);
-        $this->assertNotNull($fresh->finished_at);
+        $this->assertNull($fresh->failure_code);
+        $this->assertCount(2, $fresh->tasks);
+        $this->assertNull($fresh->finished_at);
+
+        // The artifact lands after creation; the first claiming agent
+        // re-attaches it and dispatches instead of failing closed.
+        $artifact = Artifact::factory()->create([
+            'project_id' => $project->id,
+            'commit_hash' => $commitHash,
+            'status' => Artifact::STATUS_AVAILABLE,
+        ]);
+        $claimed = app(AgentTaskService::class)->claimNextTask($agent);
+
+        $this->assertNotNull($claimed);
+        // Multi-target aggregate stays queued until a task reaches a terminal
+        // state (existing aggregator behavior); the task itself is running and
+        // the exact-commit artifact is now attached — that is what proves
+        // the race-condition re-attach worked instead of failing closed.
+        $this->assertSame(Deployment::STATUS_QUEUED, $fresh->fresh()->status);
+        // Exactly one of the two tasks was claimed (running) — the other
+        // remains queued — and the exact-commit artifact is attached.
+        $taskStatuses = $fresh->fresh()->tasks()->pluck('status')->all();
+        $this->assertCount(1, array_keys($taskStatuses, DeploymentTask::STATUS_RUNNING, true));
+        $this->assertCount(1, array_keys($taskStatuses, DeploymentTask::STATUS_QUEUED, true));
+        $this->assertSame($artifact->id, $fresh->fresh()->artifact_id);
     }
 }

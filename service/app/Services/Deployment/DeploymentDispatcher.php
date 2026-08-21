@@ -215,30 +215,6 @@ class DeploymentDispatcher
     }
 
     /**
-     * Fail-closed (artifact-required gate): a project with
-     * requires_complete_artifact=true can never be deployed from the live git
-     * pipeline — the Local Agent must have uploaded the artifact BEFORE this
-     * deployment was created. If none is attached at the pre-queue boundary,
-     * the deployment is failed immediately instead of being queued (and later
-     * failed by AgentJobService's claim-time gate).
-     */
-    private function failDeploymentIfRequiredArtifactMissing(Deployment $deployment, Project $project): void
-    {
-        if (
-            $project->requires_complete_artifact
-            && $deployment->action === Deployment::ACTION_DEPLOY
-            && $deployment->artifact_id === null
-        ) {
-            $deployment->update([
-                'status' => Deployment::STATUS_FAILED,
-                'failure_code' => Deployment::FAILURE_CODE_ARTIFACT_REQUIRED_MISSING,
-                'failure_message' => "Project '{$project->project_key}' requires a complete artifact for commit {$deployment->commit_hash}, but none is available. The live-directory git pipeline is forbidden for this project.",
-                'finished_at' => now(),
-            ]);
-        }
-    }
-
-    /**
      * @param array<int, TargetView> $targets
      */
     private function isLegacyTargetSet(array $targets): bool
@@ -341,11 +317,12 @@ class DeploymentDispatcher
 
             $this->attachArtifactIfAvailable($deployment);
 
-            // Fail-closed (artifact-required gate): a project with
-            // requires_complete_artifact=true must never be queued without
-            // its artifact — fail it here instead of letting the agent fail
-            // it later.
-            $this->failDeploymentIfRequiredArtifactMissing($deployment, $project);
+            // Artifact-required gate is enforced at CLAIM time, not here.
+            // The Local Agent can finish uploading the exact-commit artifact
+            // a few seconds AFTER the webhook creates this deployment; failing
+            // here would kill the deployment before that upload lands and
+            // before AgentJobService::claimNextJob()/AgentTaskService can
+            // re-attach it. They fail closed at claim time instead.
 
             AuditLogEntry::record(
                 actorType: $auditActorType,
@@ -422,11 +399,10 @@ class DeploymentDispatcher
 
             $this->attachArtifactIfAvailable($deployment);
 
-            // Fail-closed (artifact-required gate): same rule as the legacy
-            // path — without the required artifact the deployment is failed
-            // immediately and neither queued tasks nor a DeploymentStarted
-            // event are produced.
-            $this->failDeploymentIfRequiredArtifactMissing($deployment, $project);
+            // Artifact-required gate is enforced at CLAIM time, not here.
+            // Same reasoning as the legacy path: the Local Agent may still be
+            // uploading the exact-commit artifact; AgentTaskService re-attaches
+            // and fails closed at claim time instead.
 
             if ($autoApprove && $deployment->status === Deployment::STATUS_QUEUED) {
                 $this->createTasksForDeployment($deployment, $targets);
