@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Dashboard;
 use App\Http\Controllers\Controller;
 use App\Models\Deployment;
 use App\Models\DeploymentTask;
+use App\Services\Deployment\RetryDeploymentService;
 use App\Services\Deployment\RollbackService;
 use App\Services\HealthCheck\HealthCheckService;
 use App\Support\Deployment\PipelineStepPresenter;
@@ -15,6 +16,7 @@ use Illuminate\Support\Facades\Gate;
 class DeploymentTaskController extends Controller
 {
     public function __construct(
+        private readonly RetryDeploymentService $retryService,
         private readonly RollbackService $rollbackService,
         private readonly HealthCheckService $healthCheckService,
         private readonly PipelineStepPresenter $steps,
@@ -64,6 +66,16 @@ class DeploymentTaskController extends Controller
         $rollback = $this->rollbackService->rollbackTargetTo($deploymentTask, $request->user()->email);
 
         return redirect()->route('deployments.show', $rollback)->with('status', 'Rollback queued for this target.');
+    }
+
+    public function retry(Request $request, DeploymentTask $deploymentTask): RedirectResponse
+    {
+        Gate::authorize('deployments.create');
+        Gate::authorize('deploy', $deploymentTask->deployment->project);
+
+        $deployment = $this->retryService->retryTask($deploymentTask, $request->user()->email);
+
+        return redirect()->route('deployments.show', $deployment)->with('status', 'Target task requeued.');
     }
 
     public function runHealthCheck(Request $request, DeploymentTask $deploymentTask): RedirectResponse

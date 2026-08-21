@@ -100,6 +100,22 @@
                 <button type="submit" class="btn btn-danger">{{ __('ui.deployments.cancel_button') }}</button>
             </form>
             @endcan
+        @elseif ($deployment->isRetryable())
+            @can('deploy', $deployment->project)
+            <form method="POST" action="{{ route('deployments.retry', $deployment) }}" id="retry-deployment-form" style="display:inline">
+                @csrf
+            </form>
+            <button type="button" class="btn btn-primary" onclick="document.getElementById('retry-deployment-dialog').showModal()">{{ __('ui.deployments.retry_button') }}</button>
+            <x-confirm-dialog
+                id="retry-deployment-dialog"
+                form-id="retry-deployment-form"
+                :title="__('ui.deployments.retry_button')"
+                :danger="false"
+                :confirm-label="__('ui.deployments.retry_button')"
+            >
+                <p>{{ __('ui.deployments.retry_confirm', ['commit' => $deployment->displayLabel()]) }}</p>
+            </x-confirm-dialog>
+            @endcan
         @elseif ($deployment->status === 'succeeded')
             @can('rollback', $deployment->project)
             <form method="POST" action="{{ route('deployments.rollback', $deployment) }}" id="rollback-deployment-form" style="display:inline">

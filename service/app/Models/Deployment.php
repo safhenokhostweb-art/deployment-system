@@ -193,6 +193,17 @@ class Deployment extends Model
     }
 
     /**
+     * Whether this terminal deployment can be retried from the UI. True for
+     * failed and partial_success only — succeeded, cancelled and rolled_back
+     * are not retryable (a rollback of a previous success is expressed
+     * through the existing rollback flow, never through retry).
+     */
+    public function isRetryable(): bool
+    {
+        return in_array($this->status, [self::STATUS_FAILED, self::STATUS_PARTIAL_SUCCESS], true);
+    }
+
+    /**
      * A deployment the Hub considers "actively claimed" — running (in any
      * of the running/building/migrating/activating/verifying phases)
      * with a lease that hasn't expired yet. False for a lease-less

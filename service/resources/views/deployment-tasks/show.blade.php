@@ -91,6 +91,26 @@
 </x-card>
 @endif
 
+@if ($task->status === 'failed')
+<x-card>
+    @can('deploy', $task->deployment->project)
+    <form method="POST" action="{{ route('deployment-tasks.retry', $task) }}" id="retry-task-form" style="display:inline">
+        @csrf
+    </form>
+    <button type="button" class="btn btn-primary" onclick="document.getElementById('retry-task-dialog').showModal()">{{ __('ui.deployment_tasks.retry_target_button') }}</button>
+    <x-confirm-dialog
+        id="retry-task-dialog"
+        form-id="retry-task-form"
+        :title="__('ui.deployment_tasks.retry_target_button')"
+        :danger="false"
+        :confirm-label="__('ui.deployment_tasks.retry_target_button')"
+    >
+        <p>{{ __('ui.deployment_tasks.retry_target_confirm', ['commit' => $task->deployment->displayLabel()]) }}</p>
+    </x-confirm-dialog>
+    @endcan
+</x-card>
+@endif
+
 <x-card :title="__('ui.deployment_tasks.attempts_title')">
     @forelse ($task->agentJobs as $agentJob)
         <div style="margin-bottom:1.2rem;padding-bottom:1rem;border-bottom:1px solid #eee;">

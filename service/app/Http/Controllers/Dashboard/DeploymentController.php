@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Dashboard;
 use App\Http\Controllers\Controller;
 use App\Models\Deployment;
 use App\Services\Deployment\DeploymentDispatcher;
+use App\Services\Deployment\RetryDeploymentService;
 use App\Services\Deployment\RollbackService;
 use App\Support\Deployment\FailureCodeGuidance;
 use App\Support\Deployment\PipelineStepPresenter;
@@ -17,6 +18,7 @@ class DeploymentController extends Controller
 {
     public function __construct(
         private readonly DeploymentDispatcher $dispatcher,
+        private readonly RetryDeploymentService $retryService,
         private readonly RollbackService $rollbackService,
         private readonly PipelineStepPresenter $steps,
         private readonly RecipeStepPresenter $recipeSteps,
@@ -77,6 +79,16 @@ class DeploymentController extends Controller
         $this->dispatcher->cancel($deployment, $request->user()->email);
 
         return redirect()->route('deployments.show', $deployment)->with('status', 'Deployment cancelled.');
+    }
+
+    public function retry(Request $request, Deployment $deployment): RedirectResponse
+    {
+        Gate::authorize('deployments.create');
+        Gate::authorize('deploy', $deployment->project);
+
+        $this->retryService->retry($deployment, $request->user()->email);
+
+        return redirect()->route('deployments.show', $deployment)->with('status', 'Deployment requeued. The agent will pick it up on its next poll.');
     }
 
     public function rollback(Request $request, Deployment $deployment): RedirectResponse

@@ -455,6 +455,8 @@ return [
         'recipe_step_type' => 'Step type: :type',
         'approve_button' => 'Approve & queue',
         'cancel_button' => 'Cancel',
+        'retry_button' => 'Retry deployment',
+        'retry_confirm' => 'Re-queue this failed deployment for commit :commit? Its history is preserved and the agent will pick it up on the next poll.',
         'rollback_button' => 'Roll back to this commit',
         'rollback_confirm' => 'Roll back to this commit? This queues a new deployment targeting it.',
 
@@ -487,6 +489,8 @@ return [
         'environment_label' => 'Environment',
         'server_label' => 'Server',
         'retry_scheduled' => 'retry scheduled :time',
+        'retry_target_button' => 'Retry this target',
+        'retry_target_confirm' => 'Re-queue this failed target task for commit :commit? Its history is preserved.',
         'rollback_target_button' => 'Roll back this target to this commit',
         'rollback_target_confirm' => 'Roll back only this target (:target) to this commit? Other targets in this environment are not affected.',
         'rollback_target_confirm_detailed' => 'Roll back :target only, from :from to :to? Other targets in this environment are not affected.',

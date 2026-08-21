@@ -24,6 +24,8 @@ class FailureCodeGuidance
         'agent_heartbeat_lost' => 'The server\'s agent went offline mid-deployment. Confirm the agent process is running, then retry.',
         'max_runtime_exceeded' => 'The deployment ran longer than the configured maximum runtime and was force-ended. If this is a legitimately slow build, raise deployment_job_max_runtime_seconds.',
         'late_callback_rejected' => 'The agent reported in after this deployment had already been finalized (e.g. by deployments:detect-stalled) — informational only, no action needed.',
+        'agent_protocol_incompatible' => 'The server agent version was too old to enforce the Laravel release-completeness gate. Upgrade the Server Agent to the required version, then use the Retry button to re-queue this deployment.',
+        'artifact_required_missing' => 'This project requires a complete artifact for the exact commit, but none is available. Publish the commit from the Local Agent first, then use the Retry button.',
     ];
 
     public static function forCode(?string $failureCode): ?string

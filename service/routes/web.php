@@ -123,9 +123,11 @@ Route::middleware('auth')->group(function () {
     Route::get('/deployments/{deployment}', [DeploymentController::class, 'show'])->name('deployments.show');
     Route::post('/deployments/{deployment}/approve', [DeploymentController::class, 'approve'])->name('deployments.approve');
     Route::post('/deployments/{deployment}/cancel', [DeploymentController::class, 'cancel'])->name('deployments.cancel');
+    Route::post('/deployments/{deployment}/retry', [DeploymentController::class, 'retry'])->name('deployments.retry');
     Route::post('/deployments/{deployment}/rollback', [DeploymentController::class, 'rollback'])->name('deployments.rollback');
 
     Route::get('/deployment-tasks/{deploymentTask}', [DeploymentTaskController::class, 'show'])->name('deployment-tasks.show');
+    Route::post('/deployment-tasks/{deploymentTask}/retry', [DeploymentTaskController::class, 'retry'])->name('deployment-tasks.retry');
     Route::post('/deployment-tasks/{deploymentTask}/rollback', [DeploymentTaskController::class, 'rollback'])->name('deployment-tasks.rollback');
     Route::post('/deployment-tasks/{deploymentTask}/health-check', [DeploymentTaskController::class, 'runHealthCheck'])->name('deployment-tasks.health-check');
 

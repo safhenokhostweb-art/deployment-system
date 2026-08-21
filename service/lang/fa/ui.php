@@ -455,6 +455,8 @@ return [
         'recipe_step_type' => 'نوع مرحله: :type',
         'approve_button' => 'تایید و افزودن به صف',
         'cancel_button' => 'لغو',
+        'retry_button' => 'تلاش مجدد استقرار',
+        'retry_confirm' => 'این استقرار ناموفق برای کامیت :commit دوباره در صف قرار گیرد؟ تاریخچه آن حفظ می‌شود و عامل در چرخه بعدی آن را برمی‌دارد.',
         'rollback_button' => 'بازگشت به این کامیت',
         'rollback_confirm' => 'به این کامیت بازگردید؟ این کار یک استقرار جدید برای همین کامیت به صف اضافه می‌کند.',
 
@@ -487,6 +489,8 @@ return [
         'environment_label' => 'محیط',
         'server_label' => 'سرور',
         'retry_scheduled' => 'تلاش مجدد زمان‌بندی شده :time',
+        'retry_target_button' => 'تلاش مجدد این مقصد',
+        'retry_target_confirm' => 'این وظیفهٔ ناموفق مقصد برای کامیت :commit دوباره در صف قرار گیرد؟ تاریخچه آن حفظ می‌شود.',
         'rollback_target_button' => 'بازگشت این مقصد به این کامیت',
         'rollback_target_confirm' => 'فقط این مقصد (:target) به این کامیت بازگردد؟ سایر مقصدهای این محیط تحت تاثیر قرار نمی‌گیرند.',
         'rollback_target_confirm_detailed' => 'فقط مقصد :target از :from به :to بازگردد؟ سایر مقصدهای این محیط تحت تاثیر قرار نمی‌گیرند.',
