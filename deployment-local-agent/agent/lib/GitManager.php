@@ -100,7 +100,7 @@ final class GitManager
 
     /**
      * @return array<int, string> relative file paths, exactly as `git
-     *     status --porcelain` reports them (including a rename's
+     *     status --porcelain -z` reports them (including a rename's
      *     "old -> new" form) — never resolved to absolute paths, never
      *     the file contents.
      */
@@ -112,21 +112,32 @@ final class GitManager
         // file list from the operator's review and defeat IgnoreRules'
         // path-based matching (a rule like "storage/logs/" can only match
         // a file path, not a truncated parent-directory line).
-        $result = $this->run(['git', 'status', '--porcelain', '--untracked-files=all'], $repositoryPath, $this->timeoutFor('status'));
+        //
+        // -z (NUL-separated) is mandatory, not cosmetic: in the default
+        // line-oriented porcelain format git C-quotes any path containing
+        // spaces, quotes or special characters (e.g. a corrupted-name
+        // file "service/=  app(AppServices...);" comes back as
+        // `?? "service/=  app(...);"` with literal quote characters).
+        // substr(3) then keeps those quotes, producing a git add pathspec
+        // that can never match the real file. With -z every record is
+        // emitted verbatim, terminated by a NUL byte, so no unquoting is
+        // ever needed and the exact path is preserved byte-for-byte.
+        $result = $this->run(['git', 'status', '--porcelain', '-z', '--untracked-files=all'], $repositoryPath, $this->timeoutFor('status'));
 
         if ($result['exitCode'] !== 0) {
             throw new \RuntimeException("git status failed in {$repositoryPath}: " . trim($result['output']));
         }
 
         $files = [];
-        foreach (preg_split('/\r?\n/', $result['output']) as $line) {
-            if ($line === '') {
+        foreach (explode("\0", $result['output']) as $record) {
+            if ($record === '') {
                 continue;
             }
 
-            // Porcelain format is "XY <path>" (2-status-chars, space,
-            // path) — substr(3) strips the status prefix, not the path.
-            $files[] = substr($line, 3);
+            // NUL-separated porcelain record is "XY <path>" — the status
+            // prefix is the first 3 characters (2 status chars + a single
+            // space), everything after it is the exact path, unquoted.
+            $files[] = substr($record, 3);
         }
 
         return $files;
