@@ -340,6 +340,10 @@
             <p class="muted" style="margin-top:0.4rem;">{{ __('ui.publish.agent_offline_warning') }}</p>
         @endif
 
+        @if ($project->requires_complete_artifact)
+            <p class="muted" style="margin-top:0.6rem;">{{ __('ui.publish.artifact_required_hint') }}</p>
+        @endif
+
         <form method="POST" action="{{ route('projects.publish', $project) }}" style="display:flex;gap:0.6rem;align-items:flex-end;flex-wrap:wrap;margin-top:0.6rem;">
             @csrf
             @if ($project->localProjectMappings->count() > 1)
@@ -354,7 +358,13 @@
             @else
                 <input type="hidden" name="local_project_mapping_id" value="{{ $project->localProjectMappings->first()->id }}">
             @endif
-            <button type="submit" class="btn btn-primary">{{ __('ui.publish.button') }}</button>
+            @if ($project->requires_complete_artifact)
+                <div>
+                    <label for="commit_hash">{{ __('ui.publish.artifact_commit_label') }}</label>
+                    <input type="text" id="commit_hash" name="commit_hash" maxlength="40" dir="ltr" style="text-align:left;" value="{{ $project->localProjectMappings->first()?->remote_tracking_sha ?? $project->localProjectMappings->first()?->local_head_sha }}">
+                </div>
+            @endif
+            <button type="submit" class="btn btn-primary">{{ $project->requires_complete_artifact ? __('ui.publish.artifact_button') : __('ui.publish.button') }}</button>
         </form>
 
         <form method="POST" action="{{ route('projects.publish.rollback', $project) }}" id="rollback-publish-form" style="display:inline;margin-top:0.6rem;">

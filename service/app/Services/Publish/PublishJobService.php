@@ -69,6 +69,36 @@ class PublishJobService
         return $job;
     }
 
+    public function queueArtifactBuild(LocalAgent $localAgent, Project $project, string $commitHash, string $branch, string $requestedBy): PublishJob
+    {
+        abort_unless(preg_match('/^[0-9a-f]{40}$/', $commitHash) === 1, 422, 'Artifact build requires a valid 40-character commit SHA.');
+        abort_unless($branch !== '', 422, 'Artifact build requires a branch.');
+
+        $job = PublishJob::create([
+            'local_agent_id' => $localAgent->id,
+            'project_id' => $project->id,
+            'action' => PublishJob::ACTION_BUILD_ARTIFACT,
+            'status' => PublishJob::STATUS_APPROVED,
+            'requested_by' => $requestedBy,
+            'approved_by' => $requestedBy,
+            'approved_at' => now(),
+            'reviewed_head_sha' => $commitHash,
+            'reviewed_branch' => $branch,
+            'reviewed_working_tree_clean' => true,
+        ]);
+
+        AuditLogEntry::record(
+            actorType: AuditLogEntry::ACTOR_USER,
+            actorIdentifier: $requestedBy,
+            action: 'publish_job.artifact_build_queued',
+            subjectType: PublishJob::class,
+            subjectId: $job->id,
+            metadata: ['local_agent_id' => $localAgent->id, 'project_id' => $project->id, 'commit_hash' => $commitHash, 'branch' => $branch],
+        );
+
+        return $job;
+    }
+
     /**
      * Phase 5.2: the LocalChangeDetectionJob path — files are already
      * known (the agent's own watcher reported them), so this skips
@@ -569,6 +599,10 @@ class PublishJobService
             abort_unless($commitHash !== null && hash_equals((string) $job->reviewed_head_sha, $commitHash), 422, 'A no-source-change publish must report its verified reviewed HEAD exactly.');
         }
 
+        if ($job->action === PublishJob::ACTION_BUILD_ARTIFACT) {
+            abort_unless($commitHash !== null && hash_equals((string) $job->reviewed_head_sha, $commitHash), 422, 'An artifact build job must report the requested commit exactly.');
+        }
+
         $job->update([
             'status' => PublishJob::STATUS_SUCCEEDED,
             'result_commit_hash' => $commitHash,
@@ -589,7 +623,7 @@ class PublishJobService
         AuditLogEntry::record(
             actorType: AuditLogEntry::ACTOR_AGENT,
             actorIdentifier: $job->localAgent->public_id,
-            action: $job->action === PublishJob::ACTION_ROLLBACK ? 'publish_job.rollback_succeeded' : 'publish_job.succeeded',
+            action: $job->action === PublishJob::ACTION_ROLLBACK ? 'publish_job.rollback_succeeded' : ($job->action === PublishJob::ACTION_BUILD_ARTIFACT ? 'publish_job.artifact_build_succeeded' : 'publish_job.succeeded'),
             subjectType: PublishJob::class,
             subjectId: $job->id,
             metadata: ['commit_hash' => $commitHash],

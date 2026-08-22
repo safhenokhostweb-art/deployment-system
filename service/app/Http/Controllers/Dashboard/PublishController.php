@@ -32,6 +32,20 @@ class PublishController extends Controller
 
         $mapping = $this->resolveMapping($request, $project);
 
+        if ($project->requires_complete_artifact) {
+            $validated = $request->validate([
+                'commit_hash' => 'nullable|string|regex:/^[0-9a-f]{40}$/',
+            ]);
+
+            $commitHash = $validated['commit_hash'] ?? $mapping->remote_tracking_sha ?? $mapping->local_head_sha;
+            abort_unless(is_string($commitHash) && preg_match('/^[0-9a-f]{40}$/', $commitHash) === 1, 422, 'Artifact build requires a known GitHub commit SHA. Wait for the Local Agent heartbeat or enter the commit SHA explicitly.');
+
+            $job = $this->publishJobs->queueArtifactBuild($mapping->localAgent, $project, $commitHash, $mapping->effectiveBranch(), $request->user()->email);
+
+            return redirect()->route('projects.publish.show', [$project, $job])
+                ->with('status', 'درخواست ساخت Artifact ثبت شد. کارگزار فقط commit مشخص‌شده را می‌خواند، Artifact کامل می‌سازد و چیزی را به GitHub push نمی‌کند.');
+        }
+
         $job = $this->publishJobs->queue($mapping->localAgent, $project, PublishJob::ACTION_STATUS_CHECK, $request->user()->email);
 
         return redirect()->route('projects.publish.show', [$project, $job])

@@ -15,11 +15,27 @@ final class SafetyChecker
 {
     private const UNMERGED_CODES = ['UU', 'AA', 'DD', 'AU', 'UA', 'UD', 'DU'];
 
+    public static function productionSourcePathForbidden(string $path): bool
+    {
+        $normalized = str_replace('\\', '/', $path);
+        $lower = strtolower($normalized);
+
+        return str_starts_with($lower, '/var/www/')
+            || str_starts_with($lower, '/srv/www/')
+            || str_starts_with($lower, '/home/deployment-agent/')
+            || str_contains($lower, '/releases/')
+            || preg_match('#^[a-z]:/inetpub/wwwroot/#', $lower) === 1;
+    }
+
     /**
      * @throws \RuntimeException with a message safe to report back to the Hub as-is
      */
     public function assertSafeToPublish(GitManager $git, string $repositoryPath, string $expectedBranch): void
     {
+        if (self::productionSourcePathForbidden($repositoryPath)) {
+            throw new \RuntimeException("Refusing to publish from production-like directory '{$repositoryPath}'. Configure this project mapping to a dedicated build checkout.");
+        }
+
         $branch = $this->currentBranch($git, $repositoryPath);
 
         if ($branch !== $expectedBranch) {

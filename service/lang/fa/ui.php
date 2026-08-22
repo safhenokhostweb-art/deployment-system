@@ -336,6 +336,9 @@ return [
 
     'publish' => [
         'button' => 'انتشار تغییرات',
+        'artifact_button' => 'ساخت Artifact',
+        'artifact_commit_label' => 'شناسه Commit',
+        'artifact_required_hint' => 'برای این پروژه Artifact اجباری است. کارگزار محلی commit مشخص‌شده را از GitHub می‌خواند، Artifact کامل می‌سازد، اعتبارسنجی می‌کند و بدون commit یا push آن را بارگذاری می‌کند.',
         'rollback_button' => 'بازگشت آخرین انتشار',
         'rollback_confirm' => 'آخرین commit ثبت‌شده توسط کارگزار محلی با یک commit جدید (git revert) بازگردانده شود؟',
         'no_mapping' => 'برای انتشار، ابتدا یک کارگزار محلی تایید‌شده به این پروژه نگاشت کنید.',
@@ -343,6 +346,7 @@ return [
         'title' => 'وضعیت انتشار',
         'action_status_check' => 'بررسی تغییرات',
         'action_publish' => 'انتشار',
+        'action_build_artifact' => 'ساخت Artifact',
         'action_rollback' => 'بازگشت',
         'changed_files_title' => 'فایل‌های تغییریافته',
         'files_changed_count' => ':count فایل تغییر کرده',

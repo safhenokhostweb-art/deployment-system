@@ -20,6 +20,7 @@ class PublishJob extends Model
 
     public const ACTION_STATUS_CHECK = 'status_check';
     public const ACTION_PUBLISH = 'publish';
+    public const ACTION_BUILD_ARTIFACT = 'build_artifact';
     public const ACTION_ROLLBACK = 'rollback';
 
     public const STATUS_QUEUED = 'queued';
@@ -56,6 +57,7 @@ class PublishJob extends Model
     public const FAILURE_CODE_ARTIFACT_UPLOAD_FAILED = 'artifact_upload_failed';
     public const FAILURE_CODE_ARTIFACT_MISSING_VENDOR = 'artifact_missing_vendor';
     public const FAILURE_CODE_ARTIFACT_MISSING_BUILD = 'artifact_missing_build';
+    public const FAILURE_CODE_PRODUCTION_SOURCE_FORBIDDEN = 'production_source_forbidden';
 
     /**
      * Root-cause fix (v1.4.2): a required PHP extension (e.g. ext-gd for
@@ -91,6 +93,7 @@ class PublishJob extends Model
         self::FAILURE_CODE_ARTIFACT_UPLOAD_FAILED,
         self::FAILURE_CODE_ARTIFACT_MISSING_VENDOR,
         self::FAILURE_CODE_ARTIFACT_MISSING_BUILD,
+        self::FAILURE_CODE_PRODUCTION_SOURCE_FORBIDDEN,
         self::FAILURE_CODE_MISSING_PHP_EXTENSION,
         self::FAILURE_CODE_LOCAL_WORKSPACE_CREATE_FAILED,
         self::FAILURE_CODE_LOCAL_WORKSPACE_PREPARE_FAILED,

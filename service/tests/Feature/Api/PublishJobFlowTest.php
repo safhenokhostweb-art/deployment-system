@@ -86,6 +86,38 @@ class PublishJobFlowTest extends TestCase
             ->assertJsonPath('job.expected_branch', 'main');
     }
 
+    public function test_artifact_build_job_exposes_only_artifact_commit_details_to_the_agent(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create();
+        $project = $this->mappedProject($agent);
+        $job = app(PublishJobService::class)->queueArtifactBuild($agent, $project, str_repeat('e', 40), 'main', 'dev@example.test');
+
+        $headers = $this->headersFor($agent, 'GET', '/api/local-agent/publish-jobs/next');
+        $this->get('/api/local-agent/publish-jobs/next', $headers)->assertOk()
+            ->assertJsonPath('job.id', $job->public_id)
+            ->assertJsonPath('job.action', PublishJob::ACTION_BUILD_ARTIFACT)
+            ->assertJsonPath('job.project_key', $project->project_key)
+            ->assertJsonPath('job.commit_message', null)
+            ->assertJsonPath('job.no_source_change', false)
+            ->assertJsonPath('job.expected_head_sha', null)
+            ->assertJsonPath('job.artifact_commit_hash', str_repeat('e', 40))
+            ->assertJsonPath('job.artifact_branch', 'main');
+    }
+
+    public function test_artifact_build_result_must_match_requested_commit(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create();
+        $project = $this->mappedProject($agent);
+        $job = app(PublishJobService::class)->queueArtifactBuild($agent, $project, str_repeat('e', 40), 'main', 'dev@example.test');
+        app(PublishJobService::class)->claimNext($agent);
+
+        $body = ['status' => 'succeeded', 'commit_hash' => str_repeat('f', 40)];
+        $path = "/api/local-agent/publish-jobs/{$job->public_id}/report";
+
+        $this->postJson($path, $body, $this->headersFor($agent, 'POST', $path, json_encode($body)))->assertStatus(422);
+        $this->assertSame(PublishJob::STATUS_RUNNING, $job->fresh()->status);
+    }
+
     public function test_status_check_rejects_no_source_change_evidence_for_the_wrong_mapping_branch(): void
     {
         $agent = LocalAgent::factory()->approved()->create();

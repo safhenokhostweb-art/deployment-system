@@ -360,6 +360,18 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
     $jobStartedAt = microtime(true);
 
     try {
+        if ($job['action'] !== 'status_check' && SafetyChecker::productionSourcePathForbidden($repositoryPath)) {
+            $message = "Refusing to use production-like directory '{$repositoryPath}' as a publish/artifact source. Configure this project mapping to a dedicated build checkout; production directories must never push to GitHub or build release artifacts.";
+            $logger->error("Job {$job['id']}: {$message}");
+            $client->request('POST', $reportPath, [
+                'status' => 'failed',
+                'error_message' => $message,
+                'failure_code' => 'production_source_forbidden',
+            ]);
+
+            return;
+        }
+
         if ($job['action'] === 'status_check') {
             $logger->info("Job {$job['id']}: checking git status for {$projectKey} at {$repositoryPath}");
             $rawFiles = $git->changedFiles($repositoryPath);
@@ -376,6 +388,37 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
                 'working_tree_clean' => $changedFiles === [] && $blockedFiles === [],
             ]);
             $logger->info("Job {$job['id']}: reported " . count($changedFiles) . ' changed file(s), ' . count($blockedFiles) . ' blocked file(s)' . ($reportResponse['status'] === 200 ? '' : ' (Hub HTTP ' . $reportResponse['status'] . ')'));
+
+            return;
+        }
+
+        if ($job['action'] === 'build_artifact') {
+            $commitHash = $job['artifact_commit_hash'] ?? null;
+            $artifactBranch = $job['artifact_branch'] ?? $branch;
+            if (!is_string($commitHash) || preg_match('/^[0-9a-f]{40}$/', $commitHash) !== 1) {
+                throw new \RuntimeException('Artifact build job is missing a valid commit SHA.');
+            }
+            if (!is_string($artifactBranch) || $artifactBranch === '') {
+                throw new \RuntimeException('Artifact build job is missing a valid branch.');
+            }
+
+            $logger->info("Job {$job['id']}: building artifact for {$projectKey} commit {$commitHash} from {$remoteName}/{$artifactBranch}; no commit or push will be performed.");
+            $artifactResult = $artifactUploader->buildAndUploadRemoteCommit($projectKey, $repositoryPath, $remoteName, $commitHash, $artifactBranch, (string) $job['id'], $onTick, $projectConfig['application_root'] ?? '.');
+
+            if (!$artifactResult['succeeded']) {
+                $logger->error("Job {$job['id']}: artifact build failed [{$artifactResult['failureCode']}]: {$artifactResult['message']}");
+                $client->request('POST', $reportPath, [
+                    'status' => 'failed',
+                    'error_message' => $artifactResult['message'],
+                    'failure_code' => $artifactResult['failureCode'],
+                    'output' => '[artifact] FAILED: ' . $artifactResult['message'],
+                ]);
+
+                return;
+            }
+
+            $client->request('POST', $reportPath, ['status' => 'succeeded', 'commit_hash' => $commitHash, 'output' => '[artifact] uploaded: ' . $artifactResult['message']]);
+            $logger->info("Job {$job['id']}: artifact built for {$commitHash}");
 
             return;
         }

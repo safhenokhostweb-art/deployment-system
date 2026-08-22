@@ -103,6 +103,8 @@ class LocalAgentJobController extends Controller
                 'no_source_change' => $job->action === PublishJob::ACTION_PUBLISH ? $job->no_source_change : false,
                 'expected_head_sha' => $job->action === PublishJob::ACTION_PUBLISH && $job->no_source_change ? $job->reviewed_head_sha : null,
                 'expected_branch' => $job->action === PublishJob::ACTION_PUBLISH && $job->no_source_change ? $job->reviewed_branch : null,
+                'artifact_commit_hash' => $job->action === PublishJob::ACTION_BUILD_ARTIFACT ? $job->reviewed_head_sha : null,
+                'artifact_branch' => $job->action === PublishJob::ACTION_BUILD_ARTIFACT ? $job->reviewed_branch : null,
             ],
         ]);
     }

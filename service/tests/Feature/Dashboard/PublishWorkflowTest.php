@@ -68,6 +68,46 @@ class PublishWorkflowTest extends TestCase
         $this->assertSame($developer->email, $job->requested_by);
     }
 
+    public function test_artifact_required_project_queues_artifact_build_instead_of_publish_status_check(): void
+    {
+        $developer = User::factory()->create(['role' => User::ROLE_DEVELOPER]);
+        $project = $this->projectWithApprovedMapping();
+        $project->update(['requires_complete_artifact' => true]);
+        $mapping = $project->localProjectMappings()->first();
+        $mapping->update([
+            'local_head_sha' => str_repeat('a', 40),
+            'remote_tracking_sha' => str_repeat('a', 40),
+            'working_tree_dirty' => false,
+        ]);
+
+        $response = $this->actingAs($developer)->post(route('projects.publish', $project), [
+            'local_project_mapping_id' => $mapping->id,
+        ]);
+
+        $job = PublishJob::first();
+        $response->assertRedirect(route('projects.publish.show', [$project, $job]));
+        $this->assertSame(PublishJob::ACTION_BUILD_ARTIFACT, $job->action);
+        $this->assertSame(PublishJob::STATUS_APPROVED, $job->status);
+        $this->assertSame(str_repeat('a', 40), $job->reviewed_head_sha);
+        $this->assertSame('main', $job->reviewed_branch);
+    }
+
+    public function test_artifact_required_project_can_request_a_specific_github_commit(): void
+    {
+        $developer = User::factory()->create(['role' => User::ROLE_DEVELOPER]);
+        $project = $this->projectWithApprovedMapping();
+        $project->update(['requires_complete_artifact' => true]);
+        $mapping = $project->localProjectMappings()->first();
+
+        $this->actingAs($developer)->post(route('projects.publish', $project), [
+            'local_project_mapping_id' => $mapping->id,
+            'commit_hash' => str_repeat('b', 40),
+        ])->assertRedirect();
+
+        $this->assertSame(PublishJob::ACTION_BUILD_ARTIFACT, PublishJob::first()->action);
+        $this->assertSame(str_repeat('b', 40), PublishJob::first()->reviewed_head_sha);
+    }
+
     public function test_publish_requires_an_approved_local_agent_mapping(): void
     {
         $developer = User::factory()->create(['role' => User::ROLE_DEVELOPER]);

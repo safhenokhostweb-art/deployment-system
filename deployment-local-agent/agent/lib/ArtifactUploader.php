@@ -51,6 +51,41 @@ final class ArtifactUploader
      */
     public function buildAndUpload(string $projectKey, string $repositoryPath, string $commitHash, string $branch, string $jobId, ?callable $onTick = null, string $applicationRoot = '.'): array
     {
+        return $this->buildAndUploadFromPreparedSource(
+            $projectKey,
+            $repositoryPath,
+            $commitHash,
+            $branch,
+            $jobId,
+            fn (BuildWorkspace $workspace) => $this->sourcePreparer->prepare($workspace, $repositoryPath, $commitHash, $onTick),
+            $onTick,
+            $applicationRoot,
+        );
+    }
+
+    /**
+     * @return array{succeeded: bool, message: string, failureCode: ?string}
+     */
+    public function buildAndUploadRemoteCommit(string $projectKey, string $repositoryPath, string $remoteName, string $commitHash, string $branch, string $jobId, ?callable $onTick = null, string $applicationRoot = '.'): array
+    {
+        return $this->buildAndUploadFromPreparedSource(
+            $projectKey,
+            $repositoryPath,
+            $commitHash,
+            $branch,
+            $jobId,
+            fn (BuildWorkspace $workspace) => $this->sourcePreparer->prepareRemoteCommit($workspace, $repositoryPath, $remoteName, $branch, $commitHash, $onTick),
+            $onTick,
+            $applicationRoot,
+        );
+    }
+
+    /**
+     * @param callable(BuildWorkspace): array{commitTimestamp: int} $prepareSource
+     * @return array{succeeded: bool, message: string, failureCode: ?string}
+     */
+    private function buildAndUploadFromPreparedSource(string $projectKey, string $repositoryPath, string $commitHash, string $branch, string $jobId, callable $prepareSource, ?callable $onTick = null, string $applicationRoot = '.'): array
+    {
         BuildWorkspace::pruneStale($this->workspaceBaseDir, $this->workspaceTtlSeconds, $this->logger);
 
         $workspace = null;
@@ -58,7 +93,7 @@ final class ArtifactUploader
 
         try {
             $workspace = BuildWorkspace::create($this->workspaceBaseDir, $projectKey, $jobId);
-            $prepared = $this->sourcePreparer->prepare($workspace, $repositoryPath, $commitHash, $onTick);
+            $prepared = $prepareSource($workspace);
 
             $applicationDirectory = ApplicationRoot::resolve($workspace->projectDir(), $this->buildProfiles[$projectKey]['application_root'] ?? $applicationRoot);
             $buildResult = $this->buildRunner->run($applicationDirectory, $onTick);

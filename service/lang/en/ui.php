@@ -336,6 +336,9 @@ return [
 
     'publish' => [
         'button' => 'Publish Changes',
+        'artifact_button' => 'Build Artifact',
+        'artifact_commit_label' => 'Commit SHA',
+        'artifact_required_hint' => 'This project deploys only from complete artifacts. The local agent will fetch the requested GitHub commit, build the artifact, validate it, and upload it without committing or pushing.',
         'rollback_button' => 'Rollback Last Publish',
         'rollback_confirm' => 'Revert the last commit made by the local agent with a new commit (git revert)?',
         'no_mapping' => 'Map an approved local agent to this project before publishing.',
@@ -343,6 +346,7 @@ return [
         'title' => 'Publish status',
         'action_status_check' => 'Checking changes',
         'action_publish' => 'Publish',
+        'action_build_artifact' => 'Build artifact',
         'action_rollback' => 'Rollback',
         'changed_files_title' => 'Changed files',
         'files_changed_count' => ':count file(s) changed',

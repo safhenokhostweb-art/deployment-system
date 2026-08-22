@@ -8,6 +8,7 @@ use App\Models\Deployment;
 use App\Models\Project;
 use App\Models\Server;
 use App\Services\Deployment\AgentJobService;
+use App\Support\Deployment\FailureCodeGuidance;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -138,6 +139,8 @@ class AgentJobServiceReleaseGateTest extends TestCase
         $this->assertNull($claimed);
         $this->assertSame(Deployment::STATUS_FAILED, $deployment->fresh()->status);
         $this->assertSame(Deployment::FAILURE_CODE_ARTIFACT_REQUIRED_MISSING, $deployment->fresh()->failure_code);
+        $this->assertStringContainsString('Artifact کامل اجباری است', FailureCodeGuidance::forCode($deployment->fresh()->failure_code));
+        $this->assertStringContainsString('live-directory git pipeline اجرا نشده است', FailureCodeGuidance::forCode($deployment->fresh()->failure_code));
     }
 
     public function test_late_exact_commit_artifact_reattaches_at_claim_legacy(): void

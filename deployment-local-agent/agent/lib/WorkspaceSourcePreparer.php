@@ -62,6 +62,55 @@ final class WorkspaceSourcePreparer
         return ['commitTimestamp' => $this->commitTimestamp($repositoryPath, $commitHash)];
     }
 
+    /**
+     * @return array{commitTimestamp: int}
+     */
+    public function prepareRemoteCommit(BuildWorkspace $workspace, string $repositoryPath, string $remoteName, string $branch, string $commitHash, ?callable $onTick = null): array
+    {
+        $this->fetchBranch($repositoryPath, $remoteName, $branch, $onTick);
+        $this->assertCommitExists($repositoryPath, $commitHash);
+        $this->assertCommitReachableFromRemoteBranch($repositoryPath, $commitHash, $remoteName, $branch);
+
+        $tempArchivePath = $this->archiveCommitToZip($repositoryPath, $commitHash, $onTick);
+        try {
+            SafeFilesystem::extractZipSafely($tempArchivePath, $workspace->projectDir());
+        } finally {
+            @unlink($tempArchivePath);
+        }
+
+        $this->copyPathDependencies($workspace, $repositoryPath);
+
+        return ['commitTimestamp' => $this->commitTimestamp($repositoryPath, $commitHash)];
+    }
+
+    private function fetchBranch(string $repositoryPath, string $remoteName, string $branch, ?callable $onTick): void
+    {
+        $result = $this->git->run(['git', 'fetch', '--prune', $remoteName, $branch], $repositoryPath, $this->git->timeoutFor('fetch'), $onTick);
+
+        if ($result['exitCode'] !== 0) {
+            throw new \RuntimeException("git fetch failed for {$remoteName}/{$branch} in {$repositoryPath}: " . trim($result['output']));
+        }
+    }
+
+    private function assertCommitExists(string $repositoryPath, string $commitHash): void
+    {
+        $result = $this->git->run(['git', 'cat-file', '-e', "{$commitHash}^{commit}"], $repositoryPath, 30);
+
+        if ($result['exitCode'] !== 0) {
+            throw new \RuntimeException("Commit {$commitHash} is not present in {$repositoryPath} after fetch.");
+        }
+    }
+
+    private function assertCommitReachableFromRemoteBranch(string $repositoryPath, string $commitHash, string $remoteName, string $branch): void
+    {
+        $remoteRef = "refs/remotes/{$remoteName}/{$branch}";
+        $result = $this->git->run(['git', 'merge-base', '--is-ancestor', $commitHash, $remoteRef], $repositoryPath, 30);
+
+        if ($result['exitCode'] !== 0) {
+            throw new \RuntimeException("Commit {$commitHash} is not reachable from {$remoteName}/{$branch}; refusing to build an artifact for an unverified ref.");
+        }
+    }
+
     private function archiveCommitToZip(string $repositoryPath, string $commitHash, ?callable $onTick): string
     {
         $archivePath = tempnam(sys_get_temp_dir(), 'la-archive-') . '.zip';
