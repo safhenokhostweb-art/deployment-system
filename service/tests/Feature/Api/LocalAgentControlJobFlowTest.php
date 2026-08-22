@@ -184,6 +184,38 @@ class LocalAgentControlJobFlowTest extends TestCase
         $this->assertSame('1.0.0', $agent->fresh()->agent_version);
     }
 
+    public function test_upgrade_is_completed_only_by_authenticated_expected_version_heartbeat(): void
+    {
+        config(['deployment.latest_local_agent_version' => '1.4.4']);
+        $agent = LocalAgent::factory()->approved()->create([
+            'operating_system' => 'Linux',
+            'agent_version' => '1.4.3',
+            'capabilities' => ['linux_self_upgrade' => true],
+        ]);
+        $job = app(LocalAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
+
+        $headers = $this->headersFor($agent, 'GET', '/api/local-agent/control-jobs/next');
+        $this->get('/api/local-agent/control-jobs/next', $headers)
+            ->assertOk()
+            ->assertJsonPath('job.action', LocalAgentControlJob::ACTION_UPGRADE)
+            ->assertJsonPath('job.expected_version', '1.4.4');
+
+        $reportBody = ['status' => 'started', 'output' => 'Upgrade validation passed; activation is starting.'];
+        $reportPath = "/api/local-agent/control-jobs/{$job->public_id}/report";
+        $reportHeaders = $this->headersFor($agent, 'POST', $reportPath, json_encode($reportBody));
+        $this->postJson($reportPath, $reportBody, $reportHeaders)
+            ->assertOk()
+            ->assertJson(['status' => LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT]);
+
+        $heartbeat = ['agent_version' => '1.4.4', 'hostname' => 'linux-builder', 'operating_system' => 'Linux', 'capabilities' => ['linux_self_upgrade' => true]];
+        $heartbeatHeaders = $this->headersFor($agent, 'POST', '/api/local-agent/heartbeat', json_encode($heartbeat));
+        $this->postJson('/api/local-agent/heartbeat', $heartbeat, $heartbeatHeaders)->assertOk();
+
+        $this->assertSame(LocalAgentControlJob::STATUS_SUCCEEDED, $job->fresh()->status);
+        $this->assertSame('1.4.4', $job->fresh()->reported_version);
+        $this->assertSame('1.4.4', $agent->fresh()->agent_version);
+    }
+
     public function test_heartbeat_reports_a_project_config_version_agents_use_to_detect_changed_mappings(): void
     {
         $agent = LocalAgent::factory()->approved()->create();

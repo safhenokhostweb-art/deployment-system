@@ -7,6 +7,7 @@ use App\Models\LocalAgent;
 use App\Models\LocalProjectMapping;
 use App\Models\PublishJob;
 use App\Services\Publish\PublishJobService;
+use App\Services\Publish\LocalAgentControlJobService;
 use Illuminate\Http\Request;
 
 /**
@@ -21,6 +22,7 @@ class LocalAgentJobController extends Controller
 {
     public function __construct(
         private readonly PublishJobService $publishJobs,
+        private readonly LocalAgentControlJobService $controlJobs,
     ) {
     }
 
@@ -49,6 +51,11 @@ class LocalAgentJobController extends Controller
             'capabilities' => $validated['capabilities'] ?? $agent->capabilities,
             'agent_version' => $validated['agent_version'] ?? $agent->agent_version,
         ])->save();
+
+        // An upgrade is not complete when files are merely activated. The
+        // first authenticated heartbeat from the restarted process is the
+        // authoritative version proof and the only success transition.
+        $this->controlJobs->verifyUpgradeHeartbeat($agent, $validated['agent_version'] ?? null);
 
         foreach ($validated['project_states'] ?? [] as $state) {
             $mapping = LocalProjectMapping::query()

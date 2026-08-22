@@ -29,9 +29,11 @@ class LocalAgentControlJob extends Model
      * a new one. See agent.php's pollAndHandleControl().
      */
     public const ACTION_RELOAD_CONFIG = 'reload_config';
+    public const ACTION_UPGRADE = 'upgrade';
 
     public const STATUS_QUEUED = 'queued';
     public const STATUS_RUNNING = 'running';
+    public const STATUS_AWAITING_HEARTBEAT = 'awaiting_heartbeat';
     public const STATUS_SUCCEEDED = 'succeeded';
     public const STATUS_FAILED = 'failed';
 
@@ -40,10 +42,22 @@ class LocalAgentControlJob extends Model
         'local_agent_id',
         'action',
         'status',
+        'expected_version',
+        'reported_version',
+        'upgrade_started_at',
+        'upgrade_verified_at',
         'requested_by',
         'output',
         'error_message',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            'upgrade_started_at' => 'datetime',
+            'upgrade_verified_at' => 'datetime',
+        ];
+    }
 
     protected static function booted(): void
     {

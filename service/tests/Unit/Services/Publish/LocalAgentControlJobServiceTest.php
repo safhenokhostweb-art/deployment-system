@@ -107,4 +107,42 @@ class LocalAgentControlJobServiceTest extends TestCase
         $this->assertStringNotContainsString('ghp_1234567890abcdef1234567890abcdef1234', $updated->output);
         $this->assertStringContainsString('[REDACTED]', $updated->output);
     }
+
+    public function test_linux_upgrade_waits_for_the_expected_version_heartbeat(): void
+    {
+        config(['deployment.latest_local_agent_version' => '1.4.4']);
+        $agent = LocalAgent::factory()->approved()->create([
+            'operating_system' => 'Linux',
+            'agent_version' => '1.4.3',
+            'capabilities' => ['linux_self_upgrade' => true],
+        ]);
+        $service = app(LocalAgentControlJobService::class);
+
+        $job = $service->queueUpgrade($agent, 'admin@example.test');
+        $this->assertSame('1.4.4', $job->expected_version);
+        $service->claimNext($agent);
+        $job->refresh();
+        $activated = $service->reportResult($job, 'UPGRADE_OK old_version=1.4.3 new_version=1.4.4');
+
+        $this->assertSame(LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT, $activated->status);
+        $this->assertSame(0, $service->verifyUpgradeHeartbeat($agent, '1.4.3'));
+        $this->assertSame(LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT, $job->fresh()->status);
+        $this->assertSame(1, $service->verifyUpgradeHeartbeat($agent, '1.4.4'));
+        $this->assertSame(LocalAgentControlJob::STATUS_SUCCEEDED, $job->fresh()->status);
+        $this->assertSame('1.4.4', $job->fresh()->reported_version);
+        $this->assertNotNull($job->fresh()->upgrade_verified_at);
+    }
+
+    public function test_remote_upgrade_rejects_an_agent_without_bootstrap_capability(): void
+    {
+        config(['deployment.latest_local_agent_version' => '1.4.4']);
+        $agent = LocalAgent::factory()->approved()->create([
+            'operating_system' => 'Linux',
+            'agent_version' => '1.4.3',
+            'capabilities' => ['linux_self_upgrade' => false],
+        ]);
+
+        $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
+        app(LocalAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
+    }
 }

@@ -93,7 +93,12 @@ class LocalAgentController extends Controller
             ->latest()
             ->first();
 
-        return view('local-agents.show', compact('localAgent', 'availableProjects', 'latestLogFetch'));
+        $latestUpgrade = $localAgent->controlJobs()
+            ->where('action', LocalAgentControlJob::ACTION_UPGRADE)
+            ->latest()
+            ->first();
+
+        return view('local-agents.show', compact('localAgent', 'availableProjects', 'latestLogFetch', 'latestUpgrade'));
     }
 
     public function createRegistration(Request $request): RedirectResponse
@@ -262,6 +267,17 @@ class LocalAgentController extends Controller
 
         return redirect()->route('local-agents.show', $localAgent)
             ->with('status', 'درخواست همگام‌سازی مجدد ثبت شد — در Poll بعدی کارگزار اجرا می‌شود.');
+    }
+
+    public function upgrade(Request $request, LocalAgent $localAgent): RedirectResponse
+    {
+        Gate::authorize('local_agents.manage');
+        abort_unless($localAgent->status === LocalAgent::STATUS_APPROVED, 409, 'Only an approved Local Agent can be upgraded.');
+
+        $job = $this->controlJobs->queueUpgrade($localAgent, $request->user()->email);
+
+        return redirect()->route('local-agents.show', $localAgent)
+            ->with('status', "Linux Local Agent upgrade to {$job->expected_version} queued. Completion requires a verified post-restart heartbeat.");
     }
 
     public function rotateToken(Request $request, LocalAgent $localAgent): RedirectResponse

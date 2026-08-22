@@ -61,6 +61,7 @@ Route::middleware('auth')->group(function () {
     Route::post('/local-agents/{localAgent:public_id}/restart', [LocalAgentController::class, 'restart'])->name('local-agents.restart');
     Route::post('/local-agents/{localAgent:public_id}/fetch-logs', [LocalAgentController::class, 'fetchLogs'])->name('local-agents.fetch-logs');
     Route::post('/local-agents/{localAgent:public_id}/reload-config', [LocalAgentController::class, 'reloadConfig'])->name('local-agents.reload-config');
+    Route::post('/local-agents/{localAgent:public_id}/upgrade', [LocalAgentController::class, 'upgrade'])->name('local-agents.upgrade');
     Route::post('/local-agents/{localAgent:public_id}/rotate-token', [LocalAgentController::class, 'rotateToken'])->name('local-agents.rotate-token');
     Route::post('/local-agents/{localAgent:public_id}/project-mappings', [LocalProjectMappingController::class, 'store'])->name('local-agents.mappings.store');
     Route::post('/local-agents/{localAgent:public_id}/project-mappings/bulk', [LocalProjectMappingController::class, 'bulkStore'])->name('local-agents.mappings.bulk-store');

@@ -58,6 +58,7 @@ require __DIR__ . '/lib/PublishJobHeartbeatWorker.php';
 require __DIR__ . '/lib/LocalBuildFailedException.php';
 require __DIR__ . '/lib/ApplicationRoot.php';
 require __DIR__ . '/lib/LocalBuildRunner.php';
+require __DIR__ . '/lib/LinuxUpgradeRunner.php';
 
 use LocalAgent\ArtifactBuilder;
 use LocalAgent\ArtifactUploader;
@@ -68,6 +69,7 @@ use LocalAgent\GitManager;
 use LocalAgent\IgnoreRules;
 use LocalAgent\JobMaxRuntimeExceededException;
 use LocalAgent\LocalBuildRunner;
+use LocalAgent\LinuxUpgradeRunner;
 use LocalAgent\Logger;
 use LocalAgent\LogTail;
 use LocalAgent\LocalProjectStateReporter;
@@ -281,7 +283,7 @@ do {
         // starting next cycle's shouldSync() check — same deferred
         // timing as every other control action here (e.g. `restart`
         // itself doesn't exit until this same call returns).
-        if (pollAndHandleControl($client, $config, $logger)) {
+        if (pollAndHandleControl($client, $config, $projects, $configPath, $logger)) {
             $reloadRequested = true;
         }
     } catch (\Throwable $e) {
@@ -664,7 +666,7 @@ function pollAndDetectChanges(Client $client, GitManager $git, array $projects, 
  *     way to reach this process, so clicking "Force Config Reload" in
  *     the Hub (which queues exactly this job) *is* the manual command.
  */
-function pollAndHandleControl(Client $client, array $config, Logger $logger): bool
+function pollAndHandleControl(Client $client, array $config, array $projects, string $configPath, Logger $logger): bool
 {
     $response = $client->request('GET', '/api/local-agent/control-jobs/next');
 
@@ -704,6 +706,21 @@ function pollAndHandleControl(Client $client, array $config, Logger $logger): bo
             $client->request('POST', $reportPath, ['status' => 'succeeded', 'output' => 'Project configuration will be resynchronized now.']);
 
             return true;
+        }
+
+        if ($job['action'] === 'upgrade') {
+            $expectedVersion = (string) ($job['expected_version'] ?? '');
+            $startReport = $client->request('POST', $reportPath, [
+                'status' => 'started',
+                'output' => "Official Linux upgrade to {$expectedVersion} is starting; completion requires the restarted process heartbeat.",
+            ]);
+            if ($startReport['status'] !== 200) {
+                throw new \RuntimeException("Hub rejected the upgrade start report with HTTP {$startReport['status']}.");
+            }
+            $logger->info("Control job {$job['id']}: applying official Linux Local Agent upgrade to {$expectedVersion}");
+            $result = (new LinuxUpgradeRunner())->upgrade($projects, $expectedVersion, dirname($configPath));
+            $logger->info("Control job {$job['id']}: upgrade activated from {$result['old_version']} to {$result['new_version']}; exiting so systemd restarts deployment-agent.service");
+            exit(1);
         }
 
         $logger->error("Control job {$job['id']}: unknown action '{$job['action']}'");
@@ -831,13 +848,14 @@ function sendHeartbeat(Client $client, Logger $logger, array $projectStates = []
             'hostname' => gethostname() ?: null,
             'operating_system' => PHP_OS_FAMILY,
             'agent_version' => LOCAL_AGENT_VERSION,
-            'capabilities' => ['git' => true, 'php' => PHP_VERSION, 'laravel_release_manifest' => true],
+            'capabilities' => ['git' => true, 'php' => PHP_VERSION, 'laravel_release_manifest' => true, 'linux_self_upgrade' => PHP_OS_FAMILY === 'Linux'],
             'project_states' => $projectStates,
         ]);
 
         $latestVersion = $response['body']['latest_version'] ?? null;
         if ($latestVersion !== null && version_compare(LOCAL_AGENT_VERSION, (string) $latestVersion, '<')) {
-            $logger->warn("Update available: v{$latestVersion} (running v" . LOCAL_AGENT_VERSION . ") — run upgrade.ps1 from the deployment-local-agent package to update.");
+            $hint = PHP_OS_FAMILY === 'Linux' ? 'request the official Hub upgrade action' : 'run upgrade.ps1 from the deployment-local-agent package';
+            $logger->warn("Update available: v{$latestVersion} (running v" . LOCAL_AGENT_VERSION . ") — {$hint}.");
         }
 
         return ['project_config_version' => $response['body']['project_config_version'] ?? null];
@@ -934,7 +952,7 @@ function installCommand(array $args, string $configPath): void
         'name' => $name,
         'hostname' => $hostname,
         'operating_system' => PHP_OS_FAMILY,
-        'capabilities' => ['git' => true, 'php' => PHP_VERSION],
+        'capabilities' => ['git' => true, 'php' => PHP_VERSION, 'linux_self_upgrade' => PHP_OS_FAMILY === 'Linux'],
     ];
     $bodyJson = json_encode($body, JSON_THROW_ON_ERROR);
 

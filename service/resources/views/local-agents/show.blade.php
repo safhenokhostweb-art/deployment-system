@@ -62,6 +62,15 @@
             @endif
         </td></tr>
         <tr><th>{{ __('ui.common.last_heartbeat') }}</th><td>{{ $localAgent->last_seen_at?->diffForHumans() ?? __('status.never') }}</td></tr>
+        @if ($latestUpgrade)
+        <tr><th>Latest Linux upgrade</th><td>
+            <x-badge :status="$latestUpgrade->status" />
+            <x-ltr><code>{{ $latestUpgrade->reported_version ?? $localAgent->agent_version ?? '-' }}</code> &rarr; <code>{{ $latestUpgrade->expected_version ?? '-' }}</code></x-ltr>
+            @if ($latestUpgrade->error_message)
+                <span class="error">{{ $latestUpgrade->error_message }}</span>
+            @endif
+        </td></tr>
+        @endif
         <tr><th>{{ __('ui.common.registered') }}</th><td>{{ $localAgent->created_at->diffForHumans() }}</td></tr>
         @if ($localAgent->approved_by)
         <tr><th>{{ __('ui.local_agents.approved_by') }}</th><td>{{ $localAgent->approved_by }} &mdash; {{ $localAgent->approved_at?->diffForHumans() }}</td></tr>
@@ -111,6 +120,17 @@
                 @csrf
                 <button type="submit" class="btn">{{ __('ui.local_agents.reload_config_button') }}</button>
             </form>
+
+            @if (strcasecmp((string) $localAgent->operating_system, 'Linux') === 0 && $localAgent->isUpdateAvailable())
+                @if (($localAgent->capabilities['linux_self_upgrade'] ?? false) === true)
+                <form method="POST" action="{{ route('local-agents.upgrade', $localAgent) }}" style="display:inline">
+                    @csrf
+                    <button type="submit" class="btn btn-primary">Upgrade to {{ config('deployment.latest_local_agent_version') }}</button>
+                </form>
+                @else
+                <span class="muted">Bootstrap once with the official <code>deployment-local-agent/upgrade-linux.sh</code>; future upgrades can be issued here.</span>
+                @endif
+            @endif
 
             <form method="POST" action="{{ route('local-agents.rotate-token', $localAgent) }}" id="rotate-token-local-agent-form" style="display:inline">
                 @csrf

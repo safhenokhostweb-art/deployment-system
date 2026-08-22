@@ -46,6 +46,40 @@ class LocalAgentControlTest extends TestCase
         ]);
     }
 
+    public function test_admin_can_queue_a_bootstrapped_linux_agent_upgrade(): void
+    {
+        config(['deployment.latest_local_agent_version' => '1.4.4']);
+        $admin = User::factory()->create();
+        $agent = LocalAgent::factory()->approved()->create([
+            'operating_system' => 'Linux',
+            'agent_version' => '1.4.3',
+            'capabilities' => ['linux_self_upgrade' => true],
+        ]);
+
+        $this->actingAs($admin)->post(route('local-agents.upgrade', $agent))
+            ->assertRedirect(route('local-agents.show', $agent));
+
+        $this->assertDatabaseHas('local_agent_control_jobs', [
+            'local_agent_id' => $agent->id,
+            'action' => LocalAgentControlJob::ACTION_UPGRADE,
+            'status' => LocalAgentControlJob::STATUS_QUEUED,
+            'expected_version' => '1.4.4',
+        ]);
+    }
+
+    public function test_dashboard_refuses_remote_upgrade_before_linux_bootstrap(): void
+    {
+        config(['deployment.latest_local_agent_version' => '1.4.4']);
+        $admin = User::factory()->create();
+        $agent = LocalAgent::factory()->approved()->create([
+            'operating_system' => 'Linux',
+            'agent_version' => '1.4.3',
+            'capabilities' => ['linux_self_upgrade' => false],
+        ]);
+
+        $this->actingAs($admin)->post(route('local-agents.upgrade', $agent))->assertStatus(409);
+    }
+
     public function test_admin_can_force_a_config_reload(): void
     {
         $admin = User::factory()->create();

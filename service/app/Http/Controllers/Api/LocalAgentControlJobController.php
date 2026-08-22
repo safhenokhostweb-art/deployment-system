@@ -36,6 +36,7 @@ class LocalAgentControlJobController extends Controller
             'job' => [
                 'id' => $job->public_id,
                 'action' => $job->action,
+                'expected_version' => $job->expected_version,
             ],
         ]);
     }
@@ -82,12 +83,15 @@ class LocalAgentControlJobController extends Controller
         abort_unless($job->local_agent_id === $agent->id, 403, 'This control job does not belong to the authenticated Local Agent.');
 
         $validated = $request->validate([
-            'status' => 'required|string|in:succeeded,failed',
+            'status' => 'required|string|in:started,succeeded,failed',
             'output' => 'nullable|string|max:100000',
             'error_message' => 'nullable|string|max:2000',
         ]);
 
-        if ($validated['status'] === 'failed') {
+        if ($validated['status'] === 'started') {
+            abort_unless($job->action === LocalAgentControlJob::ACTION_UPGRADE, 422, 'Only an upgrade job may report started.');
+            $updated = $this->controlJobs->reportUpgradeStarted($job, $validated['output'] ?? 'Upgrade validation passed; activation is starting.');
+        } elseif ($validated['status'] === 'failed') {
             $updated = $this->controlJobs->reportFailure($job, $validated['error_message'] ?? 'Unknown agent-side control job failure.');
         } else {
             $updated = $this->controlJobs->reportResult($job, $validated['output'] ?? '');

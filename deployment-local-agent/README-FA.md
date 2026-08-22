@@ -43,6 +43,25 @@ C:\ProgramData\DeploymentLocalAgent\agent\config.php
 
 فقط فایل‌های خود Agent را جایگزین می‌کند — `config.php` (و اعتبارنامه‌های داخل آن) دست‌نخورده می‌ماند.
 
+## ارتقای رسمی Linux
+
+نصب Linux که در `/opt/deployment-agent` اجرا می‌شود با اسکریپت رسمی زیر
+ارتقا داده می‌شود. این دستور را از Source Workspace امن Deployment System
+اجرا کنید، نه از مسیر production:
+
+```bash
+sudo /opt/deployment-agent/workspaces/deployment-system/deployment-local-agent/upgrade-linux.sh \
+  --expected-version 1.4.4
+```
+
+اسکریپت فقط `agent.php`، `heartbeat-watchdog.php` و `lib/*.php` را فعال
+می‌کند. پیش از فعال‌سازی syntax تمام فایل‌های PHP را بررسی و یک backup
+timestamped می‌سازد؛ `config.php`، credentialها، `storage/` و project cache
+هرگز کپی یا بازنویسی نمی‌شوند. در خطا runtime قبلی و وضعیت service بازیابی
+می‌شود. پس از bootstrap اولیه، ارتقاهای بعدی از دکمه Upgrade در Hub ارسال
+می‌شوند و تا زمانی که heartbeat احراز هویت‌شده نسخه مورد انتظار را گزارش
+نکند موفق محسوب نمی‌شوند.
+
 ## حذف
 
 ```powershell
