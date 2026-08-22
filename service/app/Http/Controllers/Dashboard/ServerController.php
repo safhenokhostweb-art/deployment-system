@@ -103,7 +103,22 @@ class ServerController extends Controller
         $agentConfigContent = null;
         $oneClickInstallerContent = null;
         $oneClickInstallerBlockedReason = null;
-        if (session()->has('generated_token') && session()->has('generated_secret')) {
+
+        // Root-cause fix (agent credential mismatch after upgrade): when
+        // this Server has an approved Agent, the downloadable config.php /
+        // one-click installer must NEVER be generated from the Server's
+        // own legacy credentials. The agent authenticates through the
+        // Agent identity path (VerifyAgentRequestSignature::handleAgent),
+        // which verifies the HMAC with the AGENT's signing_secret — a
+        // config built from the Server's credentials therefore always
+        // yields HTTP 401 invalid_signature. The operator must instead
+        // use the credentials from the Agent page (which emits agent_id +
+        // the Agent's token/secret). We detect that state here and block
+        // the misleading Server-credential download entirely.
+        $approvedAgent = $server->agents()->where('status', Agent::STATUS_APPROVED)->first();
+        $agentCredentialRedirect = $approvedAgent !== null;
+
+        if (!$agentCredentialRedirect && session()->has('generated_token') && session()->has('generated_secret')) {
             $agentConfigContent = $this->buildAgentConfigContent(
                 $server,
                 (string) session('generated_token'),
@@ -155,7 +170,7 @@ class ServerController extends Controller
         // approved Agent to run it, same "sole approved agent" rule
         // ProjectController's wizard already uses for auto-picking a
         // DeploymentTarget's agent.
-        $discoveryAgent = $server->agents()->where('status', Agent::STATUS_APPROVED)->first();
+        $discoveryAgent = $approvedAgent;
         $latestDiscoveryJob = $discoveryAgent
             ? DiscoveryJob::where('agent_id', $discoveryAgent->id)->latest()->first()
             : null;
@@ -170,7 +185,7 @@ class ServerController extends Controller
 
         return view('servers.show', compact(
             'server', 'agentConfigContent', 'agentServiceFileContent', 'oneClickInstallerContent', 'oneClickInstallerBlockedReason', 'setupStep', 'discoveryAgent', 'latestDiscoveryJob',
-            'operationsAgent', 'operationsProject', 'laravelOperationTypes', 'serverOperationTypes', 'recentOperations',
+            'operationsAgent', 'operationsProject', 'laravelOperationTypes', 'serverOperationTypes', 'recentOperations', 'agentCredentialRedirect', 'approvedAgent',
         ));
     }
 

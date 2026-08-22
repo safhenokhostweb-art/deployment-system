@@ -19,6 +19,12 @@
 ]" />
 @endunless
 
+@if ($agentCredentialRedirect)
+    <x-card style="border-color:#a41e1e;" :title="__('ui.servers.agent_credentials_required_title')">
+        <p class="muted">{!! __('ui.servers.agent_credentials_required_intro', ['agentUrl' => $approvedAgent ? route('agents.show', $approvedAgent) : '#']) !!}</p>
+    </x-card>
+@endif
+
 @if ($agentConfigContent)
     {{-- This box only exists on the one page load right after
          creation/rotation — everything in it comes from the same

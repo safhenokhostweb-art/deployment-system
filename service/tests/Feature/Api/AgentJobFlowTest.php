@@ -216,4 +216,34 @@ class AgentJobFlowTest extends TestCase
 
         $this->postJson($path, $statusBody, $headers)->assertStatus(403);
     }
+
+    /**
+     * Regression test (credential synchronization): an agent that sends the
+     * correct Agent identity but signs with a WRONG signing_secret (the
+     * classic post-upgrade mismatch — config.php built from the Server's
+     * legacy credentials while agent_id resolves to an approved Agent) must
+     * get a 401 with a message that points at the real fix, not a generic
+     * "Unauthorized". The token still matches, so this is specifically the
+     * secret being out of sync — exactly the production incident class.
+     */
+    public function test_agent_with_wrong_signing_secret_gets_actionable_401(): void
+    {
+        $agent = \App\Models\Agent::factory()->approved()->create();
+        $wrongSecret = 'sec_wrong_secret_not_matching_the_agent';
+
+        $headers = $this->agentHeaders('GET', '/api/agent/jobs/next', '', $agent->public_id, \Database\Factories\AgentFactory::$lastPlainToken, $wrongSecret);
+
+        $response = $this->get('/api/agent/jobs/next', $headers);
+
+        $response->assertStatus(401);
+        $response->assertSee('signing_secret mismatch');
+        $response->assertSee('Agent page');
+        $response->assertDontSee($wrongSecret);
+
+        // The audit trail records the actionable hint for operators.
+        $this->assertDatabaseHas('audit_log_entries', [
+            'action' => 'agent.auth_rejected',
+            'actor_identifier' => $agent->public_id,
+        ]);
+    }
 }

@@ -516,4 +516,45 @@ BASH;
         $response->assertOk();
         $response->assertDontSee(__('ui.servers.one_click_title'));
     }
+
+    /**
+     * Regression test (agent credential mismatch after upgrade): once a
+     * Server has an approved Agent, the Server page must NOT offer the
+     * legacy Server-credential config.php / one-click installer download.
+     * That config authenticates through the Agent identity path and would
+     * always be rejected with HTTP 401 invalid_signature because it was
+     * built from the Server's own signing_secret. The operator must use
+     * the Agent page's credentials instead.
+     */
+    public function test_server_with_approved_agent_blocks_legacy_server_credential_download(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $server = Server::factory()->create();
+        \App\Models\Agent::factory()->approved()->create(['server_id' => $server->id]);
+
+        $rotate = $this->actingAs($admin)->post(route('servers.rotate-token', $server));
+        $landing = $this->actingAs($admin)->get($rotate->headers->get('Location'));
+
+        $landing->assertOk();
+        // The misleading Server-credential download is not offered.
+        $landing->assertDontSee(__('ui.servers.one_click_title'));
+        $landing->assertDontSee('one-click-installer-content', false);
+        $landing->assertDontSee(__('ui.servers.registration_created_title'));
+        // The operator is redirected to the Agent page for the right credentials.
+        $landing->assertSee(__('ui.servers.agent_credentials_required_title'));
+    }
+
+    public function test_server_without_agent_still_offers_legacy_server_credential_download(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $server = Server::factory()->create();
+
+        $rotate = $this->actingAs($admin)->post(route('servers.rotate-token', $server));
+        $landing = $this->actingAs($admin)->get($rotate->headers->get('Location'));
+
+        $landing->assertOk();
+        $landing->assertSee(__('ui.servers.one_click_title'));
+        $landing->assertSee('one-click-installer-content', false);
+        $landing->assertDontSee(__('ui.servers.agent_credentials_required_title'));
+    }
 }

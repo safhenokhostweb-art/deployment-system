@@ -122,6 +122,8 @@ return [
         'agents_on_server' => 'Agents on this server',
         'register_agent_button' => 'Register new agent',
         'agents_optional_note' => 'Optional going forward — this server keeps authenticating exactly as it does today via its own credentials above whether or not any Agent is registered here.',
+        'agent_credentials_required_title' => 'Agent credentials required',
+        'agent_credentials_required_intro' => 'This server has an approved Agent. The Agent authenticates with its own credentials (agent_id + agent token + signing secret), NOT this server\'s legacy credentials — a config built from the server credentials below always returns HTTP 401. Use the credentials from the <a href=":agentUrl">Agent page</a> instead.',
         'no_agents' => 'No agents registered for this server yet.',
         'projects_on_server' => 'Projects on this server',
         'no_projects' => 'No projects assigned to this server yet.',
