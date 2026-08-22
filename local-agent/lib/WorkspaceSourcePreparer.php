@@ -67,20 +67,54 @@ final class WorkspaceSourcePreparer
      */
     public function prepareRemoteCommit(BuildWorkspace $workspace, string $repositoryPath, string $remoteName, string $branch, string $commitHash, ?callable $onTick = null): array
     {
+        if (SafetyChecker::productionSourcePathForbidden($repositoryPath)) {
+            throw new LocalBuildFailedException('production_source_forbidden', "Production target '{$repositoryPath}' cannot be used as a Git or artifact source.");
+        }
+
         $this->fetchBranch($repositoryPath, $remoteName, $branch, $onTick);
         $this->assertCommitExists($repositoryPath, $commitHash);
         $this->assertCommitReachableFromRemoteBranch($repositoryPath, $commitHash, $remoteName, $branch);
 
-        $tempArchivePath = $this->archiveCommitToZip($repositoryPath, $commitHash, $onTick);
-        try {
-            SafeFilesystem::extractZipSafely($tempArchivePath, $workspace->projectDir());
-        } finally {
-            @unlink($tempArchivePath);
+        $remoteUrl = $this->remoteUrl($repositoryPath, $remoteName);
+        $this->initializeWorkspaceRepository($workspace->projectDir(), $remoteUrl, $onTick);
+        $this->runOrFail(['git', 'fetch', '--prune', 'origin', $branch], $workspace->projectDir(), $this->git->timeoutFor('fetch'), 'fetching the authoritative branch', $onTick);
+        $this->runOrFail(['git', 'cat-file', '-e', "{$commitHash}^{commit}"], $workspace->projectDir(), 30, 'validating the requested commit', $onTick);
+        $this->runOrFail(['git', 'merge-base', '--is-ancestor', $commitHash, "refs/remotes/origin/{$branch}"], $workspace->projectDir(), 30, 'validating commit reachability', $onTick);
+        $this->runOrFail(['git', 'checkout', '--detach', '--force', $commitHash], $workspace->projectDir(), 60, 'checking out the exact commit', $onTick);
+
+        $checkedOut = $this->git->lastCommitHash($workspace->projectDir());
+        if (!hash_equals($commitHash, $checkedOut)) {
+            throw new LocalBuildFailedException('local_workspace_prepare_failed', "Workspace checkout mismatch: expected {$commitHash}, got {$checkedOut}.");
         }
 
         $this->copyPathDependencies($workspace, $repositoryPath);
 
-        return ['commitTimestamp' => $this->commitTimestamp($repositoryPath, $commitHash)];
+        return ['commitTimestamp' => $this->commitTimestamp($workspace->projectDir(), $commitHash)];
+    }
+
+    private function remoteUrl(string $repositoryPath, string $remoteName): string
+    {
+        $result = $this->git->run(['git', 'remote', 'get-url', $remoteName], $repositoryPath, 30);
+        $url = trim($result['output']);
+        if ($result['exitCode'] !== 0 || $url === '') {
+            throw new LocalBuildFailedException('local_workspace_prepare_failed', "Cannot resolve remote '{$remoteName}' for source workspace {$repositoryPath}.");
+        }
+
+        return $url;
+    }
+
+    private function initializeWorkspaceRepository(string $target, string $remoteUrl, ?callable $onTick): void
+    {
+        $this->runOrFail(['git', 'init'], $target, 30, 'initializing the isolated Git workspace', $onTick);
+        $this->runOrFail(['git', 'remote', 'add', 'origin', $remoteUrl], $target, 30, 'configuring the authoritative remote', $onTick);
+    }
+
+    private function runOrFail(array $command, string $cwd, int $timeout, string $operation, ?callable $onTick): void
+    {
+        $result = $this->git->run($command, $cwd, $timeout, $onTick);
+        if ($result['exitCode'] !== 0) {
+            throw new LocalBuildFailedException('local_workspace_prepare_failed', "Failed while {$operation}: " . trim($result['output']));
+        }
     }
 
     private function fetchBranch(string $repositoryPath, string $remoteName, string $branch, ?callable $onTick): void

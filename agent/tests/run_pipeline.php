@@ -21,6 +21,7 @@ require __DIR__ . '/../lib/Executor.php';
 require __DIR__ . '/../lib/ShellPlaceholders.php';
 require __DIR__ . '/../lib/ArtifactManager.php';
 require __DIR__ . '/../lib/ReleaseValidator.php';
+require __DIR__ . '/../lib/ProductionPathGuard.php';
 require __DIR__ . '/../lib/PipelineExecutor.php';
 
 use DeploymentAgent\ArtifactManager;

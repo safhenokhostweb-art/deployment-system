@@ -151,10 +151,12 @@
     <table>
         <thead><tr>
             <th>{{ __('ui.common.project') }}</th>
-            <th>{{ __('ui.local_agents.mapping_local_path') }}</th>
+            <th>Source Workspace</th>
+            <th>Production Target</th>
             <th>{{ __('ui.local_agents.mapping_branch') }}</th>
             <th>{{ __('ui.local_agents.mapping_remote') }}</th>
             <th>{{ __('ui.publish.title') }}</th>
+            <th>Artifact / Commit / Version</th>
             <th></th>
         </tr></thead>
         <tbody>
@@ -162,18 +164,20 @@
             <tr>
                 <td><a href="{{ route('projects.show', $mapping->project) }}">{{ $mapping->project->name }}</a></td>
                 @can('local_agents.manage')
-                <td colspan="3">
+                <td colspan="4">
                     <form method="POST" action="{{ route('local-agents.mappings.update', [$localAgent, $mapping]) }}" style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap;">
                         @csrf
                         @method('PUT')
-                        <x-ltr><input type="text" name="local_path" value="{{ $mapping->local_path }}" required placeholder="C:\laragon\www\..." style="min-width:16rem;"></x-ltr>
+                        <x-ltr><input type="text" name="source_workspace_path" value="{{ $mapping->sourceWorkspacePath() }}" required placeholder="/opt/deployment-agent/workspaces/project" style="min-width:18rem;" title="Source Workspace"></x-ltr>
+                        <x-ltr><input type="text" name="production_path" value="{{ $mapping->production_path }}" placeholder="/var/www/project" style="min-width:14rem;" title="Production Target (display/reference only)"></x-ltr>
                         <input type="text" name="git_branch" value="{{ $mapping->git_branch }}" placeholder="{{ $mapping->project->branch }}" style="max-width:8rem;">
                         <input type="text" name="remote_name" value="{{ $mapping->remote_name }}" placeholder="origin" style="max-width:8rem;">
                         <button type="submit" class="btn btn-small">{{ __('ui.local_agents.mapping_update_button') }}</button>
                     </form>
                 </td>
                 @else
-                <td><x-ltr><code>{{ $mapping->local_path }}</code></x-ltr></td>
+                <td><x-ltr><code>{{ $mapping->sourceWorkspacePath() }}</code></x-ltr></td>
+                <td><x-ltr><code>{{ $mapping->production_path ?? '—' }}</code></x-ltr></td>
                 <td>{{ $mapping->git_branch ?? $mapping->project->branch }}</td>
                 <td>{{ $mapping->remote_name }}</td>
                 @endcan
@@ -193,6 +197,12 @@
                     @endcan
                 </td>
                 <td>
+                    @php($artifact = $mapping->project->artifacts->first())
+                    <x-badge :status="$artifact?->status ?? 'missing'" />
+                    <x-ltr><code>{{ $artifact ? substr($artifact->commit_hash, 0, 10) : '—' }}</code></x-ltr>
+                    <span class="muted">Agent {{ $localAgent->agent_version ?? '—' }}</span>
+                </td>
+                <td>
                     @can('local_agents.manage')
                     <form method="POST" action="{{ route('local-agents.mappings.destroy', [$localAgent, $mapping]) }}" id="remove-mapping-{{ $mapping->id }}-form" style="display:inline">
                         @csrf
@@ -210,7 +220,7 @@
                 </td>
             </tr>
         @empty
-            <tr><td colspan="6"><x-empty-state>{{ __('ui.local_agents.no_mappings') }}</x-empty-state></td></tr>
+            <tr><td colspan="8"><x-empty-state>{{ __('ui.local_agents.no_mappings') }}</x-empty-state></td></tr>
         @endforelse
         </tbody>
     </table>
@@ -228,8 +238,12 @@
             </select>
         </div>
         <div>
-            <label>{{ __('ui.local_agents.mapping_local_path') }}</label>
-            <input type="text" name="local_path" required placeholder="C:\laragon\www\...">
+            <label>Source Workspace</label>
+            <input type="text" name="source_workspace_path" required placeholder="/opt/deployment-agent/workspaces/project">
+        </div>
+        <div>
+            <label>Production Target</label>
+            <input type="text" name="production_path" placeholder="/var/www/project">
         </div>
         <div>
             <label>{{ __('ui.local_agents.mapping_branch') }}</label>
@@ -252,7 +266,8 @@
                 <thead><tr>
                     <th></th>
                     <th>{{ __('ui.common.project') }}</th>
-                    <th>{{ __('ui.local_agents.mapping_local_path') }}</th>
+                    <th>Source Workspace</th>
+                    <th>Production Target</th>
                     <th>{{ __('ui.local_agents.mapping_branch') }}</th>
                     <th>{{ __('ui.local_agents.mapping_remote') }}</th>
                 </tr></thead>
@@ -261,7 +276,8 @@
                     <tr>
                         <td><input type="checkbox" name="enabled[{{ $project->id }}]" value="1"></td>
                         <td>{{ $project->name }}</td>
-                        <td><x-ltr><input type="text" name="local_path[{{ $project->id }}]" value="C:\laragon\www\{{ $project->project_key }}"></x-ltr></td>
+                        <td><x-ltr><input type="text" name="source_workspace_path[{{ $project->id }}]" value="/opt/deployment-agent/workspaces/{{ $project->project_key }}"></x-ltr></td>
+                        <td><x-ltr><input type="text" name="production_path[{{ $project->id }}]" value="/var/www/{{ $project->project_key }}"></x-ltr></td>
                         <td><input type="text" name="git_branch[{{ $project->id }}]" placeholder="{{ $project->branch }}"></td>
                         <td><input type="text" name="remote_name[{{ $project->id }}]" value="origin"></td>
                     </tr>

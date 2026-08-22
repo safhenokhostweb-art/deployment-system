@@ -68,7 +68,7 @@ return [
     // once by mistake.
     'projects' => [
         // 'project_key' => [
-        //     'local_path' => 'C:\\laragon\\www\\example-project',
+        //     'source_workspace_path' => '/opt/deployment-agent/workspaces/example-project',
         //     'remote_name' => 'origin',
         //     'branch' => 'main',
         //     'application_root' => '.', // relative deployable app root

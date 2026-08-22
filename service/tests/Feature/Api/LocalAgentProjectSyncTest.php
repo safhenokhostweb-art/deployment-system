@@ -60,7 +60,9 @@ class LocalAgentProjectSyncTest extends TestCase
 
         $response->assertJsonCount(1, 'projects');
         $response->assertJsonPath('projects.0.project_key', 'saas-platform');
-        $response->assertJsonPath('projects.0.local_path', 'C:\\laragon\\www\\saas-platform');
+        $response->assertJsonPath('projects.0.source_workspace_path', 'C:\\laragon\\www\\saas-platform');
+        $response->assertJsonPath('projects.0.repository_url', 'https://github.com/' . $project->repository . '.git');
+        $response->assertJsonMissingPath('projects.0.production_path');
         $response->assertJsonPath('projects.0.remote_name', 'origin');
         $response->assertJsonPath('projects.0.branch', 'main');
         $response->assertJsonPath('config_version', $agent->fresh()->projectConfigVersion());

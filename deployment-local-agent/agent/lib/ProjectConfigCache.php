@@ -52,10 +52,11 @@ final class ProjectConfigCache
             }
 
             $projects[$key] = [
-                'local_path' => $entry['local_path'] ?? null,
+                'source_workspace_path' => $entry['source_workspace_path'] ?? $entry['local_path'] ?? null,
                 'remote_name' => $entry['remote_name'] ?? 'origin',
                 'branch' => $entry['branch'] ?? null,
                 'application_root' => $entry['application_root'] ?? '.',
+                'repository_url' => $entry['repository_url'] ?? null,
             ];
         }
 
@@ -82,12 +83,13 @@ final class ProjectConfigCache
 
             if (
                 !is_array($entry)
-                || !is_string($entry['local_path'] ?? null) || $entry['local_path'] === ''
+                || !is_string($entry['source_workspace_path'] ?? $entry['local_path'] ?? null) || ($entry['source_workspace_path'] ?? $entry['local_path'] ?? '') === ''
                 || !is_string($entry['remote_name'] ?? null) || $entry['remote_name'] === ''
                 || !is_string($entry['branch'] ?? null) || $entry['branch'] === ''
                 || !is_string($entry['application_root'] ?? '.')
+                || (isset($entry['repository_url']) && (!is_string($entry['repository_url']) || $entry['repository_url'] === ''))
             ) {
-                throw new \InvalidArgumentException("invalid configuration for project '{$key}' (local_path/remote_name/branch must be non-empty strings)");
+                throw new \InvalidArgumentException("invalid configuration for project '{$key}' (source_workspace_path/remote_name/branch must be non-empty strings)");
             }
         }
     }
@@ -100,7 +102,7 @@ final class ProjectConfigCache
         self::assertValid($projects);
 
         $payload = [
-            'version' => 1,
+            'version' => 2,
             'synced_at' => gmdate('c'),
             'projects' => $projects,
         ];

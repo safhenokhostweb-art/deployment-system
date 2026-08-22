@@ -114,11 +114,17 @@ class Server extends Model
         $thresholdSeconds = (int) config('deployment.server_offline_threshold_seconds');
         $cutoff = now()->subSeconds($thresholdSeconds);
 
-        $hasOnlineApprovedAgent = $this->agents()
-            ->where('status', Agent::STATUS_APPROVED)
-            ->whereNotNull('last_seen_at')
-            ->where('last_seen_at', '>', $cutoff)
-            ->exists();
+        $hasOnlineApprovedAgent = $this->relationLoaded('agents')
+            ? $this->agents->contains(fn (Agent $agent) =>
+                $agent->status === Agent::STATUS_APPROVED
+                && $agent->last_seen_at !== null
+                && $agent->last_seen_at->greaterThan($cutoff)
+            )
+            : $this->agents()
+                ->where('status', Agent::STATUS_APPROVED)
+                ->whereNotNull('last_seen_at')
+                ->where('last_seen_at', '>', $cutoff)
+                ->exists();
 
         if ($hasOnlineApprovedAgent) {
             return true;

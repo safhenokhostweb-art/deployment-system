@@ -78,7 +78,10 @@ class LocalAgentController extends Controller
     {
         Gate::authorize('local_agents.view');
 
-        $localAgent->load(['projectMappings.project', 'publishJobs' => fn ($query) => $query->latest()->limit(20)]);
+        $localAgent->load([
+            'projectMappings.project.artifacts' => fn ($query) => $query->latest(),
+            'publishJobs' => fn ($query) => $query->latest()->limit(20),
+        ]);
 
         $availableProjects = Project::whereNotIn('id', $localAgent->projectMappings->pluck('project_id'))
             ->orderBy('name')

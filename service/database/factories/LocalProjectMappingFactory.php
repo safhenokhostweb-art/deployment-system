@@ -17,6 +17,8 @@ class LocalProjectMappingFactory extends Factory
             'local_agent_id' => LocalAgent::factory(),
             'project_id' => Project::factory(),
             'local_path' => 'C:\\laragon\\www\\' . $this->faker->slug(2),
+            'source_workspace_path' => fn (array $attributes) => $attributes['local_path'],
+            'production_path' => null,
             'remote_name' => 'origin',
         ];
     }

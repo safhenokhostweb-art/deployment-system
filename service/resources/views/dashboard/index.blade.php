@@ -240,7 +240,7 @@
                 <td>{{ $row['type'] === 'agent_based' ? __('ui.dashboard.server_type_agent_based') : __('ui.dashboard.server_type_legacy') }}</td>
                 <td>{{ $row['connectedAgent']?->name ?? $row['connectedAgent']?->public_id ?? __('ui.dashboard.no_connected_agent') }}</td>
                 <td>
-                    @if ($row['server']->isOnline())
+                    @if ($row['isOnline'])
                         <x-badge status="online" />
                     @else
                         <x-badge status="offline" />

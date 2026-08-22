@@ -30,6 +30,7 @@ require __DIR__ . '/lib/RecipeStepRunner.php';
 require __DIR__ . '/lib/ArtifactManager.php';
 require __DIR__ . '/lib/ReleaseValidator.php';
 require __DIR__ . '/lib/PipelineExecutor.php';
+require __DIR__ . '/lib/ProductionPathGuard.php';
 
 use DeploymentAgent\ArtifactManager;
 use DeploymentAgent\Client;
@@ -39,6 +40,7 @@ use DeploymentAgent\JobVerifier;
 use DeploymentAgent\Logger;
 use DeploymentAgent\OperationRegistry;
 use DeploymentAgent\PipelineExecutor;
+use DeploymentAgent\ProductionPathGuard;
 use DeploymentAgent\RecipeStepRunner;
 use DeploymentAgent\ReleaseManager;
 use DeploymentAgent\ShellPlaceholders;
@@ -186,6 +188,23 @@ function pollAndExecute(Client $client, RecipeStepRunner $recipeRunner, Pipeline
         $client->request('POST', "/api/agent/jobs/{$job['id']}/status", [
             'status' => 'failed',
             'message' => "Unknown project_key '{$projectKey}' on this agent",
+        ]);
+
+        return;
+    }
+
+    $productionPath = (string) ($projectConfig['working_directory'] ?? '');
+    if (
+        ProductionPathGuard::isProductionLike($productionPath)
+        && ($job['action'] ?? 'deploy') === 'deploy'
+        && empty($job['artifact'])
+    ) {
+        $message = "Production target '{$productionPath}' accepts deployment artifacts only; server-side Git/build deployment is forbidden.";
+        $logger->error("Job {$job['id']}: {$message}");
+        $client->request('POST', "/api/agent/jobs/{$job['id']}/status", [
+            'status' => 'failed',
+            'message' => $message,
+            'failure_code' => 'artifact_required_missing',
         ]);
 
         return;

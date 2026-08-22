@@ -40,11 +40,45 @@ class LocalProjectMappingControllerTest extends TestCase
         $response->assertRedirect(route('local-agents.show', $agent));
         $fresh = $mapping->fresh();
         $this->assertSame('C:\\laragon\\www\\new-path', $fresh->local_path);
+        $this->assertSame('C:\\laragon\\www\\new-path', $fresh->source_workspace_path);
         $this->assertSame('develop', $fresh->git_branch);
         $this->assertSame('upstream', $fresh->remote_name);
         // project_id is never touched by this endpoint — no re-selecting
         // the project itself, only editing the machine-specific fields.
         $this->assertSame($project->id, $fresh->project_id);
+    }
+
+    public function test_production_directory_cannot_be_saved_as_source_workspace(): void
+    {
+        $user = User::factory()->create();
+        $agent = LocalAgent::factory()->approved()->create();
+        $mapping = LocalProjectMapping::factory()->create(['local_agent_id' => $agent->id]);
+
+        $this->actingAs($user)->put(route('local-agents.mappings.update', [$agent, $mapping]), [
+            'source_workspace_path' => '/var/www/customer-site',
+            'production_path' => '/var/www/customer-site',
+        ])->assertStatus(422);
+
+        $this->assertNotSame('/var/www/customer-site', $mapping->fresh()->source_workspace_path);
+    }
+
+    public function test_source_workspace_and_production_target_are_stored_separately(): void
+    {
+        $user = User::factory()->create();
+        $agent = LocalAgent::factory()->approved()->create();
+        $project = Project::factory()->create(['project_key' => 'customer-site']);
+
+        $this->actingAs($user)->post(route('local-agents.mappings.store', $agent), [
+            'project_id' => $project->id,
+            'source_workspace_path' => '/opt/deployment-agent/workspaces/customer-site',
+            'production_path' => '/var/www/customer-site',
+        ])->assertRedirect(route('local-agents.show', $agent));
+
+        $this->assertDatabaseHas('local_project_mappings', [
+            'project_id' => $project->id,
+            'source_workspace_path' => '/opt/deployment-agent/workspaces/customer-site',
+            'production_path' => '/var/www/customer-site',
+        ]);
     }
 
     public function test_cannot_update_a_mapping_belonging_to_a_different_agent(): void

@@ -28,6 +28,8 @@ class LocalProjectMapping extends Model
         'local_agent_id',
         'project_id',
         'local_path',
+        'source_workspace_path',
+        'production_path',
         'git_branch',
         'remote_name',
         'deployment_mode',
@@ -58,6 +60,12 @@ class LocalProjectMapping extends Model
     public function effectiveBranch(): string
     {
         return $this->git_branch ?? $this->project->branch;
+    }
+
+    /** The only path authorized for git and artifact-source operations. */
+    public function sourceWorkspacePath(): string
+    {
+        return $this->source_workspace_path ?: $this->local_path;
     }
 
     protected function casts(): array

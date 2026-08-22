@@ -51,6 +51,17 @@ final class PipelineExecutor
         $this->client->request('POST', "/api/agent/jobs/{$job['id']}/status", ['status' => 'running']);
 
         $workingDirectory = $projectConfig['working_directory'];
+        if (ProductionPathGuard::isProductionLike((string) $workingDirectory) && empty($job['artifact'])) {
+            $message = "Production target '{$workingDirectory}' accepts deployment artifacts only; server-side Git/build deployment is forbidden.";
+            $this->logger->error("Job {$job['id']}: {$message}");
+            $this->client->request('POST', "/api/agent/jobs/{$job['id']}/status", [
+                'status' => 'failed',
+                'message' => $message,
+                'failure_code' => 'artifact_required_missing',
+            ]);
+
+            return;
+        }
         $stepTimeout = $projectConfig['step_timeout_seconds'] ?? $defaultStepTimeoutSeconds;
 
         $replacements = ShellPlaceholders::escape([

@@ -20,6 +20,7 @@ require __DIR__ . '/../lib/OperationRegistry.php';
 require __DIR__ . '/../lib/HealthCollector.php';
 require __DIR__ . '/../lib/ShellPlaceholders.php';
 require __DIR__ . '/../lib/Executor.php';
+require __DIR__ . '/../lib/ProductionPathGuard.php';
 
 use DeploymentAgent\Executor;
 use DeploymentAgent\HealthCollector;
@@ -27,9 +28,13 @@ use DeploymentAgent\OperationRegistry;
 use DeploymentAgent\RemoteUrlSanitizer;
 use DeploymentAgent\ShellPlaceholders;
 use DeploymentAgent\WorkspaceScanner;
+use DeploymentAgent\ProductionPathGuard;
 
 $failures = [];
 $passCount = 0;
+
+check('production /var/www targets are artifact-only', ProductionPathGuard::isProductionLike('/var/www/customer-site'), $failures, $passCount);
+check('dedicated source workspaces are not production targets', !ProductionPathGuard::isProductionLike('/opt/deployment-agent/workspaces/customer-site'), $failures, $passCount);
 
 function check(string $description, bool $condition, array &$failures, int &$passCount): void
 {

@@ -12,7 +12,7 @@ final class LocalProjectStateReporter
     {
         $states = [];
         foreach ($projects as $projectKey => $project) {
-            $path = $project['local_path'] ?? null;
+        $path = $project['source_workspace_path'] ?? $project['local_path'] ?? null;
             if (!is_string($path) || !is_dir($path)) {
                 continue;
             }

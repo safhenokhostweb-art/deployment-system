@@ -331,7 +331,7 @@ $validApiResponse = [
 ];
 $normalized = ProjectConfigCache::fromApiResponse($validApiResponse);
 check('fromApiResponse() keys the map by project_key', array_keys($normalized) === ['saas-platform', 'customer-site'], $failures, $passCount);
-check('fromApiResponse() preserves local_path', $normalized['saas-platform']['local_path'] === 'C:\\laragon\\www\\saas-platform', $failures, $passCount);
+check('fromApiResponse() maps the API path to source_workspace_path', $normalized['saas-platform']['source_workspace_path'] === 'C:\\laragon\\www\\saas-platform', $failures, $passCount);
 check('fromApiResponse() preserves branch', $normalized['customer-site']['branch'] === 'main', $failures, $passCount);
 check('fromApiResponse() on an empty list is valid (zero assigned projects)', ProjectConfigCache::fromApiResponse([]) === [], $failures, $passCount);
 

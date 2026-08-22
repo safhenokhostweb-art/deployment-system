@@ -100,7 +100,7 @@ class DashboardService
     }
 
     /**
-     * @return Collection<int, array{server: Server, type: string, connectedAgent: ?Agent}>
+     * @return Collection<int, array{server: Server, type: string, connectedAgent: ?Agent, isOnline: bool}>
      */
     public function serverOverviewWidget(): Collection
     {
@@ -117,12 +117,14 @@ class DashboardService
                 // rest of the app already treats as meaningful.
                 'type' => $server->agents_count > 0 ? 'agent_based' : 'legacy',
                 'connectedAgent' => $server->agents->first(),
+                'isOnline' => $server->agents->contains(fn (Agent $agent) => $agent->isOnline())
+                    || ($server->last_seen_at !== null && $server->last_seen_at->greaterThan(now()->subSeconds((int) config('deployment.server_offline_threshold_seconds')))),
             ]);
     }
 
     private function serverCounts(): array
     {
-        $servers = Server::all(['id', 'last_seen_at']);
+        $servers = Server::with(['agents:id,server_id,status,last_seen_at'])->get(['id', 'last_seen_at']);
         $online = $servers->filter(fn (Server $server) => $server->isOnline())->count();
 
         return [

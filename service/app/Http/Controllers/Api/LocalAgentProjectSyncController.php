@@ -32,7 +32,8 @@ class LocalAgentProjectSyncController extends Controller
             ->get()
             ->map(fn ($mapping) => [
                 'project_key' => $mapping->project->project_key,
-                'local_path' => $mapping->local_path,
+                'source_workspace_path' => $mapping->sourceWorkspacePath(),
+                'repository_url' => 'https://github.com/' . $mapping->project->repository . '.git',
                 'remote_name' => $mapping->remote_name,
                 'branch' => $mapping->effectiveBranch(),
                 'application_root' => $mapping->project->application_root ?? '.',

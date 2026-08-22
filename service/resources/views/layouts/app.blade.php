@@ -229,7 +229,7 @@
     <a href="{{ route('dashboard.index') }}">{{ __('nav.brand') }}</a>
     <div class="topbar-user">
         @php
-            $onlineServers = \App\Models\Server::get()->filter->isOnline()->count();
+            $onlineServers = \App\Models\Server::with('agents')->get()->filter->isOnline()->count();
             $totalServers = \App\Models\Server::count();
             // Task 6: single indexed COUNT — same (user_id, read_at) index
             // the notifications list itself relies on — computed once per

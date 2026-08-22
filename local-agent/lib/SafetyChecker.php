@@ -17,14 +17,14 @@ final class SafetyChecker
 
     public static function productionSourcePathForbidden(string $path): bool
     {
-        $normalized = str_replace('\\', '/', $path);
-        $lower = strtolower($normalized);
+        $lower = strtolower(rtrim(str_replace('\\', '/', trim($path)), '/'));
 
-        return str_starts_with($lower, '/var/www/')
+        return in_array($lower, ['/var/www', '/srv/www'], true)
+            || str_starts_with($lower, '/var/www/')
             || str_starts_with($lower, '/srv/www/')
-            || str_starts_with($lower, '/home/deployment-agent/')
-            || str_contains($lower, '/releases/')
-            || preg_match('#^[a-z]:/inetpub/wwwroot/#', $lower) === 1;
+            || preg_match('#^/home/[^/]+/(?:public|public_html)(?:/|$)#', $lower) === 1
+            || preg_match('#(?:^|/)(?:releases?|current)(?:/|$)#', $lower) === 1
+            || preg_match('#^[a-z]:/inetpub/wwwroot(?:/|$)#', $lower) === 1;
     }
 
     /**

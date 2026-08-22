@@ -86,7 +86,7 @@ use LocalAgent\WorkspaceSourcePreparer;
  * Hub side for why this never triggers an automatic download). Bump
  * when agent.php or lib/* changes in a way that matters operationally.
  */
-const LOCAL_AGENT_VERSION = '1.4.3';
+const LOCAL_AGENT_VERSION = '1.4.4';
 
 $configPath = __DIR__ . '/config.php';
 
@@ -329,12 +329,21 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
         return;
     }
 
-    $repositoryPath = $projectConfig['local_path'];
+    $repositoryPath = $projectConfig['source_workspace_path'] ?? $projectConfig['local_path'] ?? '';
     $remoteName = $projectConfig['remote_name'] ?? 'origin';
     $branch = $projectConfig['branch'] ?? 'main';
 
+    if (!is_dir($repositoryPath) && is_string($projectConfig['repository_url'] ?? null)) {
+        try {
+            initializeSourceWorkspace($git, $repositoryPath, $projectConfig['repository_url'], $remoteName, $branch, $logger);
+        } catch (Throwable $e) {
+            $client->request('POST', $reportPath, ['status' => 'failed', 'error_message' => $e->getMessage(), 'failure_code' => 'local_workspace_prepare_failed']);
+            return;
+        }
+    }
+
     if (!is_dir($repositoryPath)) {
-        $logger->error("Invalid local path: project '{$projectKey}' is configured with local_path '{$repositoryPath}', which does not exist on this machine.");
+        $logger->error("Invalid source workspace: project '{$projectKey}' is configured with source_workspace_path '{$repositoryPath}', which does not exist on this machine.");
         $client->request('POST', $reportPath, [
             'status' => 'failed',
             'error_message' => "Invalid local path '{$repositoryPath}' for project '{$projectKey}'",
@@ -360,8 +369,8 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
     $jobStartedAt = microtime(true);
 
     try {
-        if ($job['action'] !== 'status_check' && SafetyChecker::productionSourcePathForbidden($repositoryPath)) {
-            $message = "Refusing to use production-like directory '{$repositoryPath}' as a publish/artifact source. Configure this project mapping to a dedicated build checkout; production directories must never push to GitHub or build release artifacts.";
+        if (SafetyChecker::productionSourcePathForbidden($repositoryPath)) {
+            $message = "مسیر ساخت انتشار اشتباه است. سیستم اجازه ساخت Artifact یا اجرای Git از مسیر سایت فعال را نمی‌دهد. لطفاً Source Workspace جداگانه تنظیم کنید: {$repositoryPath}";
             $logger->error("Job {$job['id']}: {$message}");
             $client->request('POST', $reportPath, [
                 'status' => 'failed',
@@ -450,7 +459,7 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
             // depends entirely on that artifact existing now that it can
             // never run composer/npm itself, so a broken build here is a
             // genuine publish failure, not a side note.
-            $artifactResult = $artifactUploader->buildAndUpload($projectKey, $repositoryPath, $commitHash, $branch, (string) $job['id'], $onTick, $projectConfig['application_root'] ?? '.');
+            $artifactResult = $artifactUploader->buildAndUploadRemoteCommit($projectKey, $repositoryPath, $remoteName, $commitHash, $branch, (string) $job['id'], $onTick, $projectConfig['application_root'] ?? '.');
 
             if (!$artifactResult['succeeded']) {
                 $logger->error("Job {$job['id']}: publish failed at the artifact stage [{$artifactResult['failureCode']}]: {$artifactResult['message']}");
@@ -531,6 +540,33 @@ function assertWithinMaxRuntime(float $jobStartedAt, int $jobMaxRuntimeSeconds, 
     }
 }
 
+function initializeSourceWorkspace(GitManager $git, string $path, string $repositoryUrl, string $remoteName, string $branch, Logger $logger): void
+{
+    if (SafetyChecker::productionSourcePathForbidden($path)) {
+        throw new RuntimeException("Refusing to initialize a source workspace at production-like path '{$path}'.");
+    }
+    if (filter_var($repositoryUrl, FILTER_VALIDATE_URL) === false || !str_starts_with(strtolower($repositoryUrl), 'https://')) {
+        throw new RuntimeException('Source workspace repository_url must be an HTTPS URL.');
+    }
+    if (!is_dir($path) && !mkdir($path, 0700, true) && !is_dir($path)) {
+        throw new RuntimeException("Could not create source workspace '{$path}'.");
+    }
+
+    foreach ([
+        [['git', 'init'], 30],
+        [['git', 'remote', 'add', $remoteName, $repositoryUrl], 30],
+        [['git', 'fetch', '--prune', $remoteName, $branch], $git->timeoutFor('fetch')],
+        [['git', 'checkout', '-B', $branch, "refs/remotes/{$remoteName}/{$branch}"], 60],
+    ] as [$command, $timeout]) {
+        $result = $git->run($command, $path, $timeout);
+        if ($result['exitCode'] !== 0) {
+            throw new RuntimeException('Source workspace initialization failed: ' . trim($result['output']));
+        }
+    }
+
+    $logger->info("Initialized isolated source workspace {$path} from {$repositoryUrl} ({$branch}).");
+}
+
 /**
  * Phase 5.2: the file watcher. Reuses the exact same GitManager::changedFiles()
  * (`git status --porcelain`) the manual status_check flow already relies
@@ -545,7 +581,11 @@ function assertWithinMaxRuntime(float $jobStartedAt, int $jobMaxRuntimeSeconds, 
 function pollAndDetectChanges(Client $client, GitManager $git, array $projects, Logger $logger, array &$lastReportedChanges): void
 {
     foreach ($projects as $projectKey => $projectConfig) {
-        $repositoryPath = $projectConfig['local_path'];
+        $repositoryPath = $projectConfig['source_workspace_path'] ?? $projectConfig['local_path'] ?? '';
+        if (SafetyChecker::productionSourcePathForbidden($repositoryPath)) {
+            $logger->error("Change detection disabled for '{$projectKey}': production-like paths can never be Git sources ({$repositoryPath}).");
+            continue;
+        }
 
         if (!is_dir($repositoryPath)) {
             $logger->warn("Invalid local path: project '{$projectKey}' is configured with local_path '{$repositoryPath}', which does not exist on this machine — skipping change detection for it.");

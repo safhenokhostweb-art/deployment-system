@@ -9,6 +9,7 @@ use App\Models\Project;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
+use App\Support\Deployment\SourceWorkspacePath;
 
 /**
  * Phase 5: which local checkout on a developer's machine a Local Agent
@@ -25,7 +26,9 @@ class LocalProjectMappingController extends Controller
 
         $validated = $request->validate([
             'project_id' => 'required|exists:projects,id',
-            'local_path' => 'required|string|max:1000',
+            'source_workspace_path' => 'nullable|required_without:local_path|string|max:1000',
+            'local_path' => 'nullable|required_without:source_workspace_path|string|max:1000',
+            'production_path' => 'nullable|string|max:1000',
             'git_branch' => 'nullable|string|max:255',
             'remote_name' => 'nullable|string|max:255',
         ]);
@@ -38,10 +41,15 @@ class LocalProjectMappingController extends Controller
             "This local agent is already mapped to «{$project->name}»."
         );
 
+        $sourcePath = trim((string) ($validated['source_workspace_path'] ?? $validated['local_path']));
+        $this->assertSafeSourcePath($sourcePath);
+
         LocalProjectMapping::create([
             'local_agent_id' => $localAgent->id,
             'project_id' => $project->id,
-            'local_path' => $validated['local_path'],
+            'local_path' => $sourcePath,
+            'source_workspace_path' => $sourcePath,
+            'production_path' => $validated['production_path'] ?? null,
             'git_branch' => $validated['git_branch'] ?? null,
             'remote_name' => $validated['remote_name'] ?? 'origin',
         ]);
@@ -69,7 +77,8 @@ class LocalProjectMappingController extends Controller
         Gate::authorize('local_agents.manage');
 
         $enabledProjectIds = array_keys($request->input('enabled', []));
-        $localPaths = $request->input('local_path', []);
+        $localPaths = $request->input('source_workspace_path', $request->input('local_path', []));
+        $productionPaths = $request->input('production_path', []);
         $gitBranches = $request->input('git_branch', []);
         $remoteNames = $request->input('remote_name', []);
 
@@ -86,6 +95,8 @@ class LocalProjectMappingController extends Controller
                 continue; // nothing usable to create a mapping with — skipped, not an error
             }
 
+            $this->assertSafeSourcePath($localPath);
+
             if (LocalProjectMapping::where('local_agent_id', $localAgent->id)->where('project_id', $project->id)->exists()) {
                 continue; // already mapped since the page was rendered — not this operator's error
             }
@@ -97,6 +108,8 @@ class LocalProjectMappingController extends Controller
                 'local_agent_id' => $localAgent->id,
                 'project_id' => $project->id,
                 'local_path' => $localPath,
+                'source_workspace_path' => $localPath,
+                'production_path' => trim((string) ($productionPaths[$projectId] ?? '')) ?: null,
                 'git_branch' => $gitBranch !== '' ? $gitBranch : null,
                 'remote_name' => $remoteName !== '' ? $remoteName : 'origin',
             ]);
@@ -121,13 +134,20 @@ class LocalProjectMappingController extends Controller
         abort_unless($mapping->local_agent_id === $localAgent->id, 404);
 
         $validated = $request->validate([
-            'local_path' => 'required|string|max:1000',
+            'source_workspace_path' => 'nullable|required_without:local_path|string|max:1000',
+            'local_path' => 'nullable|required_without:source_workspace_path|string|max:1000',
+            'production_path' => 'nullable|string|max:1000',
             'git_branch' => 'nullable|string|max:255',
             'remote_name' => 'nullable|string|max:255',
         ]);
 
+        $sourcePath = trim((string) ($validated['source_workspace_path'] ?? $validated['local_path']));
+        $this->assertSafeSourcePath($sourcePath);
+
         $mapping->update([
-            'local_path' => $validated['local_path'],
+            'local_path' => $sourcePath,
+            'source_workspace_path' => $sourcePath,
+            'production_path' => $validated['production_path'] ?? null,
             'git_branch' => $validated['git_branch'] ?? null,
             'remote_name' => $validated['remote_name'] ?? 'origin',
         ]);
@@ -169,5 +189,12 @@ class LocalProjectMappingController extends Controller
         $mapping->update(['deployment_mode' => $validated['deployment_mode']]);
 
         return redirect()->route('local-agents.show', $localAgent)->with('status', 'حالت انتشار به‌روزرسانی شد.');
+    }
+
+    private function assertSafeSourcePath(string $path): void
+    {
+        if (SourceWorkspacePath::isProductionLike($path)) {
+            abort(422, 'مسیر ساخت انتشار اشتباه است. سیستم اجازه ساخت Artifact یا اجرای Git از مسیر سایت فعال را نمی‌دهد. لطفاً Source Workspace جداگانه تنظیم کنید.');
+        }
     }
 }

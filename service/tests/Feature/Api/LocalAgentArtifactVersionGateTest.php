@@ -57,7 +57,7 @@ class LocalAgentArtifactVersionGateTest extends TestCase
 
     public function test_artifact_create_is_accepted_for_a_current_local_agent(): void
     {
-        $agent = LocalAgent::factory()->approved()->create(['agent_version' => '1.4.3']);
+        $agent = LocalAgent::factory()->approved()->create(['agent_version' => '1.4.4']);
         $project = Project::factory()->create();
         LocalProjectMapping::factory()->create(['local_agent_id' => $agent->id, 'project_id' => $project->id]);
 
