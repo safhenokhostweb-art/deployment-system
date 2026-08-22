@@ -96,7 +96,29 @@ class VerifyAgentRequestSignature
         );
 
         if (!$valid) {
-            return $this->reject($request, $agent->public_id, 'invalid_signature');
+            // Root-cause fix (credential synchronization): an invalid HMAC on
+            // the Agent identity path almost always means the installed
+            // config.php holds a signing_secret from a DIFFERENT identity
+            // (e.g. the Server's legacy secret instead of this Agent's own
+            // secret) — the token can still match while the secret does not,
+            // which makes the failure look like a silent flake instead of a
+            // credential mismatch. Record the exact Agent id and a concrete
+            // hint in the audit trail so the operator is told precisely what
+            // to fix, not just "Unauthorized".
+            AuditLogEntry::record(
+                actorType: AuditLogEntry::ACTOR_AGENT,
+                actorIdentifier: $agent->public_id,
+                action: 'agent.auth_rejected',
+                metadata: [
+                    'reason' => 'invalid_signature',
+                    'path' => $request->path(),
+                    'agent_id' => $agent->id,
+                    'hint' => "HMAC did not match this Agent's signing_secret. Check that the installed config.php uses the Agent's OWN credentials (agent_id {$agent->public_id} + its agent_token + its signing_secret) from the Agent page, not the Server's legacy credentials. Token verified OK: " . var_export($this->credentials->verifyToken($token, (string) $agent->agent_token_hash), true),
+                ],
+                ipAddress: $request->ip(),
+            );
+
+            return response()->json(['message' => 'Unauthorized — agent signing_secret mismatch. Use the Agent page credentials in config.php (agent_id + agent token + agent signing_secret), not the Server legacy credentials.'], 401);
         }
 
         if (!$this->consumeNonce($agent->server_id, $agent->id, $nonce)) {
