@@ -27,6 +27,7 @@ class Artifact extends Model
     protected $fillable = [
         'public_id',
         'project_id',
+        'release_id',
         'commit_hash',
         'branch',
         'checksum_sha256',
@@ -58,6 +59,11 @@ class Artifact extends Model
     public function project(): BelongsTo
     {
         return $this->belongsTo(Project::class);
+    }
+
+    public function release(): BelongsTo
+    {
+        return $this->belongsTo(Release::class);
     }
 
     /**

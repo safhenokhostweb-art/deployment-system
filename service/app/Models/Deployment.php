@@ -90,6 +90,7 @@ class Deployment extends Model
     protected $fillable = [
         'public_id',
         'project_id',
+        'release_id',
         'server_id',
         'action',
         'status',
@@ -141,6 +142,11 @@ class Deployment extends Model
     public function project(): BelongsTo
     {
         return $this->belongsTo(Project::class);
+    }
+
+    public function release(): BelongsTo
+    {
+        return $this->belongsTo(Release::class);
     }
 
     public function server(): BelongsTo

@@ -100,6 +100,7 @@ class PublishJob extends Model
         'public_id',
         'local_agent_id',
         'project_id',
+        'release_id',
         'action',
         'status',
         'attempt',
@@ -158,6 +159,11 @@ class PublishJob extends Model
     public function project(): BelongsTo
     {
         return $this->belongsTo(Project::class);
+    }
+
+    public function release(): BelongsTo
+    {
+        return $this->belongsTo(Release::class);
     }
 
     /**
