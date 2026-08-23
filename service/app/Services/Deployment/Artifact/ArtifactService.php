@@ -234,10 +234,11 @@ class ArtifactService
         throw new ArtifactValidationException($reason, $message);
     }
 
-    public function findMatching(Project $project, string $commitHash): ?Artifact
+    public function findMatching(Project $project, string $commitHash, string $branch): ?Artifact
     {
         return Artifact::where('project_id', $project->id)
             ->where('commit_hash', $commitHash)
+            ->where('branch', $branch)
             ->where('status', Artifact::STATUS_AVAILABLE)
             ->first();
     }
@@ -263,7 +264,7 @@ class ArtifactService
             return $deployment->artifact;
         }
 
-        $artifact = $this->findMatching($deployment->project, $deployment->commit_hash);
+        $artifact = $this->findMatching($deployment->project, $deployment->commit_hash, $deployment->branch);
 
         if ($artifact !== null) {
             $deployment->update(['artifact_id' => $artifact->id]);
@@ -284,6 +285,7 @@ class ArtifactService
     {
         $stale = Artifact::where('project_id', $project->id)
             ->where('status', Artifact::STATUS_AVAILABLE)
+            ->whereNotIn('id', Deployment::query()->whereNotNull('artifact_id')->select('artifact_id'))
             ->orderByDesc('created_at')
             ->skip($retentionCount)
             ->take(PHP_INT_MAX)

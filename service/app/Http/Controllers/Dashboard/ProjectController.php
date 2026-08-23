@@ -9,6 +9,7 @@ use App\Models\Environment;
 use App\Models\GitHubAccount;
 use App\Models\LocalChangeDetectionJob;
 use App\Models\Project;
+use App\Models\PublishJob;
 use App\Models\Server;
 use App\Models\User;
 use App\Services\Deployment\DeploymentDispatcher;
@@ -395,12 +396,17 @@ class ProjectController extends Controller
             'release_notes' => 'nullable|string|max:2000',
         ]);
 
-        $deployment = $this->dispatcher->createManual($project, $validated['commit_hash'], $request->user()->email, [
+        $result = $this->dispatcher->createManual($project, $validated['commit_hash'], $request->user()->email, [
             'release_label' => $validated['release_label'] ?? null,
             'release_notes' => $validated['release_notes'] ?? null,
         ]);
 
-        return redirect()->route('deployments.show', $deployment)->with('status', 'Deployment queued.');
+        if ($result instanceof PublishJob) {
+            return redirect()->route('projects.publish.show', [$project, $result])
+                ->with('status', 'Artifact build queued. The deployment will be created after the artifact is available.');
+        }
+
+        return redirect()->route('deployments.show', $result)->with('status', 'Deployment queued.');
     }
 
     /**

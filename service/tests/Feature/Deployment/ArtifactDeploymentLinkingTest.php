@@ -7,14 +7,19 @@ use App\Models\Deployment;
 use App\Models\DeploymentTarget;
 use App\Models\DeploymentTask;
 use App\Models\Environment;
+use App\Models\LocalAgent;
+use App\Models\LocalProjectMapping;
 use App\Models\Project;
+use App\Models\PublishJob;
 use App\Models\Server;
 use App\Models\Agent;
 use App\Services\Deployment\AgentJobService;
 use App\Services\Deployment\AgentTaskService;
 use App\Services\Deployment\DeploymentDispatcher;
 use App\Services\Deployment\RollbackService;
+use App\Services\Publish\PublishJobService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 
 /**
@@ -262,16 +267,19 @@ class ArtifactDeploymentLinkingTest extends TestCase
             'auto_deploy' => true,
             'requires_complete_artifact' => true,
         ]);
+        $localAgent = LocalAgent::factory()->approved()->create();
+        LocalProjectMapping::factory()->create([
+            'project_id' => $project->id,
+            'local_agent_id' => $localAgent->id,
+            'git_branch' => 'main',
+        ]);
         $commitHash = str_repeat('c0', 20);
 
-        $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
+        $job = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
 
-        $fresh = $deployment->fresh();
-        // Race-condition fix: no fail-at-creation. The gate moved to claim time.
-        $this->assertSame(Deployment::STATUS_QUEUED, $fresh->status);
-        $this->assertNull($fresh->artifact_id);
-        $this->assertNull($fresh->failure_code);
-        $this->assertNull($fresh->finished_at);
+        $this->assertInstanceOf(PublishJob::class, $job);
+        $this->assertSame(PublishJob::ACTION_BUILD_ARTIFACT, $job->action);
+        $this->assertDatabaseCount('deployments', 0);
     }
 
     /**
@@ -283,35 +291,36 @@ class ArtifactDeploymentLinkingTest extends TestCase
      */
     public function test_requires_complete_artifact_lands_after_creation_is_reattached_at_claim(): void
     {
-        $server = Server::factory()->create();
         $project = Project::factory()->create([
-            'server_id' => $server->id,
             'auto_deploy' => true,
             'requires_complete_artifact' => true,
         ]);
+        $localAgent = LocalAgent::factory()->approved()->create();
+        LocalProjectMapping::factory()->create([
+            'project_id' => $project->id,
+            'local_agent_id' => $localAgent->id,
+            'git_branch' => 'main',
+        ]);
         $commitHash = str_repeat('f0', 20);
-        // The agent that will claim the job must belong to the same server.
-        $agent = Agent::factory()->approved()->create(['server_id' => $server->id, 'agent_version' => '1.2.0']);
 
-        // Webhook fires while the Local Agent is still uploading the artifact.
-        $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
-        $this->assertSame(Deployment::STATUS_QUEUED, $deployment->fresh()->status);
-        $this->assertNull($deployment->fresh()->artifact_id);
+        $job = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
+        $this->assertInstanceOf(PublishJob::class, $job);
+        $this->assertDatabaseCount('deployments', 0);
 
         // Upload completes a moment later.
         $artifact = Artifact::factory()->create([
             'project_id' => $project->id,
             'commit_hash' => $commitHash,
+            'branch' => 'main',
             'status' => Artifact::STATUS_AVAILABLE,
         ]);
 
-        // Server Agent claims the job — claim-time re-attach picks the
-        // artifact up and the job is dispatched (not failed).
-        $claimed = app(AgentJobService::class)->claimNextJob($server);
+        app(PublishJobService::class)->reportResult($job, $commitHash, 'artifact uploaded');
 
-        $this->assertNotNull($claimed);
-        $this->assertSame(Deployment::STATUS_RUNNING, $deployment->fresh()->status);
-        $this->assertSame($artifact->id, $deployment->fresh()->artifact_id);
+        $deployment = Deployment::firstOrFail();
+        $this->assertSame(Deployment::STATUS_QUEUED, $deployment->status);
+        $this->assertSame($artifact->id, $deployment->artifact_id);
+        $this->assertSame($deployment->id, $job->fresh()->deployment_id);
     }
 
     public function test_requires_complete_artifact_with_matching_artifact_is_queued_normally(): void
@@ -346,39 +355,69 @@ class ArtifactDeploymentLinkingTest extends TestCase
             'server_id' => $server->id,
         ]);
         $commitHash = str_repeat('e0', 20);
-        $agent = Agent::factory()->approved()->create(['server_id' => $server->id, 'agent_version' => '1.2.0']);
+        $localAgent = LocalAgent::factory()->approved()->create();
+        LocalProjectMapping::factory()->create([
+            'project_id' => $project->id,
+            'local_agent_id' => $localAgent->id,
+            'git_branch' => 'main',
+        ]);
 
-        $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
+        $job = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
 
-        $fresh = $deployment->fresh();
-        // Race-condition fix: no fail-at-creation, tasks are created so the
-        // claim-time re-attach (AgentTaskService) can pick the artifact up.
-        $this->assertSame(Deployment::STATUS_QUEUED, $fresh->status);
-        $this->assertNull($fresh->artifact_id);
-        $this->assertNull($fresh->failure_code);
-        $this->assertCount(2, $fresh->tasks);
-        $this->assertNull($fresh->finished_at);
+        $this->assertInstanceOf(PublishJob::class, $job);
+        $this->assertDatabaseCount('deployments', 0);
+        $this->assertDatabaseCount('deployment_tasks', 0);
 
         // The artifact lands after creation; the first claiming agent
         // re-attaches it and dispatches instead of failing closed.
         $artifact = Artifact::factory()->create([
             'project_id' => $project->id,
             'commit_hash' => $commitHash,
+            'branch' => 'main',
             'status' => Artifact::STATUS_AVAILABLE,
         ]);
-        $claimed = app(AgentTaskService::class)->claimNextTask($agent);
+        app(PublishJobService::class)->reportResult($job, $commitHash, 'artifact uploaded');
 
-        $this->assertNotNull($claimed);
-        // Multi-target aggregate stays queued until a task reaches a terminal
-        // state (existing aggregator behavior); the task itself is running and
-        // the exact-commit artifact is now attached — that is what proves
-        // the race-condition re-attach worked instead of failing closed.
-        $this->assertSame(Deployment::STATUS_QUEUED, $fresh->fresh()->status);
-        // Exactly one of the two tasks was claimed (running) — the other
-        // remains queued — and the exact-commit artifact is attached.
-        $taskStatuses = $fresh->fresh()->tasks()->pluck('status')->all();
-        $this->assertCount(1, array_keys($taskStatuses, DeploymentTask::STATUS_RUNNING, true));
-        $this->assertCount(1, array_keys($taskStatuses, DeploymentTask::STATUS_QUEUED, true));
-        $this->assertSame($artifact->id, $fresh->fresh()->artifact_id);
+        $deployment = Deployment::firstOrFail();
+        $this->assertSame(Deployment::STATUS_QUEUED, $deployment->status);
+        $this->assertSame($artifact->id, $deployment->artifact_id);
+        $this->assertCount(2, $deployment->tasks);
+    }
+
+    public function test_artifact_required_deployment_cannot_enter_queue_without_artifact(): void
+    {
+        $project = Project::factory()->create(['requires_complete_artifact' => true]);
+
+        $this->expectException(\LogicException::class);
+
+        Deployment::create([
+            'project_id' => $project->id,
+            'server_id' => $project->server_id,
+            'action' => Deployment::ACTION_DEPLOY,
+            'status' => Deployment::STATUS_QUEUED,
+            'commit_hash' => str_repeat('a1', 20),
+            'branch' => 'main',
+            'trigger' => Deployment::TRIGGER_WEBHOOK,
+            'triggered_by' => 'github',
+        ]);
+    }
+
+    public function test_legacy_artifact_required_deployment_cannot_be_requeued_without_artifact(): void
+    {
+        $project = Project::factory()->create(['requires_complete_artifact' => true]);
+        $deployment = Deployment::withoutEvents(fn () => Deployment::create([
+            'public_id' => (string) Str::uuid(),
+            'project_id' => $project->id,
+            'server_id' => $project->server_id,
+            'action' => Deployment::ACTION_DEPLOY,
+            'status' => Deployment::STATUS_FAILED,
+            'commit_hash' => str_repeat('a2', 20),
+            'branch' => 'main',
+            'trigger' => Deployment::TRIGGER_WEBHOOK,
+            'triggered_by' => 'github',
+        ]));
+
+        $this->expectException(\LogicException::class);
+        $deployment->update(['status' => Deployment::STATUS_QUEUED]);
     }
 }

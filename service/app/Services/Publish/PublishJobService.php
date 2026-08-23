@@ -601,6 +601,19 @@ class PublishJobService
 
         if ($job->action === PublishJob::ACTION_BUILD_ARTIFACT) {
             abort_unless($commitHash !== null && hash_equals((string) $job->reviewed_head_sha, $commitHash), 422, 'An artifact build job must report the requested commit exactly.');
+
+            if ($job->deployment_request !== null) {
+                $artifact = Artifact::query()
+                    ->where('project_id', $job->project_id)
+                    ->where('commit_hash', $commitHash)
+                    ->where('branch', $job->reviewed_branch)
+                    ->where('status', Artifact::STATUS_AVAILABLE)
+                    ->first();
+
+                abort_if($artifact === null, 409, 'The artifact build cannot complete its deployment request until the exact commit and branch artifact is available.');
+
+                $this->deployments->resumeRequiredArtifactDeployment($job);
+            }
         }
 
         $job->update([

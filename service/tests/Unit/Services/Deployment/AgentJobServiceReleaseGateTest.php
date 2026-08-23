@@ -10,6 +10,7 @@ use App\Models\Server;
 use App\Services\Deployment\AgentJobService;
 use App\Support\Deployment\FailureCodeGuidance;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 
 /**
@@ -123,7 +124,10 @@ class AgentJobServiceReleaseGateTest extends TestCase
     {
         $server = $this->serverWithAgent('1.2.0');
         $project = Project::factory()->create(['server_id' => $server->id, 'requires_complete_artifact' => true]);
-        $deployment = Deployment::create([
+        // Deliberately manufacture a legacy invalid row to keep the
+        // claim-time defense covered; normal creation now rejects it.
+        $deployment = Deployment::withoutEvents(fn () => Deployment::create([
+            'public_id' => (string) Str::uuid(),
             'project_id' => $project->id,
             'server_id' => $server->id,
             'action' => Deployment::ACTION_DEPLOY,
@@ -132,7 +136,7 @@ class AgentJobServiceReleaseGateTest extends TestCase
             'branch' => 'main',
             'trigger' => Deployment::TRIGGER_MANUAL,
             'queued_at' => now(),
-        ]);
+        ]));
 
         $claimed = app(AgentJobService::class)->claimNextJob($server);
 
@@ -147,7 +151,10 @@ class AgentJobServiceReleaseGateTest extends TestCase
     {
         $server = $this->serverWithAgent('1.2.0');
         $project = Project::factory()->create(['server_id' => $server->id, 'requires_complete_artifact' => true]);
-        $deployment = Deployment::create([
+        // Deliberately manufacture a legacy invalid row to keep the
+        // late-attachment compatibility path covered.
+        $deployment = Deployment::withoutEvents(fn () => Deployment::create([
+            'public_id' => (string) Str::uuid(),
             'project_id' => $project->id,
             'server_id' => $server->id,
             'action' => Deployment::ACTION_DEPLOY,
@@ -156,7 +163,7 @@ class AgentJobServiceReleaseGateTest extends TestCase
             'branch' => 'main',
             'trigger' => Deployment::TRIGGER_MANUAL,
             'queued_at' => now(),
-        ]);
+        ]));
         // Simulate the timing race: artifact upload completed AFTER the
         // webhook created the deployment (so artifact_id is still null).
         $artifact = Artifact::factory()->create([

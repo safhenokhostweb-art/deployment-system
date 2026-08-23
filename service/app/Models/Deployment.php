@@ -136,6 +136,24 @@ class Deployment extends Model
     {
         static::creating(function (Deployment $deployment): void {
             $deployment->public_id ??= (string) Str::uuid();
+
+            if ($deployment->action === self::ACTION_DEPLOY
+                && $deployment->artifact_id === null
+                && Project::query()->whereKey($deployment->project_id)->value('requires_complete_artifact')) {
+                throw new \LogicException('Artifact-required deployments must have an artifact before creation.');
+            }
+        });
+
+        static::updating(function (Deployment $deployment): void {
+            $claimableStatuses = [self::STATUS_QUEUED, ...self::IN_PROGRESS_STATUSES];
+
+            if ($deployment->action === self::ACTION_DEPLOY
+                && $deployment->artifact_id === null
+                && in_array($deployment->status, $claimableStatuses, true)
+                && ($deployment->isDirty('status') || $deployment->isDirty('artifact_id'))
+                && Project::query()->whereKey($deployment->project_id)->value('requires_complete_artifact')) {
+                throw new \LogicException('An artifact-required deployment cannot enter the execution queue without an artifact.');
+            }
         });
     }
 

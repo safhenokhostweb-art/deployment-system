@@ -3,7 +3,10 @@
 namespace Tests\Feature\Api;
 
 use App\Models\Deployment;
+use App\Models\LocalAgent;
+use App\Models\LocalProjectMapping;
 use App\Models\Project;
+use App\Models\PublishJob;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -59,6 +62,36 @@ class GitHubWebhookTest extends TestCase
         $this->assertDatabaseHas('deployments', [
             'project_id' => $project->id,
             'status' => Deployment::STATUS_QUEUED,
+        ]);
+    }
+
+    public function test_webhook_defers_artifact_required_deployment_until_artifact_build_succeeds(): void
+    {
+        $project = Project::factory()->autoDeploy()->create([
+            'branch' => 'main',
+            'github_webhook_secret' => 'topsecret',
+            'requires_complete_artifact' => true,
+        ]);
+        $localAgent = LocalAgent::factory()->approved()->create();
+        LocalProjectMapping::factory()->create([
+            'project_id' => $project->id,
+            'local_agent_id' => $localAgent->id,
+            'git_branch' => 'main',
+        ]);
+        $payload = ['ref' => 'refs/heads/main', 'after' => str_repeat('b1', 20)];
+        $body = json_encode($payload);
+
+        $this->postJson("/api/webhooks/github/{$project->project_key}", $payload, [
+            'X-GitHub-Event' => 'push',
+            'X-Hub-Signature-256' => $this->sign($body, 'topsecret'),
+        ])->assertAccepted();
+
+        $this->assertDatabaseCount('deployments', 0);
+        $this->assertDatabaseHas('publish_jobs', [
+            'project_id' => $project->id,
+            'action' => PublishJob::ACTION_BUILD_ARTIFACT,
+            'reviewed_head_sha' => str_repeat('b1', 20),
+            'reviewed_branch' => 'main',
         ]);
     }
 

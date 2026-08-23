@@ -13,6 +13,7 @@ use App\Services\Deployment\AgentTaskService;
 use App\Services\Deployment\Artifact\ArtifactService;
 use Database\Factories\AgentFactory;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 
 /**
@@ -43,12 +44,15 @@ class AgentTaskReleaseGateTest extends TestCase
             'server_id' => $agent->server_id,
             'name' => 'web-01',
         ]);
-        $deployment = Deployment::factory()->create(array_merge([
-            'project_id' => $project->id,
-            'server_id' => $target->server_id,
-            'status' => Deployment::STATUS_QUEUED,
-            'commit_hash' => str_repeat('a', 40),
-        ], $overrides['deployment'] ?? []));
+        // Some tests deliberately manufacture legacy invalid rows to keep
+        // the claim-time defense covered; normal creation now rejects them.
+        $deployment = Deployment::withoutEvents(fn () => Deployment::factory()->create(array_merge([
+                'public_id' => (string) Str::uuid(),
+                'project_id' => $project->id,
+                'server_id' => $target->server_id,
+                'status' => Deployment::STATUS_QUEUED,
+                'commit_hash' => str_repeat('a', 40),
+            ], $overrides['deployment'] ?? [])));
         $task = DeploymentTask::create([
             'deployment_id' => $deployment->id,
             'deployment_target_id' => $target->id,
@@ -138,7 +142,9 @@ class AgentTaskReleaseGateTest extends TestCase
     {
         $ctx = $this->makeTask(['project' => ['requires_complete_artifact' => true]]);
         $this->attachArtifact($ctx, str_repeat('b', 40)); // artifact for a DIFFERENT commit
-        $ctx['deployment']->update(['artifact_id' => null]); // not pre-attached
+        // Deliberately restore a legacy invalid row; normal updates now
+        // reject removing the artifact from a queued required deployment.
+        Deployment::withoutEvents(fn () => $ctx['deployment']->update(['artifact_id' => null]));
 
         $claimed = app(AgentTaskService::class)->claimNextTask($ctx['agent']);
 
