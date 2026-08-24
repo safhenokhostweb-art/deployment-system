@@ -326,8 +326,8 @@ rrmdir($logDirForShutdown);
 // LocalAgentProjectSyncController's response shape on the Hub side). ---
 
 $validApiResponse = [
-    ['project_key' => 'saas-platform', 'local_path' => 'C:\\laragon\\www\\saas-platform', 'remote_name' => 'origin', 'branch' => 'main'],
-    ['project_key' => 'customer-site', 'local_path' => 'C:\\laragon\\www\\customer-site', 'remote_name' => 'origin', 'branch' => 'main'],
+    ['project_key' => 'saas-platform', 'local_path' => 'C:\\laragon\\www\\saas-platform', 'repository_url' => 'https://github.com/example/saas-platform.git', 'remote_name' => 'origin', 'branch' => 'main'],
+    ['project_key' => 'customer-site', 'local_path' => 'C:\\laragon\\www\\customer-site', 'repository_url' => 'https://github.com/example/customer-site.git', 'remote_name' => 'origin', 'branch' => 'main'],
 ];
 $normalized = ProjectConfigCache::fromApiResponse($validApiResponse);
 check('fromApiResponse() keys the map by project_key', array_keys($normalized) === ['saas-platform', 'customer-site'], $failures, $passCount);
@@ -345,7 +345,7 @@ check('fromApiResponse() throws when project_key is missing', $threw, $failures,
 
 $threw = false;
 try {
-    ProjectConfigCache::fromApiResponse([['project_key' => 'saas-platform', 'local_path' => '', 'remote_name' => 'origin', 'branch' => 'main']]);
+    ProjectConfigCache::fromApiResponse([['project_key' => 'saas-platform', 'local_path' => '', 'repository_url' => 'https://github.com/example/saas-platform.git', 'remote_name' => 'origin', 'branch' => 'main']]);
 } catch (\InvalidArgumentException $e) {
     $threw = str_contains($e->getMessage(), 'saas-platform');
 }
@@ -353,11 +353,19 @@ check('fromApiResponse() throws when local_path is empty', $threw, $failures, $p
 
 $threw = false;
 try {
-    ProjectConfigCache::fromApiResponse([['project_key' => 'saas-platform', 'local_path' => 'C:\\x', 'remote_name' => 'origin']]);
+    ProjectConfigCache::fromApiResponse([['project_key' => 'saas-platform', 'local_path' => 'C:\\x', 'repository_url' => 'https://github.com/example/saas-platform.git', 'remote_name' => 'origin']]);
 } catch (\InvalidArgumentException $e) {
     $threw = true;
 }
 check('fromApiResponse() throws when branch is missing', $threw, $failures, $passCount);
+
+$threw = false;
+try {
+    ProjectConfigCache::fromApiResponse([['project_key' => 'saas-platform', 'local_path' => 'C:\\x', 'remote_name' => 'origin', 'branch' => 'main']]);
+} catch (\InvalidArgumentException $e) {
+    $threw = str_contains($e->getMessage(), 'repository_url');
+}
+check('fromApiResponse() requires repository_url for workspace bootstrap', $threw, $failures, $passCount);
 
 // --- ProjectConfigCache::save()/load() — round trip, atomic replacement,
 // and the "never contains secrets" guarantee (Phase 5 constraint). ---

@@ -6,7 +6,8 @@ namespace LocalAgent;
 
 /**
  * Persists the Hub's project-config sync response
- * (project_key => {local_path, remote_name, branch}) to a local JSON file
+ * (project_key => {source_workspace_path, repository_url, remote_name,
+ * branch}) to a local JSON file
  * so the agent can keep publishing while the Hub is temporarily
  * unreachable. Deliberately holds only project metadata — never
  * agent_token/signing_secret/registration_token, which live solely in
@@ -30,7 +31,8 @@ final class ProjectConfigCache
 
     /**
      * Builds the project map from the Hub API's response shape (a JSON
-     * list of {project_key, local_path, remote_name, branch} objects) and
+     * list of {project_key, source_workspace_path, repository_url,
+     * remote_name, branch} objects) and
      * validates it before returning. Throws on the first structurally
      * invalid entry — a partially-trusted config is worse than none.
      *
@@ -49,6 +51,9 @@ final class ProjectConfigCache
             $key = $entry['project_key'];
             if (!is_string($key) || $key === '') {
                 throw new \InvalidArgumentException('a project entry has an empty or non-string project_key');
+            }
+            if (!is_string($entry['repository_url'] ?? null) || trim($entry['repository_url']) === '') {
+                throw new \InvalidArgumentException("project '{$key}' is missing repository_url required for source workspace bootstrap");
             }
 
             $projects[$key] = [

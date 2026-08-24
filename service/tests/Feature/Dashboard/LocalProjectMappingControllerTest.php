@@ -62,6 +62,19 @@ class LocalProjectMappingControllerTest extends TestCase
         $this->assertNotSame('/var/www/customer-site', $mapping->fresh()->source_workspace_path);
     }
 
+    public function test_htdocs_directory_cannot_be_saved_as_source_workspace(): void
+    {
+        $user = User::factory()->create();
+        $agent = LocalAgent::factory()->approved()->create();
+        $mapping = LocalProjectMapping::factory()->create(['local_agent_id' => $agent->id]);
+
+        $this->actingAs($user)->put(route('local-agents.mappings.update', [$agent, $mapping]), [
+            'source_workspace_path' => 'C:\\xampp\\htdocs\\customer-site',
+        ])->assertStatus(422);
+
+        $this->assertNotSame('C:\\xampp\\htdocs\\customer-site', $mapping->fresh()->source_workspace_path);
+    }
+
     public function test_source_workspace_and_production_target_are_stored_separately(): void
     {
         $user = User::factory()->create();

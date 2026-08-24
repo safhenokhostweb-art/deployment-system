@@ -12,6 +12,7 @@ final class SourceWorkspacePath
             || str_starts_with($normalized, '/var/www/')
             || str_starts_with($normalized, '/srv/www/')
             || preg_match('#^/home/[^/]+/(?:public|public_html)(?:/|$)#', $normalized) === 1
+            || preg_match('#(?:^|/)htdocs(?:/|$)#', $normalized) === 1
             || preg_match('#(?:^|/)(?:releases?|current)(?:/|$)#', $normalized) === 1
             || preg_match('#^[a-z]:/inetpub/wwwroot(?:/|$)#', $normalized) === 1;
     }

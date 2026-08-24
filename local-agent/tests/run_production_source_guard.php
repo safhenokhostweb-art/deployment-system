@@ -21,6 +21,8 @@ $check('/srv/www project paths are forbidden as source', SafetyChecker::producti
 $check('/var/www root itself is forbidden as source', SafetyChecker::productionSourcePathForbidden('/var/www'));
 $check('/home user public paths are forbidden as source', SafetyChecker::productionSourcePathForbidden('/home/customer/public'));
 $check('/home user public_html paths are forbidden as source', SafetyChecker::productionSourcePathForbidden('/home/customer/public_html/app'));
+$check('Linux htdocs paths are forbidden as source', SafetyChecker::productionSourcePathForbidden('/opt/lampp/htdocs/customer-site'));
+$check('Windows htdocs paths are forbidden as source', SafetyChecker::productionSourcePathForbidden('C:\\xampp\\htdocs\\customer-site'));
 $check('release directories are forbidden as source', SafetyChecker::productionSourcePathForbidden('/opt/apps/customer-site/releases/20260822'));
 $check('Windows IIS production paths are forbidden as source', SafetyChecker::productionSourcePathForbidden('C:\\inetpub\\wwwroot\\customer-site'));
 $check('developer/build checkout path is allowed', !SafetyChecker::productionSourcePathForbidden('C:\\laragon\\www\\customer-site'));

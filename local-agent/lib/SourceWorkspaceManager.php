@@ -1,0 +1,272 @@
+<?php
+
+declare(strict_types=1);
+
+namespace LocalAgent;
+
+/**
+ * Reconciles Hub-managed source workspaces independently of Publish Jobs.
+ *
+ * A healthy checkout is reused without any network operation. Missing
+ * checkouts are cloned into a sibling temporary directory and atomically
+ * renamed into place. An invalid checkout is quarantined (never deleted)
+ * before the same atomic clone is attempted; if cloning fails, the original
+ * path is restored.
+ */
+final class SourceWorkspaceManager
+{
+    public function __construct(
+        private readonly GitManager $git,
+        private readonly Logger $logger,
+    ) {
+    }
+
+    /**
+     * Reconcile every project independently so one unavailable repository
+     * cannot prevent other mappings from becoming usable.
+     *
+     * @param array<string, array<string, mixed>> $projects
+     * @return array<string, string> project key => created|reused|repaired|failed|skipped
+     */
+    public function reconcile(array $projects): array
+    {
+        $results = [];
+
+        foreach ($projects as $projectKey => $project) {
+            $repositoryUrl = $project['repository_url'] ?? null;
+            if (!is_string($repositoryUrl) || trim($repositoryUrl) === '') {
+                // Legacy config.php/cache entries predate repository_url and
+                // cannot be bootstrapped without inventing a remote source.
+                $results[(string) $projectKey] = 'skipped';
+                continue;
+            }
+
+            try {
+                $results[(string) $projectKey] = $this->reconcileProject((string) $projectKey, $project);
+            } catch (\Throwable $e) {
+                $results[(string) $projectKey] = 'failed';
+                $this->logger->error("Source workspace reconciliation failed for '{$projectKey}': " . $e->getMessage());
+            }
+        }
+
+        return $results;
+    }
+
+    /**
+     * @param array<string, mixed> $project
+     * @return string created|reused|repaired
+     */
+    public function reconcileProject(string $projectKey, array $project): string
+    {
+        $path = $project['source_workspace_path'] ?? $project['local_path'] ?? null;
+        $repositoryUrl = $project['repository_url'] ?? null;
+        $remoteName = $project['remote_name'] ?? 'origin';
+        $branch = $project['branch'] ?? null;
+
+        if (!is_string($path) || !$this->isAbsolutePath($path)) {
+            throw new \RuntimeException('source_workspace_path must be a non-empty absolute path.');
+        }
+        if (!is_string($repositoryUrl) || trim($repositoryUrl) === '' || str_starts_with($repositoryUrl, '-')) {
+            throw new \RuntimeException('repository_url must be a non-empty Git repository URL.');
+        }
+        if (!is_string($remoteName) || preg_match('/^[A-Za-z0-9._-]+$/', $remoteName) !== 1) {
+            throw new \RuntimeException('remote_name contains unsupported characters.');
+        }
+        if (!is_string($branch) || !$this->validBranch($branch)) {
+            throw new \RuntimeException('branch is empty or contains unsupported characters.');
+        }
+
+        $path = $this->normalizePath($path);
+        if ($path === '/' || preg_match('/^[A-Za-z]:\/$/', $path) === 1) {
+            throw new \RuntimeException('source_workspace_path cannot be a filesystem root.');
+        }
+        $this->assertNonProductionPath($path);
+
+        $parent = dirname($path);
+        if (!is_dir($parent) && !@mkdir($parent, 0750, true) && !is_dir($parent)) {
+            throw new \RuntimeException("Could not create source workspace parent '{$parent}'.");
+        }
+        if (!is_writable($parent)) {
+            throw new \RuntimeException("Source workspace parent '{$parent}' is not writable by the Local Agent user; correct its ownership before retrying.");
+        }
+
+        $existed = $this->pathExists($path);
+        if ($existed) {
+            $resolved = realpath($path);
+            if ($resolved !== false) {
+                $this->assertNonProductionPath($resolved);
+            }
+
+            $this->configureSafeDirectory($path, $parent);
+            if ($this->isExpectedCheckout($path, $repositoryUrl, $remoteName, $branch)) {
+                $sha = $this->git->lastCommitHash($path);
+                $this->logger->info("Source workspace reused for '{$projectKey}' at {$path} ({$branch} @ {$sha}).");
+
+                return 'reused';
+            }
+        }
+
+        $suffix = gmdate('YmdHis') . '-' . bin2hex(random_bytes(4));
+        $baseName = preg_replace('/[^A-Za-z0-9._-]/', '_', basename($path)) ?: 'project';
+        $temporaryPath = $parent . DIRECTORY_SEPARATOR . '.workspace-clone-' . $baseName . '-' . $suffix;
+        $quarantinePath = $parent . DIRECTORY_SEPARATOR . '.workspace-repair-' . $baseName . '-' . $suffix;
+        $quarantined = false;
+
+        if ($existed) {
+            if (!rename($path, $quarantinePath)) {
+                throw new \RuntimeException("Workspace '{$path}' is invalid and could not be moved to a safe repair quarantine.");
+            }
+            $quarantined = true;
+            $this->logger->warn("Invalid source workspace for '{$projectKey}' moved to recoverable quarantine {$quarantinePath}.");
+        }
+
+        try {
+            $clone = $this->git->run([
+                'git', 'clone', '--origin', $remoteName, '--branch', $branch,
+                '--single-branch', '--', $repositoryUrl, $temporaryPath,
+            ], $parent, $this->git->timeoutFor('pull'));
+
+            if ($clone['exitCode'] !== 0) {
+                throw new \RuntimeException('git clone failed: ' . trim($clone['output']));
+            }
+
+            if (!$this->isExpectedCheckout($temporaryPath, $repositoryUrl, $remoteName, $branch)) {
+                throw new \RuntimeException('cloned repository failed remote, branch, or HEAD verification.');
+            }
+            if (!is_writable($temporaryPath)) {
+                throw new \RuntimeException('cloned workspace is not writable by the Local Agent user.');
+            }
+            if (!rename($temporaryPath, $path)) {
+                throw new \RuntimeException("Could not atomically activate cloned workspace at '{$path}'.");
+            }
+
+            // Register the authoritative final path only; the temporary
+            // clone is owned by this process and never needs a persistent
+            // safe.directory entry.
+            $this->configureSafeDirectory($path, $parent);
+            $sha = $this->git->lastCommitHash($path);
+            $state = $quarantined ? 'repaired' : 'created';
+            $this->logger->info("Source workspace {$state} for '{$projectKey}' at {$path} ({$branch} @ {$sha}).");
+
+            return $state;
+        } catch (\Throwable $e) {
+            // Preserve a partial clone for diagnosis, but restore an existing
+            // invalid workspace to its original path so repair is reversible.
+            if ($this->pathExists($temporaryPath)) {
+                $failedPath = $parent . DIRECTORY_SEPARATOR . '.workspace-failed-' . $baseName . '-' . $suffix;
+                @rename($temporaryPath, $failedPath);
+            }
+            if ($quarantined && !$this->pathExists($path) && $this->pathExists($quarantinePath)) {
+                @rename($quarantinePath, $path);
+            }
+
+            throw $e;
+        }
+    }
+
+    private function isExpectedCheckout(string $path, string $repositoryUrl, string $remoteName, string $branch): bool
+    {
+        if (!is_dir($path) || !is_writable($path)) {
+            return false;
+        }
+
+        $inside = $this->git->run(['git', 'rev-parse', '--is-inside-work-tree'], $path, $this->git->timeoutFor('status'));
+        if ($inside['exitCode'] !== 0 || trim($inside['output']) !== 'true') {
+            return false;
+        }
+
+        $remote = $this->git->run(['git', 'remote', 'get-url', $remoteName], $path, $this->git->timeoutFor('status'));
+        if ($remote['exitCode'] !== 0 || $this->normalizeRepository((string) $remote['output']) !== $this->normalizeRepository($repositoryUrl)) {
+            return false;
+        }
+
+        try {
+            return $this->git->currentBranch($path) === $branch
+                && preg_match('/^[0-9a-f]{40}$/', $this->git->lastCommitHash($path)) === 1;
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    private function configureSafeDirectory(string $path, string $cwd): void
+    {
+        $normalized = $this->normalizePath($path);
+        $current = $this->git->run(['git', 'config', '--global', '--get-all', 'safe.directory'], $cwd, $this->git->timeoutFor('status'));
+        $entries = preg_split('/\r?\n/', trim($current['output'])) ?: [];
+
+        foreach ($entries as $entry) {
+            if ($entry !== '' && $this->normalizePath($entry) === $normalized) {
+                return;
+            }
+        }
+
+        $added = $this->git->run(['git', 'config', '--global', '--add', 'safe.directory', $normalized], $cwd, $this->git->timeoutFor('status'));
+        if ($added['exitCode'] !== 0) {
+            throw new \RuntimeException("Could not register '{$normalized}' as a Git safe.directory: " . trim($added['output']));
+        }
+    }
+
+    private function assertNonProductionPath(string $path): void
+    {
+        if (SafetyChecker::productionSourcePathForbidden($path)) {
+            throw new \RuntimeException("Refusing to manage a source workspace at production-like path '{$path}'.");
+        }
+    }
+
+    private function isAbsolutePath(string $path): bool
+    {
+        $path = trim($path);
+
+        return str_starts_with($path, '/') || preg_match('/^[A-Za-z]:[\\\\\/]/', $path) === 1;
+    }
+
+    private function validBranch(string $branch): bool
+    {
+        return preg_match('/^[A-Za-z0-9][A-Za-z0-9._\/-]*$/', $branch) === 1
+            && !str_contains($branch, '..')
+            && !str_contains($branch, '@{')
+            && !str_ends_with($branch, '/')
+            && !str_ends_with($branch, '.');
+    }
+
+    private function pathExists(string $path): bool
+    {
+        return file_exists($path) || is_link($path);
+    }
+
+    private function normalizePath(string $path): string
+    {
+        $normalized = str_replace('\\', '/', trim($path));
+        $drive = preg_match('/^([A-Za-z]:)(?:\/|$)/', $normalized, $matches) === 1 ? $matches[1] : null;
+        $absolute = str_starts_with($normalized, '/');
+        $tail = $drive === null ? $normalized : substr($normalized, strlen($drive));
+        $segments = [];
+        foreach (explode('/', $tail) as $segment) {
+            if ($segment === '' || $segment === '.') {
+                continue;
+            }
+            if ($segment === '..') {
+                array_pop($segments);
+                continue;
+            }
+            $segments[] = $segment;
+        }
+
+        $prefix = $drive ?? ($absolute ? '' : null);
+        if ($prefix === null) {
+            return implode('/', $segments);
+        }
+
+        return $prefix . '/' . implode('/', $segments);
+    }
+
+    private function normalizeRepository(string $repository): string
+    {
+        $normalized = trim(str_replace('\\', '/', $repository));
+        if (preg_match('/^git@([^:]+):(.+)$/i', $normalized, $matches) === 1) {
+            $normalized = 'https://' . $matches[1] . '/' . $matches[2];
+        }
+
+        return preg_replace('#\.git/?$#i', '', rtrim($normalized, '/')) ?? $normalized;
+    }
+}

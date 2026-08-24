@@ -49,6 +49,7 @@ require __DIR__ . '/lib/ProjectConfigCache.php';
 require __DIR__ . '/lib/ProjectConfigResolver.php';
 require __DIR__ . '/lib/ProjectConfigSyncScheduler.php';
 require __DIR__ . '/lib/LocalProjectStateReporter.php';
+require __DIR__ . '/lib/SourceWorkspaceManager.php';
 require __DIR__ . '/lib/SafeFilesystem.php';
 require __DIR__ . '/lib/BuildWorkspace.php';
 require __DIR__ . '/lib/WorkspaceSourcePreparer.php';
@@ -76,6 +77,7 @@ use LocalAgent\ProjectConfigCache;
 use LocalAgent\ProjectConfigResolver;
 use LocalAgent\ProjectConfigSyncScheduler;
 use LocalAgent\ShutdownSignal;
+use LocalAgent\SourceWorkspaceManager;
 use LocalAgent\PushManager;
 use LocalAgent\SafetyChecker;
 use LocalAgent\Security;
@@ -88,7 +90,7 @@ use LocalAgent\WorkspaceSourcePreparer;
  * Hub side for why this never triggers an automatic download). Bump
  * when agent.php or lib/* changes in a way that matters operationally.
  */
-const LOCAL_AGENT_VERSION = '1.4.4';
+const LOCAL_AGENT_VERSION = '1.4.5';
 
 $configPath = __DIR__ . '/config.php';
 
@@ -222,6 +224,7 @@ $knownConfigVersion = null;
 $reloadRequested = false;
 $projects = [];
 $projectStateReporter = new LocalProjectStateReporter();
+$sourceWorkspaceManager = new SourceWorkspaceManager($git, $logger);
 
 $runOnce = in_array('--once', $argv, true);
 
@@ -252,6 +255,10 @@ do {
     if ($syncScheduler->shouldSync($lastSyncedAt, $knownConfigVersion, $heartbeat['project_config_version'], $reloadRequested, time())) {
         $syncResult = syncProjectConfig($client, $cache, $projectConfigResolver, $logger, $legacyProjects);
         $projects = $syncResult['projects'];
+        // Workspace lifecycle belongs to project synchronization, not to a
+        // later Publish/Artifact Job. This also repairs a missing checkout
+        // from a valid cache while the Hub is temporarily unavailable.
+        $sourceWorkspaceManager->reconcile($projects);
         $lastSyncedAt = time();
         if ($syncResult['synced']) {
             $knownConfigVersion = $syncResult['config_version'];
@@ -334,15 +341,6 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
     $repositoryPath = $projectConfig['source_workspace_path'] ?? $projectConfig['local_path'] ?? '';
     $remoteName = $projectConfig['remote_name'] ?? 'origin';
     $branch = $projectConfig['branch'] ?? 'main';
-
-    if (!is_dir($repositoryPath) && is_string($projectConfig['repository_url'] ?? null)) {
-        try {
-            initializeSourceWorkspace($git, $repositoryPath, $projectConfig['repository_url'], $remoteName, $branch, $logger);
-        } catch (Throwable $e) {
-            $client->request('POST', $reportPath, ['status' => 'failed', 'error_message' => $e->getMessage(), 'failure_code' => 'local_workspace_prepare_failed']);
-            return;
-        }
-    }
 
     if (!is_dir($repositoryPath)) {
         $logger->error("Invalid source workspace: project '{$projectKey}' is configured with source_workspace_path '{$repositoryPath}', which does not exist on this machine.");
@@ -540,33 +538,6 @@ function assertWithinMaxRuntime(float $jobStartedAt, int $jobMaxRuntimeSeconds, 
     if ($elapsed >= $jobMaxRuntimeSeconds) {
         throw new JobMaxRuntimeExceededException("Job {$jobId} exceeded the maximum allowed runtime of {$jobMaxRuntimeSeconds}s (elapsed " . round($elapsed) . 's).');
     }
-}
-
-function initializeSourceWorkspace(GitManager $git, string $path, string $repositoryUrl, string $remoteName, string $branch, Logger $logger): void
-{
-    if (SafetyChecker::productionSourcePathForbidden($path)) {
-        throw new RuntimeException("Refusing to initialize a source workspace at production-like path '{$path}'.");
-    }
-    if (filter_var($repositoryUrl, FILTER_VALIDATE_URL) === false || !str_starts_with(strtolower($repositoryUrl), 'https://')) {
-        throw new RuntimeException('Source workspace repository_url must be an HTTPS URL.');
-    }
-    if (!is_dir($path) && !mkdir($path, 0700, true) && !is_dir($path)) {
-        throw new RuntimeException("Could not create source workspace '{$path}'.");
-    }
-
-    foreach ([
-        [['git', 'init'], 30],
-        [['git', 'remote', 'add', $remoteName, $repositoryUrl], 30],
-        [['git', 'fetch', '--prune', $remoteName, $branch], $git->timeoutFor('fetch')],
-        [['git', 'checkout', '-B', $branch, "refs/remotes/{$remoteName}/{$branch}"], 60],
-    ] as [$command, $timeout]) {
-        $result = $git->run($command, $path, $timeout);
-        if ($result['exitCode'] !== 0) {
-            throw new RuntimeException('Source workspace initialization failed: ' . trim($result['output']));
-        }
-    }
-
-    $logger->info("Initialized isolated source workspace {$path} from {$repositoryUrl} ({$branch}).");
 }
 
 /**
