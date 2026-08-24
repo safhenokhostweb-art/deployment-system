@@ -239,7 +239,7 @@ return [
 
     // First Server Agent release that consumes the Hub-signed persistent
     // runtime contract and performs privileged preparation before activation.
-    'min_server_agent_version_for_persistent_runtime' => (string) env('DEPLOYMENT_MIN_SERVER_AGENT_VERSION_FOR_PERSISTENT_RUNTIME', '1.3.1'),
+    'min_server_agent_version_for_persistent_runtime' => (string) env('DEPLOYMENT_MIN_SERVER_AGENT_VERSION_FOR_PERSISTENT_RUNTIME', '1.3.2'),
 
     /*
     |--------------------------------------------------------------------------

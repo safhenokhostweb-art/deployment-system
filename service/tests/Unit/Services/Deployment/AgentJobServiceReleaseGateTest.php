@@ -100,9 +100,10 @@ class AgentJobServiceReleaseGateTest extends TestCase
 
     public function test_current_agent_receives_signed_persistent_runtime_contract(): void
     {
-        $server = $this->serverWithAgent('1.3.1');
+        $server = $this->serverWithAgent('1.3.2');
         $artifact = $this->artifactFor($server);
         $artifact->project->update([
+            'artifact_preserve_paths' => ['.env'],
             'artifact_persistent_paths' => ['public/uploads' => 'uploads'],
             'artifact_persistent_root' => '/var/www/customer-site-shared',
         ]);
@@ -113,13 +114,14 @@ class AgentJobServiceReleaseGateTest extends TestCase
         $this->assertSame([
             'paths' => ['public/uploads' => 'uploads'],
             'root' => '/var/www/customer-site-shared',
+            'preserve_paths' => ['.env'],
         ], $claimed['job']['artifact_persistence']);
         $this->assertSame(Deployment::STATUS_RUNNING, $deployment->fresh()->status);
     }
 
-    public function test_persistent_runtime_contract_rejects_pre_1_3_1_agent(): void
+    public function test_persistent_runtime_contract_rejects_pre_1_3_2_agent(): void
     {
-        $server = $this->serverWithAgent('1.3.0');
+        $server = $this->serverWithAgent('1.3.1');
         $artifact = $this->artifactFor($server);
         $artifact->project->update([
             'artifact_persistent_paths' => ['public/uploads' => 'uploads'],

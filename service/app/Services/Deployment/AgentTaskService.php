@@ -351,6 +351,7 @@ class AgentTaskService
                     ? [
                         'paths' => $task->deployment->project->artifact_persistent_paths,
                         'root' => $task->deployment->project->artifact_persistent_root,
+                        'preserve_paths' => $task->deployment->project->artifact_preserve_paths ?? [],
                     ]
                     : null,
             'recipe_rollback' => $task->deployment->project->usesDeploymentRecipe()

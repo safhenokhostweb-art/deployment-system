@@ -24,7 +24,7 @@ layout it is `/var/www/customer-site/public/uploads`. The persistent target is
 the same in both layouts.
 
 The Hub stores this mapping and sends it only in the signed deployment job.
-Server Agent 1.3.1 or newer is required. Older agents fail closed at claim time.
+Server Agent 1.3.2 or newer is required. Older agents fail closed at claim time.
 
 ## Activation lifecycle
 
@@ -96,8 +96,7 @@ separately approved retention decision.
 
 1. Complete and reconcile the copy procedure above.
 2. Configure the Hub mapping exactly as shown under “Scope and layout”.
-3. Confirm the Server Agent heartbeat reports version 1.3.1 or newer.
+3. Confirm the Server Agent heartbeat reports version 1.3.2 or newer.
 4. Build and deploy through the normal complete-Artifact gate.
 5. Verify `readlink -f` for the active `public/uploads`, ownership/modes, a
    known uploaded file, and the customer-facing HTTP health check.
-

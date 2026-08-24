@@ -52,7 +52,7 @@ use DeploymentAgent\WorkspaceScanner;
  * can flag servers running an outdated agent. Bump this when agent.php or
  * lib/* changes in a way that matters operationally.
  */
-const AGENT_VERSION = '1.3.1';
+const AGENT_VERSION = '1.3.2';
 
 $configPath = __DIR__ . '/config.php';
 

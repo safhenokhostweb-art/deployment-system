@@ -80,7 +80,8 @@ final class PipelineExecutor
         $usedArtifact = false;
         $runtimePermissionsNormalized = false;
         if (!empty($job['artifact'])) {
-            $persistence = is_array($job['artifact_persistence'] ?? null)
+            $hasSignedPersistence = is_array($job['artifact_persistence'] ?? null);
+            $persistence = $hasSignedPersistence
                 ? $job['artifact_persistence']
                 : [];
             $persistentPaths = is_array($persistence['paths'] ?? null)
@@ -89,6 +90,21 @@ final class PipelineExecutor
             $persistentRoot = is_string($persistence['root'] ?? null)
                 ? $persistence['root']
                 : ($projectConfig['artifact_persistent_root'] ?? null);
+            if (array_key_exists('preserve_paths', $persistence) && is_array($persistence['preserve_paths'])) {
+                $preservePaths = $persistence['preserve_paths'];
+            } elseif ($hasSignedPersistence) {
+                // Compatibility for Hub 1.3.1's partial signed contract:
+                // retain legacy local preserve entries except those now
+                // owned by the signed persistent paths. This keeps .env but
+                // removes stale database/database.sqlite-style overlaps,
+                // allowing the Hub to deploy the protocol-completion fix.
+                $preservePaths = self::withoutPersistentOverlaps(
+                    $projectConfig['artifact_preserve_paths'] ?? [],
+                    $persistentPaths,
+                );
+            } else {
+                $preservePaths = $projectConfig['artifact_preserve_paths'] ?? [];
+            }
 
             // Persistent targets are privileged runtime state. Prepare and
             // normalize them through the fixed project-key allowlist before
@@ -153,7 +169,7 @@ final class PipelineExecutor
             $prepared = $this->artifactManager->prepare(
                 $job['artifact'],
                 $workingDirectory,
-                $projectConfig['artifact_preserve_paths'] ?? [],
+                $preservePaths,
                 $persistentPaths,
                 $persistentRoot,
                 null,
@@ -466,6 +482,32 @@ final class PipelineExecutor
         }
 
         return null;
+    }
+
+    /**
+     * @param array<int, string> $preservePaths
+     * @param array<int|string, string> $persistentPaths
+     * @return array<int, string>
+     */
+    private static function withoutPersistentOverlaps(array $preservePaths, array $persistentPaths): array
+    {
+        $releasePaths = [];
+        foreach ($persistentPaths as $releaseKey => $targetValue) {
+            $releasePaths[] = rtrim(str_replace('\\', '/', trim(is_string($releaseKey) ? $releaseKey : $targetValue)), '/');
+        }
+
+        return array_values(array_filter($preservePaths, static function (string $preserve) use ($releasePaths): bool {
+            $preserve = rtrim(str_replace('\\', '/', trim($preserve)), '/');
+            foreach ($releasePaths as $persistent) {
+                if ($preserve === $persistent
+                    || str_starts_with($preserve . '/', $persistent . '/')
+                    || str_starts_with($persistent . '/', $preserve . '/')) {
+                    return false;
+                }
+            }
+
+            return true;
+        }));
     }
 
     /** @return array{exitCode: int, output: string, timedOut: bool, durationMs: int} */

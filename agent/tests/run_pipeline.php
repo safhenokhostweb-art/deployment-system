@@ -858,6 +858,14 @@ check('pipeline HTTP 500 blocks success with health_check_failed', end($healthEr
 @unlink($hub['logPath']);
 file_put_contents($hub['logPath'], '');
 
+// Upgrade bridge: Hub 1.3.1 sent signed persistence without the matching
+// preserve list. Server Agent 1.3.2 must retain .env while dropping only
+// stale local preserve entries owned by persistent paths.
+$overlapFilter = new ReflectionMethod(PipelineExecutor::class, 'withoutPersistentOverlaps');
+$overlapFilter->setAccessible(true);
+$filteredPreserve = $overlapFilter->invoke(null, ['.env', 'database/database.sqlite'], ['database', 'storage/app/artifacts']);
+check('partial signed persistence keeps disjoint .env and removes stale database preserve overlap', $filteredPreserve === ['.env'], $failures, $passCount);
+
 // Typed privileged operations are a closed argv allowlist.  This source-level
 // contract test is intentionally platform-independent: Windows CI has no
 // sudo, while production must never substitute a shell command here.

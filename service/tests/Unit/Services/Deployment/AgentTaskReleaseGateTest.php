@@ -92,10 +92,11 @@ class AgentTaskReleaseGateTest extends TestCase
     public function test_task_payload_carries_persistent_runtime_mapping(): void
     {
         $ctx = $this->makeTask(['project' => [
+            'artifact_preserve_paths' => ['.env'],
             'artifact_persistent_paths' => ['public/uploads' => 'uploads'],
             'artifact_persistent_root' => '/var/www/customer-site-shared',
         ]]);
-        $ctx['agent']->update(['agent_version' => '1.3.1']);
+        $ctx['agent']->update(['agent_version' => '1.3.2']);
         $this->attachArtifact($ctx, $ctx['deployment']->commit_hash);
 
         $claimed = app(AgentTaskService::class)->claimNextTask($ctx['agent']);
@@ -103,6 +104,7 @@ class AgentTaskReleaseGateTest extends TestCase
         $this->assertSame([
             'paths' => ['public/uploads' => 'uploads'],
             'root' => '/var/www/customer-site-shared',
+            'preserve_paths' => ['.env'],
         ], $claimed['job']['artifact_persistence']);
     }
 

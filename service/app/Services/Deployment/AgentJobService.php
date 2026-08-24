@@ -209,6 +209,11 @@ class AgentJobService
                         ? [
                             'paths' => $project->artifact_persistent_paths,
                             'root' => $project->artifact_persistent_root,
+                            // Preserve and persistence are one atomic
+                            // contract. Omitting this used to combine new Hub
+                            // persistence with stale server-local preserve
+                            // paths and trigger a false overlap rejection.
+                            'preserve_paths' => $project->artifact_preserve_paths ?? [],
                         ]
                         : null,
                 // A rollback of a recipe-driven project never re-runs the
