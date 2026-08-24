@@ -2,7 +2,10 @@
 
 namespace Tests\Feature\Dashboard;
 
+use App\Models\Artifact;
+use App\Models\Deployment;
 use App\Models\Project;
+use App\Models\PublishJob;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -169,6 +172,40 @@ class ProjectArtifactSettingsUpdateTest extends TestCase
         $this->assertSame('/var/www/customer-site-shared', $project->artifact_persistent_root);
     }
 
+    public function test_saving_customer_persistence_contract_has_no_operational_side_effects(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = Project::factory()->create(['project_key' => 'customer-site']);
+
+        $this->actingAs($admin)->put(route('projects.update', $project), $this->payload($project, [
+            'artifact_persistent_paths_text' => 'public/uploads => uploads',
+            'artifact_persistent_root' => '/var/www/customer-site-shared',
+        ]))->assertRedirect(route('projects.show', $project));
+
+        $project->refresh();
+        $this->assertSame(['public/uploads' => 'uploads'], $project->artifact_persistent_paths);
+        $this->assertSame('/var/www/customer-site-shared', $project->artifact_persistent_root);
+        $this->assertDatabaseCount((new Deployment())->getTable(), 0);
+        $this->assertDatabaseCount((new PublishJob())->getTable(), 0);
+        $this->assertDatabaseCount((new Artifact())->getTable(), 0);
+    }
+
+    public function test_customer_site_rejects_current_release_layout_assumptions(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = Project::factory()->create(['project_key' => 'customer-site']);
+
+        foreach (['current/public/uploads', '/var/www/customer-site/current/public/uploads'] as $releasePath) {
+            $this->actingAs($admin)->from(route('projects.edit', $project))
+                ->put(route('projects.update', $project), $this->payload($project, [
+                    'artifact_persistent_paths' => [$releasePath => 'uploads'],
+                    'artifact_persistent_root' => '/var/www/customer-site-shared',
+                ]))
+                ->assertRedirect(route('projects.edit', $project))
+                ->assertSessionHasErrors('artifact_persistent_paths');
+        }
+    }
+
     public function test_mapping_textarea_round_trips_release_and_shared_paths(): void
     {
         $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
@@ -319,5 +356,16 @@ class ProjectArtifactSettingsUpdateTest extends TestCase
             ->assertSee('artifact_persistent_root', false)
             ->assertSee('database', false)
             ->assertSee('/var/www/deployment-system/persistent', false);
+    }
+
+    public function test_customer_edit_form_documents_the_fixed_active_layout(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = Project::factory()->create(['project_key' => 'customer-site']);
+
+        $this->actingAs($admin)->get(route('projects.edit', $project))
+            ->assertOk()
+            ->assertSee('/var/www/customer-site/public/uploads', false)
+            ->assertSee('A <code>/current</code> release layout is not supported.', false);
     }
 }

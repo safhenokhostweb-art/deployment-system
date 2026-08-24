@@ -96,7 +96,7 @@ class AgentTaskReleaseGateTest extends TestCase
             'artifact_persistent_paths' => ['public/uploads' => 'uploads'],
             'artifact_persistent_root' => '/var/www/customer-site-shared',
         ]]);
-        $ctx['agent']->update(['agent_version' => '1.3.2']);
+        $ctx['agent']->update(['agent_version' => '1.3.3']);
         $this->attachArtifact($ctx, $ctx['deployment']->commit_hash);
 
         $claimed = app(AgentTaskService::class)->claimNextTask($ctx['agent']);

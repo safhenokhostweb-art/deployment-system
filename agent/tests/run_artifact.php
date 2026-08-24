@@ -397,7 +397,9 @@ if ($symlinkSupported) {
     $customerUploads = $customerRoot . '/uploads';
     mkdir($customerUploads, 0775, true);
     file_put_contents($customerUploads . '/customer-file.jpg', 'persistent-upload');
-    $customerSite = $workspace . '/customer-site-current';
+    // The release path is the working directory itself; customer-site has
+    // no `current/` indirection in the supported production layout.
+    $customerSite = $workspace . '/customer-site';
 
     $customerFirst = buildFixtureZip($workspace, 'customer-first', 'customer first');
     registerManifestEntry($hub['manifestPath'], 'artifact-customer-first', $customerFirst['path']);
@@ -412,6 +414,7 @@ if ($symlinkSupported) {
     check('customer persistence: artifact without public/uploads activates successfully', $customerFirstResult['status'] === 'succeeded', $failures, $passCount);
     check('customer persistence: public/uploads is a symlink', is_link($customerSite . '/public/uploads'), $failures, $passCount);
     check('customer persistence: symlink targets the shared uploads root exactly', realpath($customerSite . '/public/uploads') === realpath($customerUploads), $failures, $passCount);
+    check('customer persistence: relative mapping resolves directly below the working directory', !file_exists($customerSite . '/current/public/uploads'), $failures, $passCount);
 
     $customerSecond = buildFixtureZip($workspace, 'customer-second', 'customer second', true);
     registerManifestEntry($hub['manifestPath'], 'artifact-customer-second', $customerSecond['path']);
@@ -435,7 +438,7 @@ if ($symlinkSupported) {
     // Developer Mode) — the fail-closed contract above is still fully
     // exercised. Count the gated assertions as satisfied to keep the run
     // green here while the same scenario runs for real on Linux CI.
-    $passCount += 17;
+    $passCount += 18;
 }
 
 

@@ -378,13 +378,38 @@ $normalizationPipelineExecutor->execute([
     'artifact' => ['public_id' => 'artifact-persistent-preflight-failure', 'checksum_sha256' => $persistentFailureFixture['checksum'], 'size_bytes' => $persistentFailureFixture['size']],
     'artifact_persistence' => ['paths' => ['public/uploads' => 'uploads'], 'root' => '/var/www/customer-site-shared'],
     'pipeline' => [],
-], ['working_directory' => $persistentFailureSite], 30);
+], ['working_directory' => '/var/www/customer-site'], 30);
 check('persistent preflight failure: existing release remains active', (string) @file_get_contents($persistentFailureSite . '/sentinel.txt') === 'current-release', $failures, $passCount);
 check('persistent preflight failure: candidate artifact is never activated', !is_file($persistentFailureSite . '/index.php'), $failures, $passCount);
+check('persistent preflight: customer layout resolves against /var/www/customer-site', ($normalizationCalls[0][1] ?? null) === '/var/www/customer-site', $failures, $passCount);
 $persistentFailureLogs = array_values(array_filter(readHubLog($hub['logPath']), static fn ($e) => $e['path'] === '/api/agent/jobs/job-persistent-preflight-failure/log'));
 check('persistent preflight failure: only pre-activation preparation is logged', array_map(static fn ($e) => $e['body']['step_name'] ?? null, $persistentFailureLogs) === ['prepare persistent runtime'], $failures, $passCount);
 $persistentFailureStatuses = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-persistent-preflight-failure/status' ? ($e['body']['status'] ?? null) : null, readHubLog($hub['logPath']))));
 check('persistent preflight failure: explicit failed state is reported', $persistentFailureStatuses === ['running', 'failed'], $failures, $passCount);
+
+@unlink($hub['logPath']);
+file_put_contents($hub['logPath'], '');
+
+// A future `/current` layout must not be guessed from the relative mapping.
+// It requires an explicit release-layout migration; reject it before the
+// privileged helper, artifact preparation, or live filesystem is touched.
+$normalizationShouldFail = false;
+$normalizationCalls = [];
+$normalizationPipelineExecutor->execute([
+    'id' => 'job-customer-current-layout-rejected',
+    'action' => 'deploy',
+    'project_key' => 'customer-site',
+    'commit_hash' => str_repeat('2', 40),
+    'branch' => 'main',
+    'artifact' => ['public_id' => 'artifact-persistent-preflight-failure', 'checksum_sha256' => $persistentFailureFixture['checksum'], 'size_bytes' => $persistentFailureFixture['size']],
+    'artifact_persistence' => ['paths' => ['public/uploads' => 'uploads'], 'root' => '/var/www/customer-site-shared'],
+    'pipeline' => [],
+], ['working_directory' => '/var/www/customer-site/current'], 30);
+check('customer current layout: privileged helper is not invoked', $normalizationCalls === [], $failures, $passCount);
+$invalidLayoutLogs = array_values(array_filter(readHubLog($hub['logPath']), static fn ($e) => $e['path'] === '/api/agent/jobs/job-customer-current-layout-rejected/log'));
+check('customer current layout: rejected before activation with explicit layout message', ($invalidLayoutLogs[0]['body']['failure_code'] ?? null) === 'artifact_persistent_config_invalid' && str_contains((string) ($invalidLayoutLogs[0]['body']['output'] ?? ''), '/current'), $failures, $passCount);
+$invalidLayoutStatuses = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-customer-current-layout-rejected/status' ? ($e['body']['status'] ?? null) : null, readHubLog($hub['logPath']))));
+check('customer current layout: reports running then failed', $invalidLayoutStatuses === ['running', 'failed'], $failures, $passCount);
 
 @unlink($hub['logPath']);
 file_put_contents($hub['logPath'], '');

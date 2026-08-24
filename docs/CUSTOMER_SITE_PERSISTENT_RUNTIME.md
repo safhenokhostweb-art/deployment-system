@@ -13,18 +13,19 @@ artifact_persistent_root: /var/www/customer-site-shared
 artifact_persistent_paths:
   public/uploads => uploads
 
-/var/www/customer-site[-current]/public/uploads
+/var/www/customer-site/public/uploads
   -> /var/www/customer-site-shared/uploads
 ```
 
-The exact release-visible prefix is the Server Agent's configured
-`working_directory`. If it is `/var/www/customer-site/current`, the link is
-`/var/www/customer-site/current/public/uploads`; with the legacy atomic-swap
-layout it is `/var/www/customer-site/public/uploads`. The persistent target is
-the same in both layouts.
+The production release layout is intentionally fixed at the Server Agent
+`working_directory` `/var/www/customer-site`; there is no `current/`
+indirection. The Agent rejects any customer-site persistence job configured
+with another working directory, including `/var/www/customer-site/current`.
+Supporting a different release root requires a separately implemented and
+reviewed release-layout migration.
 
 The Hub stores this mapping and sends it only in the signed deployment job.
-Server Agent 1.3.2 or newer is required. Older agents fail closed at claim time.
+Server Agent 1.3.3 or newer is required. Older agents fail closed at claim time.
 
 ## Activation lifecycle
 
@@ -96,7 +97,7 @@ separately approved retention decision.
 
 1. Complete and reconcile the copy procedure above.
 2. Configure the Hub mapping exactly as shown under “Scope and layout”.
-3. Confirm the Server Agent heartbeat reports version 1.3.2 or newer.
+3. Confirm the Server Agent heartbeat reports version 1.3.3 or newer.
 4. Build and deploy through the normal complete-Artifact gate.
-5. Verify `readlink -f` for the active `public/uploads`, ownership/modes, a
+5. Verify `readlink -f /var/www/customer-site/public/uploads`, ownership/modes, a
    known uploaded file, and the customer-facing HTTP health check.

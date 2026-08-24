@@ -114,7 +114,7 @@ final class PipelineExecutor
             if ($persistentPaths !== []) {
                 $sequence++;
                 $command = 'sudo -n /usr/local/sbin/deployment-runtime-permissions ' . $job['project_key'];
-                $contractError = self::persistentContractError($job['project_key'], $persistentPaths, $persistentRoot);
+                $contractError = self::persistentContractError($job['project_key'], $persistentPaths, $persistentRoot, $workingDirectory);
                 if ($contractError !== null) {
                     $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
                         'sequence' => $sequence,
@@ -468,7 +468,7 @@ final class PipelineExecutor
     }
 
     /** @param array<int|string, string> $persistentPaths */
-    private static function persistentContractError(string $projectKey, array $persistentPaths, ?string $persistentRoot): ?string
+    private static function persistentContractError(string $projectKey, array $persistentPaths, ?string $persistentRoot, string $workingDirectory): ?string
     {
         if (!is_string($persistentRoot) || !str_starts_with($persistentRoot, '/')) {
             return 'Persistent runtime root must be an absolute Unix path; the live release was not changed.';
@@ -479,6 +479,15 @@ final class PipelineExecutor
             || $persistentPaths !== ['public/uploads' => 'uploads']
         )) {
             return 'customer-site persistent runtime must map public/uploads to /var/www/customer-site-shared/uploads; the live release was not changed.';
+        }
+
+        // The production customer-site release currently uses the legacy
+        // atomic-swap root directly. There is deliberately no `current/`
+        // indirection. Fail closed instead of creating a valid-looking link
+        // in an unserved release layout; supporting another layout requires
+        // a separately implemented and reviewed release-layout migration.
+        if ($projectKey === 'customer-site' && rtrim($workingDirectory, '/') !== '/var/www/customer-site') {
+            return "customer-site working_directory must be /var/www/customer-site for the current release layout; '/var/www/customer-site/current' is not supported. The live release was not changed.";
         }
 
         return null;

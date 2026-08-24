@@ -82,6 +82,9 @@
         <label for="artifact_persistent_root">Artifact persistent root</label>
         <input type="text" id="artifact_persistent_root" name="artifact_persistent_root" value="{{ old('artifact_persistent_root', $project->artifact_persistent_root) }}" dir="ltr" style="text-align:left;">
         <p class="muted">Absolute directory outside the release tree. The signed deployment job carries this Hub-managed contract; legacy server-local config remains a fallback.</p>
+        @if ($project->project_key === 'customer-site')
+            <p class="muted"><strong>Customer-site fixed contract:</strong> enter <code>public/uploads =&gt; uploads</code> and <code>/var/www/customer-site-shared</code>. The active working directory is <code>/var/www/customer-site</code>, so the resulting link is <code>/var/www/customer-site/public/uploads</code>. A <code>/current</code> release layout is not supported.</p>
+        @endif
 
         <input type="hidden" name="requires_complete_artifact" value="0">
         <label>
