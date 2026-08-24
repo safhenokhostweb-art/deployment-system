@@ -77,7 +77,9 @@ class PublishWorkflowTest extends TestCase
         $mapping->update([
             'local_head_sha' => str_repeat('a', 40),
             'remote_tracking_sha' => str_repeat('a', 40),
+            'reported_branch' => 'main',
             'working_tree_dirty' => false,
+            'reported_at' => now(),
         ]);
 
         $response = $this->actingAs($developer)->post(route('projects.publish', $project), [
@@ -102,6 +104,7 @@ class PublishWorkflowTest extends TestCase
         $this->actingAs($developer)->post(route('projects.publish', $project), [
             'local_project_mapping_id' => $mapping->id,
             'commit_hash' => str_repeat('b', 40),
+            'commit_selection_mode' => 'advanced',
         ])->assertRedirect();
 
         $this->assertSame(PublishJob::ACTION_BUILD_ARTIFACT, PublishJob::first()->action);
@@ -120,6 +123,9 @@ class PublishWorkflowTest extends TestCase
             'source_workspace_path' => '/opt/deployment-agent/workspaces/customer-site',
             'production_path' => '/var/www/customer-site',
             'local_head_sha' => str_repeat('c', 40),
+            'reported_branch' => 'main',
+            'working_tree_dirty' => false,
+            'reported_at' => now(),
         ]);
 
         $this->actingAs($developer)->post(route('projects.publish', $project), [

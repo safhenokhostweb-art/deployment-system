@@ -344,12 +344,12 @@
             <p class="muted" style="margin-top:0.6rem;">{{ __('ui.publish.artifact_required_hint') }}</p>
         @endif
 
-        <form method="POST" action="{{ route('projects.publish', $project) }}" style="display:flex;gap:0.6rem;align-items:flex-end;flex-wrap:wrap;margin-top:0.6rem;">
+        <form method="POST" action="{{ route('projects.publish', $project) }}" id="artifact-publish-form" style="display:flex;gap:0.6rem;align-items:flex-end;flex-wrap:wrap;margin-top:0.6rem;">
             @csrf
             @if ($project->localProjectMappings->count() > 1)
                 <div>
                     <label>{{ __('ui.publish.select_local_agent') }}</label>
-                    <select name="local_project_mapping_id" required>
+                    <select name="local_project_mapping_id" id="artifact-mapping" required>
                         @foreach ($project->localProjectMappings as $mapping)
                             <option value="{{ $mapping->id }}">{{ $mapping->localAgent->name ?? $mapping->localAgent->public_id }}</option>
                         @endforeach
@@ -359,13 +359,92 @@
                 <input type="hidden" name="local_project_mapping_id" value="{{ $project->localProjectMappings->first()->id }}">
             @endif
             @if ($project->requires_complete_artifact)
-                <div>
-                    <label for="commit_hash">{{ __('ui.publish.artifact_commit_label') }}</label>
-                    <input type="text" id="commit_hash" name="commit_hash" maxlength="40" dir="ltr" style="text-align:left;" value="{{ $project->localProjectMappings->first()?->remote_tracking_sha ?? $project->localProjectMappings->first()?->local_head_sha }}">
+                @php($defaultArtifactCommit = $artifactCommitOptions[0] ?? [])
+                @php($workspaceStateLabels = ['clean' => '✓ '.__('ui.publish.workspace_clean'), 'dirty' => __('ui.publish.workspace_dirty'), 'not_reported' => __('ui.publish.workspace_not_reported'), 'branch_mismatch' => __('ui.publish.workspace_branch_mismatch')])
+                <input type="hidden" name="commit_selection_mode" id="commit-selection-mode" value="latest">
+                <input type="hidden" name="commit_hash" id="commit-hash" value="{{ $defaultArtifactCommit['workspace_sha'] ?? '' }}">
+                <div id="artifact-commit-selector" style="flex-basis:100%;border:1px solid var(--border, #d1d5db);border-radius:0.5rem;padding:0.8rem;">
+                    <strong>{{ __('ui.publish.latest_verified_commit') }}</strong>
+                    <dl style="display:grid;grid-template-columns:max-content 1fr;gap:0.35rem 0.8rem;margin:0.65rem 0;">
+                        <dt>{{ __('ui.publish.source_workspace') }}</dt><dd id="artifact-source" dir="ltr" style="margin:0;overflow-wrap:anywhere;">{{ $defaultArtifactCommit['source_workspace_path'] ?? '—' }}</dd>
+                        <dt>{{ __('ui.publish.branch') }}</dt><dd id="artifact-branch" dir="ltr" style="margin:0;">{{ $defaultArtifactCommit['branch'] ?? '—' }}</dd>
+                        <dt>{{ __('ui.publish.workspace_head') }}</dt><dd id="artifact-workspace-head" dir="ltr" style="margin:0;">{{ isset($defaultArtifactCommit['workspace_sha']) ? ($defaultArtifactCommit['workspace_short_sha'].' ('.$defaultArtifactCommit['workspace_sha'].')') : '—' }}</dd>
+                        <dt>{{ __('ui.publish.last_sync') }}</dt><dd id="artifact-last-sync" style="margin:0;">{{ $defaultArtifactCommit['reported_at_human'] ?? $defaultArtifactCommit['reported_at'] ?? '—' }}</dd>
+                        <dt>{{ __('ui.publish.workspace_status') }}</dt><dd id="artifact-workspace-status" style="margin:0;">{{ $workspaceStateLabels[$defaultArtifactCommit['workspace_state'] ?? ''] ?? '—' }}</dd>
+                        <dt>{{ __('ui.publish.github_head') }}</dt><dd id="artifact-github-head" dir="ltr" style="margin:0;">{{ isset($defaultArtifactCommit['github_sha']) ? ($defaultArtifactCommit['github_short_sha'].' ('.$defaultArtifactCommit['github_sha'].')') : __('ui.publish.github_unavailable') }}</dd>
+                    </dl>
+                    <p id="artifact-github-warning" class="muted" style="display:{{ ($defaultArtifactCommit['github_matches_workspace'] ?? null) === false ? 'block' : 'none' }};color:#b45309;">{{ __('ui.publish.github_workspace_mismatch') }}</p>
+                    <p id="artifact-existing" style="display:{{ !empty($defaultArtifactCommit['existing_artifact_id']) ? 'block' : 'none' }};color:#047857;">{{ __('ui.publish.artifact_already_exists') }}</p>
+                    <details id="artifact-advanced" style="margin-top:0.65rem;">
+                        <summary>{{ __('ui.publish.advanced_choose_commit') }}</summary>
+                        <label for="advanced-commit-hash">{{ __('ui.publish.artifact_commit_label') }}</label>
+                        <input type="text" id="advanced-commit-hash" maxlength="40" pattern="[0-9a-f]{40}" dir="ltr" style="text-align:left;max-width:32rem;" autocomplete="off">
+                        <p class="muted">{{ __('ui.publish.advanced_commit_hint') }}</p>
+                    </details>
                 </div>
             @endif
-            <button type="submit" class="btn btn-primary">{{ $project->requires_complete_artifact ? __('ui.publish.artifact_button') : __('ui.publish.button') }}</button>
+            <button type="submit" name="artifact_action" value="build" id="artifact-build-button" class="btn btn-primary" @if($project->requires_complete_artifact && (empty($defaultArtifactCommit['is_verified']) || !empty($defaultArtifactCommit['existing_artifact_id']))) disabled @endif>{{ $project->requires_complete_artifact ? __('ui.publish.artifact_button') : __('ui.publish.button') }}</button>
+            @if ($project->requires_complete_artifact)
+                <button type="submit" name="artifact_action" value="use_existing" id="artifact-use-existing" class="btn" style="display:{{ !empty($defaultArtifactCommit['existing_artifact_id']) ? 'inline-flex' : 'none' }};">{{ __('ui.publish.use_existing_artifact') }}</button>
+            @endif
         </form>
+
+        @if ($project->requires_complete_artifact)
+            <script>
+                (() => {
+                    const options = @json($artifactCommitOptions);
+                    const workspaceStateLabels = @json($workspaceStateLabels);
+                    const mapping = document.getElementById('artifact-mapping');
+                    const mode = document.getElementById('commit-selection-mode');
+                    const commit = document.getElementById('commit-hash');
+                    const advanced = document.getElementById('artifact-advanced');
+                    const advancedCommit = document.getElementById('advanced-commit-hash');
+                    const build = document.getElementById('artifact-build-button');
+                    const reuse = document.getElementById('artifact-use-existing');
+                    const text = (id, value) => document.getElementById(id).textContent = value || '—';
+
+                    function selectedOption() {
+                        const mappingId = mapping ? Number(mapping.value) : Number(options[0]?.mapping_id);
+                        return options.find(option => Number(option.mapping_id) === mappingId) || options[0];
+                    }
+
+                    function render() {
+                        const option = selectedOption();
+                        if (!option) return;
+                        text('artifact-source', option.source_workspace_path);
+                        text('artifact-branch', option.branch);
+                        text('artifact-workspace-head', option.workspace_sha ? `${option.workspace_short_sha} (${option.workspace_sha})` : null);
+                        text('artifact-last-sync', option.reported_at_human || option.reported_at);
+                        text('artifact-workspace-status', workspaceStateLabels[option.workspace_state]);
+                        text('artifact-github-head', option.github_sha ? `${option.github_short_sha} (${option.github_sha})` : '{{ __('ui.publish.github_unavailable') }}');
+                        document.getElementById('artifact-github-warning').style.display = option.github_matches_workspace === false ? 'block' : 'none';
+                        document.getElementById('artifact-existing').style.display = option.existing_artifact_id ? 'block' : 'none';
+
+                        if (!advanced.open) {
+                            mode.value = 'latest';
+                            commit.value = option.workspace_sha || '';
+                            build.disabled = !option.is_verified || Boolean(option.existing_artifact_id);
+                            reuse.style.display = option.existing_artifact_id ? 'inline-flex' : 'none';
+                        }
+                    }
+
+                    mapping?.addEventListener('change', render);
+                    advanced.addEventListener('toggle', () => {
+                        if (advanced.open) {
+                            mode.value = 'advanced';
+                            advancedCommit.value = selectedOption()?.workspace_sha || '';
+                            commit.value = advancedCommit.value;
+                            build.disabled = false;
+                            reuse.style.display = 'none';
+                        } else {
+                            render();
+                        }
+                    });
+                    advancedCommit.addEventListener('input', () => commit.value = advancedCommit.value.trim().toLowerCase());
+                    render();
+                })();
+            </script>
+        @endif
 
         <form method="POST" action="{{ route('projects.publish.rollback', $project) }}" id="rollback-publish-form" style="display:inline;margin-top:0.6rem;">
             @csrf

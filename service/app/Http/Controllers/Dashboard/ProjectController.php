@@ -17,6 +17,7 @@ use App\Services\Deployment\Recipe\RecipeValidator;
 use App\Services\Deployment\TransferTraceService;
 use App\Services\GitHub\GitHubApiException;
 use App\Services\GitHub\GitHubAppClient;
+use App\Services\Publish\ArtifactCommitSelector;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
@@ -86,6 +87,7 @@ class ProjectController extends Controller
         private readonly GitHubAppClient $github,
         private readonly RecipeValidator $recipeValidator,
         private readonly TransferTraceService $transferTrace,
+        private readonly ArtifactCommitSelector $artifactCommits,
     ) {
     }
 
@@ -260,7 +262,36 @@ class ProjectController extends Controller
 
         $transferTrace = $this->transferTrace->forProject($project);
 
-        return view('projects.show', compact('project', 'deployments', 'webhookUrl', 'maskedWebhookSecret', 'availableServers', 'availableUsers', 'connectableGithubAccounts', 'openChangeDetection', 'transferTrace'));
+        $artifactCommitOptions = $project->requires_complete_artifact
+            ? $this->artifactCommits->options($project, $this->githubHeadsForArtifactSelector($project))
+            : [];
+
+        return view('projects.show', compact('project', 'deployments', 'webhookUrl', 'maskedWebhookSecret', 'availableServers', 'availableUsers', 'connectableGithubAccounts', 'openChangeDetection', 'transferTrace', 'artifactCommitOptions'));
+    }
+
+    /** @return array<string, string|null> */
+    private function githubHeadsForArtifactSelector(Project $project): array
+    {
+        if (! $project->requires_complete_artifact || ! $project->githubAccount?->isConnected() || ! $this->github->isConfigured()) {
+            return [];
+        }
+
+        $repositoryParts = explode('/', trim($project->repository, '/'));
+        if (count($repositoryParts) !== 2) {
+            return [];
+        }
+
+        try {
+            $token = $this->github->createInstallationToken($project->githubAccount->installation_id)['token'];
+            $heads = [];
+            foreach ($project->localProjectMappings->map->effectiveBranch()->unique() as $branch) {
+                $heads[$branch] = $this->github->getBranchHead($token, $repositoryParts[0], $repositoryParts[1], $branch);
+            }
+
+            return $heads;
+        } catch (GitHubApiException) {
+            return [];
+        }
     }
 
     public function rotateWebhookSecret(Request $request, Project $project): RedirectResponse

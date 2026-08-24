@@ -121,6 +121,24 @@ class GitHubAppClient
         return array_map(static fn (array $branch) => $branch['name'], $response->json() ?? []);
     }
 
+    public function getBranchHead(string $installationToken, string $owner, string $repo, string $branch): string
+    {
+        $response = Http::withToken($installationToken)
+            ->withHeaders(['Accept' => 'application/vnd.github+json', 'X-GitHub-Api-Version' => '2022-11-28'])
+            ->get(self::API_BASE . "/repos/{$owner}/{$repo}/branches/" . rawurlencode($branch));
+
+        if ($response->failed()) {
+            throw new GitHubApiException('Failed to look up branch HEAD: ' . $this->summarizeError($response));
+        }
+
+        $sha = $response->json('commit.sha');
+        if (!is_string($sha) || preg_match('/^[0-9a-f]{40}$/', $sha) !== 1) {
+            throw new GitHubApiException('GitHub returned an invalid branch HEAD.');
+        }
+
+        return $sha;
+    }
+
     /**
      * Registers the project's existing per-project webhook (URL + secret
      * are unchanged — see App\Http\Controllers\Api\GitHubWebhookController)
