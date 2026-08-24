@@ -7,6 +7,7 @@ use App\Models\Deployment;
 use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use App\Models\PublishJob;
+use App\Services\Deployment\DeploymentDispatcher;
 use App\Services\Publish\ArtifactCommitSelector;
 use App\Services\Publish\PublishJobService;
 use Illuminate\Http\RedirectResponse;
@@ -25,6 +26,7 @@ class PublishController extends Controller
     public function __construct(
         private readonly PublishJobService $publishJobs,
         private readonly ArtifactCommitSelector $artifactCommits,
+        private readonly DeploymentDispatcher $deployments,
     ) {
     }
 
@@ -48,6 +50,22 @@ class PublishController extends Controller
 
             if (($validated['artifact_action'] ?? 'build') === 'use_existing') {
                 abort_unless($existingArtifact !== null, 409, 'No available Artifact exists for the selected project, commit, and branch.');
+
+                Gate::authorize('deployments.create');
+                Gate::authorize('deploy', $project);
+
+                $deployment = $this->deployments->createFromExistingArtifact(
+                    $project,
+                    $existingArtifact,
+                    $request->user()->email,
+                );
+
+                return redirect()->route('deployments.show', $deployment)
+                    ->with('status', __('ui.publish.deployment_created_from_artifact', [
+                        'deployment' => $deployment->id,
+                        'artifact' => $existingArtifact->id,
+                        'status' => $deployment->status,
+                    ]));
             }
 
             if ($existingArtifact !== null) {

@@ -4,6 +4,7 @@ namespace App\Services\Deployment;
 
 use App\Events\DeploymentStarted;
 use App\Models\AuditLogEntry;
+use App\Models\Artifact;
 use App\Models\Deployment;
 use App\Models\DeploymentTask;
 use App\Models\LocalAgent;
@@ -115,6 +116,60 @@ class DeploymentDispatcher
         }
 
         return $deployment;
+    }
+
+    /**
+     * Create a brand-new manual deployment from an Artifact the operator
+     * explicitly selected. The Artifact is re-resolved under a row lock so
+     * its project/commit/branch/availability contract cannot change between
+     * the dashboard lookup and the Deployment INSERT.
+     */
+    public function createFromExistingArtifact(Project $project, Artifact $selectedArtifact, string $triggeredBy): Deployment
+    {
+        return DB::transaction(function () use ($project, $selectedArtifact, $triggeredBy): Deployment {
+            $artifact = Artifact::query()
+                ->whereKey($selectedArtifact->id)
+                ->where('project_id', $project->id)
+                ->where('commit_hash', $selectedArtifact->commit_hash)
+                ->where('branch', $selectedArtifact->branch)
+                ->where('status', Artifact::STATUS_AVAILABLE)
+                ->lockForUpdate()
+                ->first();
+
+            abort_unless($artifact !== null, 409, 'The selected Artifact is no longer available for this project, commit, and branch.');
+
+            $targets = $this->resolver->resolveTargetsFor($project);
+            if ($this->isLegacyTargetSet($targets)) {
+                return $this->createLegacy(
+                    project: $project,
+                    commitHash: $artifact->commit_hash,
+                    branch: $artifact->branch,
+                    trigger: Deployment::TRIGGER_MANUAL,
+                    triggeredBy: $triggeredBy,
+                    autoApprove: true,
+                    approvedBy: $triggeredBy,
+                    auditAction: 'deployment.created_from_existing_artifact',
+                    auditActorType: AuditLogEntry::ACTOR_USER,
+                    auditActorIdentifier: $triggeredBy,
+                    auditMetadata: ['project_id' => $project->id, 'artifact_id' => $artifact->id, 'commit_hash' => $artifact->commit_hash, 'branch' => $artifact->branch],
+                    artifactId: $artifact->id,
+                );
+            }
+
+            return $this->createMultiTarget(
+                project: $project,
+                targets: $targets,
+                commitHash: $artifact->commit_hash,
+                branch: $artifact->branch,
+                trigger: Deployment::TRIGGER_MANUAL,
+                triggeredBy: $triggeredBy,
+                autoApprove: true,
+                auditAction: 'deployment.created_from_existing_artifact',
+                auditActorType: AuditLogEntry::ACTOR_USER,
+                auditMetadata: ['artifact_id' => $artifact->id],
+                artifactId: $artifact->id,
+            );
+        });
     }
 
     /**

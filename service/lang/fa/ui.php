@@ -355,6 +355,7 @@ return [
         'advanced_commit_hint' => 'فقط برای rollback یا ساخت مجدد عمدی یک Commit قدیمی استفاده شود.',
         'artifact_already_exists' => 'برای این پروژه، Commit و Branch یک Artifact موجود است.',
         'use_existing_artifact' => 'استفاده از Artifact موجود',
+        'deployment_created_from_artifact' => 'Deployment :deployment با Artifact :artifact ایجاد شد. وضعیت فعلی: :status.',
         'artifact_required_hint' => 'برای این پروژه Artifact اجباری است. کارگزار محلی commit مشخص‌شده را از GitHub می‌خواند، Artifact کامل می‌سازد، اعتبارسنجی می‌کند و بدون commit یا push آن را بارگذاری می‌کند.',
         'rollback_button' => 'بازگشت آخرین انتشار',
         'rollback_confirm' => 'آخرین commit ثبت‌شده توسط کارگزار محلی با یک commit جدید (git revert) بازگردانده شود؟',

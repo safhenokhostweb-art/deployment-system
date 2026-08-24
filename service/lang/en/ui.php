@@ -355,6 +355,7 @@ return [
         'advanced_commit_hint' => 'Use this only for an intentional rollback or rebuild of an older commit.',
         'artifact_already_exists' => 'Artifact already exists for this project, commit, and branch.',
         'use_existing_artifact' => 'Use Existing Artifact',
+        'deployment_created_from_artifact' => 'Deployment :deployment created with Artifact :artifact. Current status: :status.',
         'artifact_required_hint' => 'This project deploys only from complete artifacts. The local agent will fetch the requested GitHub commit, build the artifact, validate it, and upload it without committing or pushing.',
         'rollback_button' => 'Rollback Last Publish',
         'rollback_confirm' => 'Revert the last commit made by the local agent with a new commit (git revert)?',
