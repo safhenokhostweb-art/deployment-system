@@ -156,9 +156,10 @@ class AgentJobController extends Controller
         $validated = $request->validate([
             'status' => 'required|string|in:running,succeeded,failed',
             'message' => 'nullable|string|max:5000',
+            'failure_code' => 'nullable|string|max:100',
         ]);
 
-        $updated = $this->tasks->updateStatus($agentJob, $validated['status'], $validated['message'] ?? null);
+        $updated = $this->tasks->updateStatus($agentJob, $validated['status'], $validated['message'] ?? null, $validated['failure_code'] ?? null);
 
         return response()->json(['status' => $updated->status]);
     }
@@ -224,6 +225,9 @@ class AgentJobController extends Controller
             'exit_code' => 'nullable|integer',
             'duration_ms' => 'nullable|integer|min:0',
             'timed_out' => 'nullable|boolean',
+            'status' => 'nullable|string|in:queued,running,succeeded,failed,skipped',
+            'step_type' => 'nullable|string|max:100',
+            'failure_code' => 'nullable|string|max:100',
         ]);
 
         $entry = $this->tasks->recordLog($agentJob, $validated);

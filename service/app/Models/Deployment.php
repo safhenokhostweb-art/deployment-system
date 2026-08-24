@@ -63,6 +63,14 @@ class Deployment extends Model
     public const FAILURE_CODE_ACTIVATION_FAILED = 'activation_failed';
     public const FAILURE_CODE_SERVICE_RESTART_FAILED = 'service_restart_failed';
     public const FAILURE_CODE_HEALTH_CHECK_FAILED = 'health_check_failed';
+
+    public const HTTP_HEALTH_NOT_CONFIGURED = 'not_configured';
+    public const HTTP_HEALTH_PENDING = 'pending';
+    public const HTTP_HEALTH_VERIFIED = 'verified';
+    public const HTTP_HEALTH_FAILED = 'failed';
+    public const EXECUTION_PENDING = 'pending';
+    public const EXECUTION_SUCCEEDED = 'succeeded';
+    public const EXECUTION_FAILED = 'failed';
     public const FAILURE_CODE_LEASE_EXPIRED = 'lease_expired';
     public const FAILURE_CODE_AGENT_HEARTBEAT_LOST = 'agent_heartbeat_lost';
     public const FAILURE_CODE_LATE_CALLBACK_REJECTED = 'late_callback_rejected';
@@ -110,6 +118,12 @@ class Deployment extends Model
         'failure_code',
         'rollback_of_deployment_id',
         'artifact_id',
+        'http_health_config',
+        'execution_status',
+        'execution_finished_at',
+        'http_health_status',
+        'http_health_verified_at',
+        'http_health_details',
         'last_activity_at',
         'heartbeat_at',
         'lease_expires_at',
@@ -129,6 +143,10 @@ class Deployment extends Model
             'lease_expires_at' => 'datetime',
             'deployed_at' => 'datetime',
             'rolled_back_at' => 'datetime',
+            'http_health_config' => 'array',
+            'execution_finished_at' => 'datetime',
+            'http_health_verified_at' => 'datetime',
+            'http_health_details' => 'array',
         ];
     }
 
@@ -259,7 +277,13 @@ class Deployment extends Model
      */
     public function isVerifiedDeployed(): bool
     {
-        return $this->deployed_at !== null;
+        return $this->http_health_status === self::HTTP_HEALTH_VERIFIED;
+    }
+
+    public function hasHttpHealthCheck(): bool
+    {
+        return is_array($this->http_health_config)
+            && ($this->http_health_config['enabled'] ?? false) === true;
     }
 
     /**

@@ -15,7 +15,6 @@ use App\Models\Project;
 use App\Models\PublishJob;
 use App\Services\Deployment\DeploymentDispatcher;
 use App\Services\Security\SecretRedactor;
-use App\Support\Deployment\SourceWorkspacePath;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -39,6 +38,7 @@ class PublishJobService
     public function __construct(
         private readonly SecretRedactor $redactor,
         private readonly DeploymentDispatcher $deployments,
+        private readonly AuthoritativeBuildAgentResolver $buildAgents,
     ) {
     }
 
@@ -74,7 +74,8 @@ class PublishJobService
     {
         abort_unless(preg_match('/^[0-9a-f]{40}$/', $commitHash) === 1, 422, 'Artifact build requires a valid 40-character commit SHA.');
         abort_unless($branch !== '', 422, 'Artifact build requires a branch.');
-        $this->assertArtifactSourceCapableAgent($localAgent, $project);
+        $mapping = $this->buildAgents->resolve($project, $branch);
+        abort_unless($mapping->local_agent_id === $localAgent->id, 409, 'Artifact builds must use the project authoritative production build Agent.');
 
         $job = PublishJob::create([
             'local_agent_id' => $localAgent->id,
@@ -886,30 +887,6 @@ class PublishJobService
         event(new PublishJobFailed($job->refresh()));
 
         return $job;
-    }
-
-    private function assertArtifactSourceCapableAgent(LocalAgent $localAgent, Project $project): void
-    {
-        $minimumVersion = (string) config('deployment.min_local_agent_version_for_artifact');
-        abort_unless(
-            is_string($localAgent->agent_version) && version_compare($localAgent->agent_version, $minimumVersion, '>='),
-            409,
-            "Artifact builds require Local Agent {$minimumVersion} or newer so production paths cannot be selected as source.",
-        );
-
-        $mapping = LocalProjectMapping::query()
-            ->where('local_agent_id', $localAgent->id)
-            ->where('project_id', $project->id)
-            ->with('project')
-            ->first();
-        abort_if($mapping === null, 422, 'The selected Local Agent is not mapped to this project.');
-
-        $sourcePath = $mapping->sourceWorkspacePath();
-        abort_if(
-            SourceWorkspacePath::isProductionLike($sourcePath),
-            422,
-            'Artifact builds require an isolated source_workspace_path; production_path and production-like local_path values are forbidden.',
-        );
     }
 
     /**

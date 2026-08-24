@@ -646,41 +646,17 @@ final class RecipeStepRunner
 
     private function runHttpHealthCheck(array $step): array
     {
-        $attempts = 1 + (int) $step['retries'];
+        $result = (new HttpHealthCheckRunner())->run($step);
 
-        for ($attempt = 1; $attempt <= $attempts; $attempt++) {
-            $ch = curl_init($step['url']);
-            curl_setopt_array($ch, [
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_TIMEOUT => $step['request_timeout_seconds'],
-                CURLOPT_CONNECTTIMEOUT => $step['request_timeout_seconds'],
-                CURLOPT_SSL_VERIFYPEER => true,
-                CURLOPT_SSL_VERIFYHOST => 2,
-            ]);
-            $body = curl_exec($ch);
-            $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $error = curl_error($ch);
-            curl_close($ch);
-
-            $statusOk = $body !== false && $status === $step['expected_status'];
-            $bodyOk = $step['must_not_contain'] === null || ($body !== false && !str_contains($body, $step['must_not_contain']));
-
-            if ($statusOk && $bodyOk) {
-                return $this->succeeded("{$step['url']} returned {$status} as expected.");
-            }
-
-            if ($attempt < $attempts) {
-                sleep((int) $step['retry_delay_seconds']);
-            } else {
-                $reason = $body === false
-                    ? "request failed: {$error}"
-                    : (!$statusOk ? "expected status {$step['expected_status']}, got {$status}" : "response contained forbidden string '{$step['must_not_contain']}'");
-
-                return $this->failed(self::FAILURE_HEALTH_CHECK_FAILED, "{$step['url']} failed health check after {$attempts} attempt(s): {$reason}");
-            }
-        }
-
-        return $this->failed(self::FAILURE_HEALTH_CHECK_FAILED, "{$step['url']} failed health check.");
+        return [
+            'status' => $result['status'],
+            'exitCode' => $result['status'] === 'succeeded' ? 0 : 1,
+            'output' => $result['output'],
+            'durationMs' => $result['durationMs'],
+            'timedOut' => $result['timedOut'],
+            'failureCode' => $result['failureCode'],
+            'message' => $result['message'],
+        ];
     }
 
     private function runSetOwnership(array $step, array $tokens, int $timeoutSeconds, callable $onTick): array

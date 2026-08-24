@@ -327,6 +327,10 @@
             @foreach ($project->localProjectMappings as $mapping)
                 <li>
                     <a href="{{ route('local-agents.show', $mapping->localAgent) }}">{{ $mapping->localAgent->name ?? $mapping->localAgent->public_id }}</a>
+                    <span class="muted">— {{ $mapping->localAgent->role }}</span>
+                    @if ($project->authoritative_build_local_agent_id === $mapping->local_agent_id)
+                        <span class="badge badge-succeeded">Authoritative Build Agent</span>
+                    @endif
                     @if ($mapping->localAgent->isOnline())
                         <x-badge status="online" />
                     @else
@@ -342,11 +346,14 @@
 
         @if ($project->requires_complete_artifact)
             <p class="muted" style="margin-top:0.6rem;">{{ __('ui.publish.artifact_required_hint') }}</p>
+            @if ($project->authoritative_build_local_agent_id === null)
+                <p style="color:#b91c1c;">Authoritative production build Agent is not configured. Artifact builds are blocked.</p>
+            @endif
         @endif
 
         <form method="POST" action="{{ route('projects.publish', $project) }}" id="artifact-publish-form" style="display:flex;gap:0.6rem;align-items:flex-end;flex-wrap:wrap;margin-top:0.6rem;">
             @csrf
-            @if ($project->localProjectMappings->count() > 1)
+            @if (!$project->requires_complete_artifact && $project->localProjectMappings->count() > 1)
                 <div>
                     <label>{{ __('ui.publish.select_local_agent') }}</label>
                     <select name="local_project_mapping_id" id="artifact-mapping" required>
@@ -356,11 +363,11 @@
                     </select>
                 </div>
             @else
-                <input type="hidden" name="local_project_mapping_id" value="{{ $project->localProjectMappings->first()->id }}">
+                <input type="hidden" name="local_project_mapping_id" value="{{ $artifactCommitOptions[0]['mapping_id'] ?? $project->localProjectMappings->first()->id }}">
             @endif
             @if ($project->requires_complete_artifact)
                 @php($defaultArtifactCommit = $artifactCommitOptions[0] ?? [])
-                @php($workspaceStateLabels = ['clean' => '✓ '.__('ui.publish.workspace_clean'), 'dirty' => __('ui.publish.workspace_dirty'), 'not_reported' => __('ui.publish.workspace_not_reported'), 'branch_mismatch' => __('ui.publish.workspace_branch_mismatch')])
+                @php($workspaceStateLabels = ['clean' => '✓ '.__('ui.publish.workspace_clean'), 'dirty' => __('ui.publish.workspace_dirty'), 'not_reported' => __('ui.publish.workspace_not_reported'), 'branch_mismatch' => __('ui.publish.workspace_branch_mismatch'), 'invalid_source' => 'مسیر source workspace نامعتبر یا production-like است'])
                 <input type="hidden" name="commit_selection_mode" id="commit-selection-mode" value="latest">
                 <input type="hidden" name="commit_hash" id="commit-hash" value="{{ $defaultArtifactCommit['workspace_sha'] ?? '' }}">
                 <div id="artifact-commit-selector" style="flex-basis:100%;border:1px solid var(--border, #d1d5db);border-radius:0.5rem;padding:0.8rem;">
@@ -383,7 +390,7 @@
                     </details>
                 </div>
             @endif
-            <button type="submit" name="artifact_action" value="build" id="artifact-build-button" class="btn btn-primary" @if($project->requires_complete_artifact && (empty($defaultArtifactCommit['is_verified']) || !empty($defaultArtifactCommit['existing_artifact_id']))) disabled @endif>{{ $project->requires_complete_artifact ? __('ui.publish.artifact_button') : __('ui.publish.button') }}</button>
+            <button type="submit" name="artifact_action" value="build" id="artifact-build-button" class="btn btn-primary" @if($project->requires_complete_artifact && ($project->authoritative_build_local_agent_id === null || empty($defaultArtifactCommit['is_verified']) || !empty($defaultArtifactCommit['existing_artifact_id']))) disabled @endif>{{ $project->requires_complete_artifact ? __('ui.publish.artifact_button') : __('ui.publish.button') }}</button>
             @if ($project->requires_complete_artifact)
                 <button type="submit" name="artifact_action" value="use_existing" id="artifact-use-existing" class="btn" style="display:{{ !empty($defaultArtifactCommit['existing_artifact_id']) ? 'inline-flex' : 'none' }};">{{ __('ui.publish.use_existing_artifact') }}</button>
             @endif
@@ -401,6 +408,7 @@
                     const advancedCommit = document.getElementById('advanced-commit-hash');
                     const build = document.getElementById('artifact-build-button');
                     const reuse = document.getElementById('artifact-use-existing');
+                    const authoritativeConfigured = @json($project->authoritative_build_local_agent_id !== null);
                     const text = (id, value) => document.getElementById(id).textContent = value || '—';
 
                     function selectedOption() {
@@ -423,7 +431,7 @@
                         if (!advanced.open) {
                             mode.value = 'latest';
                             commit.value = option.workspace_sha || '';
-                            build.disabled = !option.is_verified || Boolean(option.existing_artifact_id);
+                            build.disabled = !authoritativeConfigured || !option.is_verified || Boolean(option.existing_artifact_id);
                             reuse.style.display = option.existing_artifact_id ? 'inline-flex' : 'none';
                         }
                     }

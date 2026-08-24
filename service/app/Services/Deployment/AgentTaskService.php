@@ -13,6 +13,7 @@ use App\Services\Deployment\Artifact\ArtifactService;
 use App\Services\Security\JobPayloadSigner;
 use App\Services\Security\SecretRedactor;
 use Illuminate\Support\Facades\DB;
+use App\Support\Deployment\HttpHealthCheckPayload;
 
 /**
  * New-domain analog of AgentJobService — claims DeploymentTask rows
@@ -81,6 +82,12 @@ class AgentTaskService
                 // run.
                 if ($task->deployment->artifact !== null && !$this->agentEnforcesReleaseGate($agent)) {
                     $this->rejectIncompatibleAgentTask($task, $agent);
+
+                    continue;
+                }
+
+                if ($task->deployment->hasHttpHealthCheck() && !$this->agentEnforcesHttpHealth($agent)) {
+                    $this->rejectIncompatibleHealthAgentTask($task, $agent);
 
                     continue;
                 }
@@ -170,6 +177,29 @@ class AgentTaskService
         }
 
         return version_compare($agentVersion, (string) config('deployment.min_server_agent_version_for_artifact'), '>=');
+    }
+
+    private function agentEnforcesHttpHealth(Agent $agent): bool
+    {
+        return is_string($agent->agent_version)
+            && $agent->agent_version !== ''
+            && version_compare($agent->agent_version, (string) config('deployment.min_server_agent_version_for_http_health'), '>=');
+    }
+
+    private function rejectIncompatibleHealthAgentTask(DeploymentTask $task, Agent $agent): void
+    {
+        $requiredVersion = (string) config('deployment.min_server_agent_version_for_http_health');
+        $message = "Server Agent {$agent->public_id} cannot execute customer-facing HTTP health verification; version {$requiredVersion} or newer is required.";
+        $task->update([
+            'status' => DeploymentTask::STATUS_FAILED,
+            'failure_code' => Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE,
+            'failure_message' => $message,
+        ]);
+        $task->deployment->update([
+            'failure_code' => Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE,
+            'failure_message' => $message,
+        ]);
+        $this->aggregator->recalculate($task->deployment);
     }
 
     /** Fails the task + deployment with an explicit incompatible-agent reason before any execution. */
@@ -276,8 +306,9 @@ class AgentTaskService
             // can enforce artifact-only source acquisition only when this
             // exact matching artifact descriptor is present.
             'deployment_recipe' => $task->deployment->project->usesDeploymentRecipe()
-                ? $task->deployment->project->deployment_recipe
+                ? HttpHealthCheckPayload::appendToRecipe($task->deployment->project->deployment_recipe, $task->deployment->http_health_config)
                 : null,
+            'http_health_check' => $task->deployment->http_health_config,
             'recipe_rollback' => $task->deployment->project->usesDeploymentRecipe()
                 && $task->deployment->action === Deployment::ACTION_ROLLBACK,
             'artifact' => $task->deployment->artifact !== null ? [
@@ -299,7 +330,7 @@ class AgentTaskService
         ];
     }
 
-    public function updateStatus(AgentJob $agentJob, string $status, ?string $message = null): AgentJob
+    public function updateStatus(AgentJob $agentJob, string $status, ?string $message = null, ?string $failureCode = null): AgentJob
     {
         abort_unless(
             in_array($status, [AgentJob::STATUS_RUNNING, AgentJob::STATUS_SUCCEEDED, AgentJob::STATUS_FAILED], true),
@@ -308,6 +339,18 @@ class AgentTaskService
         );
 
         $attributes = ['status' => $status, 'last_activity_at' => now()];
+        $deployment = $agentJob->deploymentTask->deployment;
+        $healthLog = $deployment->hasHttpHealthCheck()
+            ? $agentJob->logEntries()->where('step_type', 'http_health_check')->reorder()->latest('sequence')->first()
+            : null;
+
+        if ($status === AgentJob::STATUS_SUCCEEDED && $deployment->hasHttpHealthCheck()
+            && ($healthLog === null || $healthLog->exit_code !== 0 || $healthLog->timed_out)) {
+            $status = AgentJob::STATUS_FAILED;
+            $attributes['status'] = $status;
+            $message = 'The Agent reported success without a successful customer-facing HTTP health-check result.';
+            $failureCode = Deployment::FAILURE_CODE_HEALTH_CHECK_FAILED;
+        }
 
         if (in_array($status, [AgentJob::STATUS_SUCCEEDED, AgentJob::STATUS_FAILED], true)) {
             $attributes['finished_at'] = now();
@@ -321,7 +364,7 @@ class AgentTaskService
             action: 'agent_job.status_reported',
             subjectType: AgentJob::class,
             subjectId: $agentJob->id,
-            metadata: ['status' => $status, 'message' => $message],
+            metadata: ['status' => $status, 'message' => $message, 'failure_code' => $failureCode],
         );
 
         if ($status === AgentJob::STATUS_SUCCEEDED) {
@@ -329,6 +372,7 @@ class AgentTaskService
             $task->update(['status' => DeploymentTask::STATUS_SUCCEEDED]);
             $this->aggregator->recalculate($task->deployment);
         } elseif ($status === AgentJob::STATUS_FAILED) {
+            $agentJob->deploymentTask->update(['failure_code' => $failureCode, 'failure_message' => $message]);
             $this->handleFailedAttempt($agentJob);
         }
 
@@ -384,6 +428,9 @@ class AgentTaskService
             'exit_code' => $payload['exit_code'] ?? null,
             'duration_ms' => $payload['duration_ms'] ?? null,
             'timed_out' => $payload['timed_out'] ?? false,
+            'status' => $payload['status'] ?? null,
+            'step_type' => $payload['step_type'] ?? null,
+            'failure_code' => $payload['failure_code'] ?? null,
         ]);
 
         $agentJob->forceFill(['last_activity_at' => now()])->saveQuietly();

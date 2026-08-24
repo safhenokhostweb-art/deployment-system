@@ -45,6 +45,7 @@
                 <x-badge status="offline" />
             @endif
         </td></tr>
+        <tr><th>Agent role</th><td><strong>{{ $localAgent->role }}</strong></td></tr>
         <tr><th>{{ __('ui.local_agents.os') }}</th><td>{{ $localAgent->operating_system ?? '—' }}</td></tr>
         <tr><th>{{ __('ui.local_agents.hostname') }}</th><td><x-ltr>{{ $localAgent->hostname ?? '—' }}</x-ltr></td></tr>
         <tr><th>{{ __('ui.local_agents.version') }}</th><td>
@@ -76,6 +77,21 @@
         <tr><th>{{ __('ui.local_agents.approved_by') }}</th><td>{{ $localAgent->approved_by }} &mdash; {{ $localAgent->approved_at?->diffForHumans() }}</td></tr>
         @endif
     </table>
+
+    @can('local_agents.manage')
+    <form method="POST" action="{{ route('local-agents.role', $localAgent) }}" style="display:flex;gap:0.6rem;align-items:flex-end;margin-top:1rem;">
+        @csrf
+        <div>
+            <label for="agent-role">Agent role</label>
+            <select id="agent-role" name="role">
+                @foreach (\App\Models\LocalAgent::ROLES as $role)
+                    <option value="{{ $role }}" {{ $localAgent->role === $role ? 'selected' : '' }}>{{ $role }}</option>
+                @endforeach
+            </select>
+        </div>
+        <button type="submit" class="btn">Save role</button>
+    </form>
+    @endcan
 
     <div style="margin-top:1rem;display:flex;gap:0.6rem;">
         @if ($localAgent->status === 'pending_approval')

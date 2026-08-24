@@ -38,6 +38,7 @@ final class PipelineExecutor
         private readonly Logger $logger,
         /** @var (\Closure(string, string, int): array{exitCode: int, output: string, timedOut: bool, durationMs: int})|null Test seam; production always uses the fixed helper argv below. */
         private readonly ?\Closure $runtimePermissionsRunner = null,
+        private readonly ?HttpHealthCheckRunner $httpHealth = null,
     ) {
     }
 
@@ -308,9 +309,39 @@ final class PipelineExecutor
             }
         }
 
-        $this->client->request('POST', "/api/agent/jobs/{$job['id']}/status", [
-            'status' => $failed ? 'failed' : 'succeeded',
-        ]);
+        $healthFailure = null;
+        if (!$failed && (($job['http_health_check']['enabled'] ?? false) === true)) {
+            $sequence++;
+            $health = ($this->httpHealth ?? new HttpHealthCheckRunner())->run($job['http_health_check']);
+            $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+                'sequence' => $sequence,
+                'step_name' => 'customer-facing HTTP health',
+                'step_type' => 'http_health_check',
+                'command' => 'GET ' . $job['http_health_check']['url'],
+                'output' => mb_substr($health['output'], -50000),
+                'exit_code' => $health['status'] === 'succeeded' ? 0 : 1,
+                'duration_ms' => $health['durationMs'],
+                'timed_out' => $health['timedOut'],
+                'failure_code' => $health['failureCode'],
+            ]);
+
+            if ($health['status'] !== 'succeeded') {
+                $failed = true;
+                $healthFailure = $health;
+                if ($usedArtifact) {
+                    $rollbackError = $this->artifactManager->rollback($workingDirectory);
+                    $this->logger->error("Job {$job['id']}: HTTP health failed; previous release restore " . ($rollbackError === null ? 'succeeded' : "failed: {$rollbackError}"));
+                }
+                $this->runMaintenanceCleanup($job, $sequence, $workingDirectory, $projectConfig, $stepTimeout, $maintenanceEnabled);
+            }
+        }
+
+        $statusPayload = ['status' => $failed ? 'failed' : 'succeeded'];
+        if ($healthFailure !== null) {
+            $statusPayload['message'] = $healthFailure['message'];
+            $statusPayload['failure_code'] = $healthFailure['failureCode'];
+        }
+        $this->client->request('POST', "/api/agent/jobs/{$job['id']}/status", $statusPayload);
 
         $this->logger->info("Job {$job['id']} finished: " . ($failed ? 'failed' : 'succeeded'));
     }

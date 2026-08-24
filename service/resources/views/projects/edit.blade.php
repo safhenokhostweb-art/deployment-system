@@ -40,6 +40,37 @@
         <label for="pipeline">{{ __('ui.projects.pipeline') }}</label>
         <textarea id="pipeline" name="pipeline" rows="12" dir="ltr" style="text-align:left;">{{ old('pipeline', $pipelineJson) }}</textarea>
 
+        <label for="authoritative_build_local_agent_id">Authoritative production build Agent</label>
+        <select id="authoritative_build_local_agent_id" name="authoritative_build_local_agent_id">
+            <option value="">— Not configured (artifact builds blocked) —</option>
+            @foreach ($buildAgentCandidates as $candidate)
+                <option value="{{ $candidate->id }}" {{ (int) old('authoritative_build_local_agent_id', $project->authoritative_build_local_agent_id) === $candidate->id ? 'selected' : '' }}>
+                    {{ $candidate->name ?? $candidate->public_id }} — {{ $candidate->role }} — {{ $candidate->isOnline() ? 'Online' : 'Offline' }} — v{{ $candidate->agent_version ?? 'unknown' }}
+                </option>
+            @endforeach
+        </select>
+        <p class="muted">Artifact-required production builds use only this Agent. There is no automatic fallback.</p>
+
+        @php($health = $project->http_health_check ?? [])
+        <input type="hidden" name="http_health_enabled" value="0">
+        <label><input type="checkbox" name="http_health_enabled" value="1" style="width:auto;display:inline-block;" {{ old('http_health_enabled', $health !== []) ? 'checked' : '' }}> Require customer-facing HTTP health verification</label>
+        <label for="http_health_base_url">Health base URL</label>
+        <input type="url" id="http_health_base_url" name="http_health_base_url" value="{{ old('http_health_base_url', $health['base_url'] ?? '') }}" dir="ltr" style="text-align:left;" placeholder="https://example.com">
+        <label for="http_health_path">Health path</label>
+        <input type="text" id="http_health_path" name="http_health_path" value="{{ old('http_health_path', $health['path'] ?? '/') }}" dir="ltr" style="text-align:left;">
+        <label for="http_health_expected_status">Expected HTTP status</label>
+        <input type="number" id="http_health_expected_status" name="http_health_expected_status" value="{{ old('http_health_expected_status', $health['expected_status'] ?? 200) }}" min="100" max="599">
+        <label for="http_health_timeout_seconds">Timeout seconds</label>
+        <input type="number" id="http_health_timeout_seconds" name="http_health_timeout_seconds" value="{{ old('http_health_timeout_seconds', $health['timeout_seconds'] ?? 15) }}" min="1" max="120">
+        <label for="http_health_retries">Retry count</label>
+        <input type="number" id="http_health_retries" name="http_health_retries" value="{{ old('http_health_retries', $health['retries'] ?? 3) }}" min="0" max="10">
+        <label for="http_health_retry_interval_seconds">Retry interval seconds</label>
+        <input type="number" id="http_health_retry_interval_seconds" name="http_health_retry_interval_seconds" value="{{ old('http_health_retry_interval_seconds', $health['retry_interval_seconds'] ?? 5) }}" min="0" max="300">
+        <input type="hidden" name="http_health_allowed_redirects" value="0">
+        <label><input type="checkbox" name="http_health_allowed_redirects" value="1" style="width:auto;display:inline-block;" {{ old('http_health_allowed_redirects', $health['allowed_redirects'] ?? false) ? 'checked' : '' }}> Allow redirects (maximum 5)</label>
+        <label for="http_health_expected_content">Optional expected content marker</label>
+        <input type="text" id="http_health_expected_content" name="http_health_expected_content" value="{{ old('http_health_expected_content', $health['expected_content'] ?? '') }}">
+
         <label for="artifact_preserve_paths_text">Artifact preserve paths</label>
         <textarea id="artifact_preserve_paths_text" name="artifact_preserve_paths_text" rows="4" dir="ltr" style="text-align:left;">{{ old('artifact_preserve_paths_text', implode("\n", $project->artifact_preserve_paths ?? [])) }}</textarea>
         <p class="muted">One relative runtime path per line. Paths must not be absolute or contain <code>..</code>.</p>

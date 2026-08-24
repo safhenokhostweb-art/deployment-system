@@ -21,9 +21,11 @@ class Project extends Model
         'branch',
         'environment',
         'server_id',
+        'authoritative_build_local_agent_id',
         'github_account_id',
         'pipeline',
         'deployment_recipe',
+        'http_health_check',
         'artifact_preserve_paths',
         'artifact_persistent_paths',
         'artifact_persistent_root',
@@ -47,6 +49,7 @@ class Project extends Model
         return [
             'pipeline' => 'array',
             'deployment_recipe' => 'array',
+            'http_health_check' => 'array',
             'artifact_preserve_paths' => 'array',
             'artifact_persistent_paths' => 'array',
             'requires_complete_artifact' => 'boolean',
@@ -79,6 +82,42 @@ class Project extends Model
     public function githubAccount(): BelongsTo
     {
         return $this->belongsTo(GitHubAccount::class);
+    }
+
+    public function authoritativeBuildAgent(): BelongsTo
+    {
+        return $this->belongsTo(LocalAgent::class, 'authoritative_build_local_agent_id');
+    }
+
+    public function requiresHttpHealthVerification(): bool
+    {
+        return $this->deploymentHttpHealthConfig() !== null;
+    }
+
+    /** @return array<string, mixed>|null */
+    public function deploymentHttpHealthConfig(): ?array
+    {
+        if (is_array($this->http_health_check) && ($this->http_health_check['enabled'] ?? false) === true) {
+            return $this->http_health_check;
+        }
+
+        foreach (array_reverse($this->deployment_recipe['steps'] ?? []) as $step) {
+            if (($step['type'] ?? null) === 'http_health_check') {
+                return [
+                    'enabled' => true,
+                    'url' => $step['url'],
+                    'expected_status' => $step['expected_status'] ?? 200,
+                    'timeout_seconds' => $step['request_timeout_seconds'] ?? 10,
+                    'retries' => $step['retries'] ?? 0,
+                    'retry_interval_seconds' => $step['retry_delay_seconds'] ?? 5,
+                    'allowed_redirects' => $step['allowed_redirects'] ?? false,
+                    'expected_content' => $step['expected_content'] ?? null,
+                    'source' => 'deployment_recipe',
+                ];
+            }
+        }
+
+        return null;
     }
 
     public function hasGithubWebhookConfigured(): bool

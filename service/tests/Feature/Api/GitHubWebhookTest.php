@@ -72,11 +72,17 @@ class GitHubWebhookTest extends TestCase
             'github_webhook_secret' => 'topsecret',
             'requires_complete_artifact' => true,
         ]);
-        $localAgent = LocalAgent::factory()->approved()->create();
+        $localAgent = LocalAgent::factory()->productionBuild()->create();
+        $project->update(['authoritative_build_local_agent_id' => $localAgent->id]);
         LocalProjectMapping::factory()->create([
             'project_id' => $project->id,
             'local_agent_id' => $localAgent->id,
             'git_branch' => 'main',
+            'source_workspace_path' => '/opt/deployment-agent/workspaces/project',
+            'local_head_sha' => str_repeat('b1', 20),
+            'reported_branch' => 'main',
+            'working_tree_dirty' => false,
+            'reported_at' => now(),
         ]);
         $payload = ['ref' => 'refs/heads/main', 'after' => str_repeat('b1', 20)];
         $body = json_encode($payload);

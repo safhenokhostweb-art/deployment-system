@@ -233,6 +233,10 @@ return [
     */
     'min_server_agent_version_for_artifact' => (string) env('DEPLOYMENT_MIN_SERVER_AGENT_VERSION_FOR_ARTIFACT', '1.2.0'),
 
+    // First Server Agent release that executes and reports the explicit
+    // project-level customer-facing HTTP health contract.
+    'min_server_agent_version_for_http_health' => (string) env('DEPLOYMENT_MIN_SERVER_AGENT_VERSION_FOR_HTTP_HEALTH', '1.3.0'),
+
     /*
     |--------------------------------------------------------------------------
     | Laravel release completeness — Local Agent minimum (permanent fix)
@@ -246,5 +250,9 @@ return [
     |
     */
     'min_local_agent_version_for_artifact' => (string) env('DEPLOYMENT_MIN_LOCAL_AGENT_VERSION_FOR_ARTIFACT', '1.4.6'),
+
+    // A production artifact must be built from fresh workspace evidence
+    // reported by the one authoritative Agent configured on the Project.
+    'artifact_workspace_report_max_age_seconds' => (int) env('DEPLOYMENT_ARTIFACT_WORKSPACE_REPORT_MAX_AGE_SECONDS', 300),
 
 ];

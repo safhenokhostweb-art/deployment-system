@@ -29,7 +29,22 @@ class PublishJobFlowTest extends TestCase
     private function mappedProject(LocalAgent $agent): Project
     {
         $project = Project::factory()->create();
-        LocalProjectMapping::factory()->create(['local_agent_id' => $agent->id, 'project_id' => $project->id]);
+        $agent->update([
+            'role' => LocalAgent::ROLE_PRODUCTION_BUILD,
+            'last_seen_at' => now(),
+            'capabilities' => ['git' => true, 'php' => '8.4', 'laravel_release_manifest' => true],
+        ]);
+        LocalProjectMapping::factory()->create([
+            'local_agent_id' => $agent->id,
+            'project_id' => $project->id,
+            'source_workspace_path' => '/opt/deployment-agent/workspaces/project',
+            'git_branch' => 'main',
+            'local_head_sha' => str_repeat('e', 40),
+            'reported_branch' => 'main',
+            'working_tree_dirty' => false,
+            'reported_at' => now(),
+        ]);
+        $project->update(['authoritative_build_local_agent_id' => $agent->id]);
 
         return $project;
     }

@@ -27,8 +27,18 @@ class PublishWorkflowTest extends TestCase
     private function projectWithApprovedMapping(): Project
     {
         $project = Project::factory()->create();
-        $localAgent = LocalAgent::factory()->approved()->create();
-        LocalProjectMapping::factory()->create(['local_agent_id' => $localAgent->id, 'project_id' => $project->id]);
+        $localAgent = LocalAgent::factory()->productionBuild()->create();
+        LocalProjectMapping::factory()->create([
+            'local_agent_id' => $localAgent->id,
+            'project_id' => $project->id,
+            'source_workspace_path' => '/opt/deployment-agent/workspaces/project',
+            'git_branch' => 'main',
+            'local_head_sha' => str_repeat('a', 40),
+            'reported_branch' => 'main',
+            'working_tree_dirty' => false,
+            'reported_at' => now(),
+        ]);
+        $project->update(['authoritative_build_local_agent_id' => $localAgent->id]);
 
         return $project;
     }
@@ -329,6 +339,7 @@ class PublishWorkflowTest extends TestCase
     {
         $user = User::factory()->create();
         $project = $this->projectWithApprovedMapping();
+        $project->localProjectMappings()->first()->localAgent->update(['last_seen_at' => null]);
         // LocalAgentFactory never sets last_seen_at, so this agent is
         // offline by construction — no extra setup needed.
 
@@ -353,6 +364,7 @@ class PublishWorkflowTest extends TestCase
         $user = User::factory()->create();
         $project = $this->projectWithApprovedMapping();
         $localAgent = $project->localProjectMappings()->first()->localAgent;
+        $localAgent->update(['last_seen_at' => null]);
         $job = app(PublishJobService::class)->queue($localAgent, $project, PublishJob::ACTION_STATUS_CHECK, $user->email);
 
         $this->actingAs($user)->get(route('projects.publish.show', [$project, $job]))

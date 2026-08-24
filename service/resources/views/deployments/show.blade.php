@@ -22,6 +22,34 @@
         <tr><th>{{ __('ui.common.branch') }}</th><td><x-ltr>{{ $deployment->branch }}</x-ltr></td></tr>
         <tr><th>{{ __('ui.deployments.triggered_by') }}</th><td>{{ $deployment->trigger }} @if($deployment->triggered_by) {{ __('ui.common.by', ['who' => $deployment->triggered_by]) }} @endif</td></tr>
         <tr><th>{{ __('ui.common.status') }}</th><td><x-badge :status="$deployment->status" /></td></tr>
+        <tr>
+            <th>اعتبارسنجی Artifact</th>
+            <td>
+                @if ($deployment->artifact?->isAvailable())
+                    <span class="badge badge-succeeded">معتبر</span> Artifact #{{ $deployment->artifact->id }}
+                @elseif ($deployment->artifact_id)
+                    <span class="badge badge-failed">نامعتبر/در دسترس نیست</span>
+                @else
+                    <span class="muted">Artifact استفاده نشده است</span>
+                @endif
+            </td>
+        </tr>
+        <tr><th>اجرای استقرار</th><td><x-badge :status="$deployment->execution_status" /> @if($deployment->execution_finished_at) {{ $deployment->execution_finished_at->diffForHumans() }} @endif</td></tr>
+        <tr>
+            <th>سلامت HTTP</th>
+            <td>
+                @if ($deployment->http_health_status === \App\Models\Deployment::HTTP_HEALTH_VERIFIED)
+                    <span class="badge badge-succeeded">تأیید شد</span> {{ $deployment->http_health_verified_at?->diffForHumans() }}
+                @elseif ($deployment->http_health_status === \App\Models\Deployment::HTTP_HEALTH_FAILED)
+                    <span class="badge badge-failed">ناموفق</span>
+                    <x-ltr>{{ $deployment->http_health_details['output'] ?? $deployment->failure_message }}</x-ltr>
+                @elseif ($deployment->http_health_status === \App\Models\Deployment::HTTP_HEALTH_PENDING)
+                    <span class="badge badge-pending">در انتظار بررسی</span>
+                @else
+                    <span class="muted">بررسی HTTP انجام نشده است</span>
+                @endif
+            </td>
+        </tr>
         @if ($deployment->release_notes)
         <tr><th>{{ __('ui.deployments.release_notes_field') }}</th><td>{{ $deployment->release_notes }}</td></tr>
         @endif
@@ -54,7 +82,7 @@
         <tr>
             <th>{{ __('ui.deployments.verified_deployed') }}</th>
             <td>
-                @if ($deployment->deployed_at)
+                @if ($deployment->isVerifiedDeployed())
                     <span class="badge badge-succeeded">{{ __('ui.deployments.verified_deployed_yes') }}</span>
                     {{ $deployment->deployed_at->diffForHumans() }}
                 @elseif ($deployment->finished_at)

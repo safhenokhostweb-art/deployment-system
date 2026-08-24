@@ -221,6 +221,32 @@ class LocalAgentController extends Controller
         return redirect()->route('local-agents.show', $localAgent)->with('status', 'Local agent re-enabled.');
     }
 
+    public function updateRole(Request $request, LocalAgent $localAgent): RedirectResponse
+    {
+        Gate::authorize('local_agents.manage');
+
+        $validated = $request->validate(['role' => 'required|in:' . implode(',', LocalAgent::ROLES)]);
+        if ($validated['role'] !== LocalAgent::ROLE_PRODUCTION_BUILD) {
+            abort_if(
+                $localAgent->authoritativeProjects()->exists(),
+                409,
+                'This Agent is authoritative for one or more projects. Reassign those projects before changing its role.',
+            );
+        }
+
+        $localAgent->update(['role' => $validated['role']]);
+        AuditLogEntry::record(
+            actorType: AuditLogEntry::ACTOR_USER,
+            actorIdentifier: $request->user()->email,
+            action: 'local_agent.role_updated',
+            subjectType: LocalAgent::class,
+            subjectId: $localAgent->id,
+            metadata: ['role' => $validated['role']],
+        );
+
+        return redirect()->route('local-agents.show', $localAgent)->with('status', 'Local Agent role updated.');
+    }
+
     /**
      * Phase 5.3: the Hub has no inbound path to a developer's machine —
      * this only queues a LocalAgentControlJob the agent picks up on its

@@ -31,7 +31,7 @@ class DeploymentController extends Controller
         Gate::authorize('view', $deployment->project);
 
         $deployment->load([
-            'project', 'server', 'logEntries', 'rollbackOf',
+            'project', 'server', 'artifact', 'logEntries', 'rollbackOf',
             'tasks.deploymentTarget.server',
             'tasks.deploymentTarget.environment',
             'tasks.agentJobs.agent',

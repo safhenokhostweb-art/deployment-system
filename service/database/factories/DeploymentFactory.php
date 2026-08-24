@@ -23,6 +23,9 @@ class DeploymentFactory extends Factory
             'commit_hash' => Str::random(40),
             'branch' => 'main',
             'trigger' => Deployment::TRIGGER_MANUAL,
+            'http_health_config' => null,
+            'execution_status' => Deployment::EXECUTION_PENDING,
+            'http_health_status' => Deployment::HTTP_HEALTH_NOT_CONFIGURED,
             'queued_at' => now(),
         ];
     }

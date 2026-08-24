@@ -27,6 +27,8 @@ class DeploymentTask extends Model
         'deployment_id',
         'deployment_target_id',
         'status',
+        'failure_code',
+        'failure_message',
         'next_retry_at',
     ];
 

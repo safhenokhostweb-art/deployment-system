@@ -5,6 +5,7 @@ namespace App\Services\Publish;
 use App\Models\Artifact;
 use App\Models\LocalProjectMapping;
 use App\Models\Project;
+use App\Support\Deployment\SourceWorkspacePath;
 
 final class ArtifactCommitSelector
 {
@@ -22,17 +23,22 @@ final class ArtifactCommitSelector
      */
     public function options(Project $project, array $githubHeadsByBranch = []): array
     {
-        return $project->localProjectMappings->map(function (LocalProjectMapping $mapping) use ($project, $githubHeadsByBranch): array {
+        $mappings = $project->requires_complete_artifact && $project->authoritative_build_local_agent_id !== null
+            ? $project->localProjectMappings->where('local_agent_id', $project->authoritative_build_local_agent_id)
+            : $project->localProjectMappings;
+
+        return $mappings->map(function (LocalProjectMapping $mapping) use ($project, $githubHeadsByBranch): array {
             $branch = $mapping->effectiveBranch();
             $workspaceSha = $this->validSha($mapping->local_head_sha) ? $mapping->local_head_sha : null;
             $githubSha = $githubHeadsByBranch[$branch] ?? null;
             $state = $this->workspaceState($mapping);
+            $reportedSource = $this->reportedSourcePath($mapping);
             $artifact = $workspaceSha === null ? null : $this->findAvailableArtifact($project, $workspaceSha, $branch);
 
             return [
                 'mapping_id' => $mapping->id,
                 'agent_name' => $mapping->localAgent->name ?? $mapping->localAgent->public_id,
-                'source_workspace_path' => $mapping->sourceWorkspacePath(),
+                'source_workspace_path' => $state === 'invalid_source' ? null : $reportedSource,
                 'branch' => $branch,
                 'workspace_sha' => $workspaceSha,
                 'workspace_short_sha' => $workspaceSha === null ? null : substr($workspaceSha, 0, 12),
@@ -80,6 +86,11 @@ final class ArtifactCommitSelector
 
     private function workspaceState(LocalProjectMapping $mapping): string
     {
+        $source = $this->reportedSourcePath($mapping);
+        if ($source === '' || SourceWorkspacePath::isProductionLike($source)) {
+            return 'invalid_source';
+        }
+
         if (! $this->validSha($mapping->local_head_sha) || $mapping->reported_at === null) {
             return 'not_reported';
         }
@@ -93,6 +104,13 @@ final class ArtifactCommitSelector
         }
 
         return 'clean';
+    }
+
+    private function reportedSourcePath(LocalProjectMapping $mapping): string
+    {
+        return is_string($mapping->source_workspace_path) && trim($mapping->source_workspace_path) !== ''
+            ? trim($mapping->source_workspace_path)
+            : trim((string) $mapping->local_path);
     }
 
     private function validSha(?string $sha): bool

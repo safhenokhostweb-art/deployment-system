@@ -40,6 +40,7 @@
         <thead><tr>
             <th>{{ __('ui.common.name') }} / public_id</th>
             <th>{{ __('ui.common.status') }}</th>
+            <th>Role</th>
             <th>{{ __('status.online') }}</th>
             <th>{{ __('ui.local_agents.os') }}</th>
             <th>{{ __('ui.common.projects') }}</th>
@@ -56,6 +57,7 @@
             <tr>
                 <td><a href="{{ route('local-agents.show', $localAgent) }}">{{ $localAgent->name ?? $localAgent->public_id }}</a></td>
                 <td><x-badge :status="$localAgent->status" /></td>
+                <td>{{ $localAgent->role }}</td>
                 <td>
                     @if ($localAgent->isOnline())
                         <x-badge status="online" />
@@ -83,7 +85,7 @@
                 </td>
             </tr>
         @empty
-            <tr><td colspan="8"><x-empty-state>{{ __('ui.local_agents.no_local_agents') }}</x-empty-state></td></tr>
+            <tr><td colspan="9"><x-empty-state>{{ __('ui.local_agents.no_local_agents') }}</x-empty-state></td></tr>
         @endforelse
         </tbody>
     </table>

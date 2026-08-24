@@ -24,6 +24,7 @@ class LocalAgentFactory extends Factory
         return [
             'public_id' => (string) Str::uuid(),
             'status' => LocalAgent::STATUS_PENDING_APPROVAL,
+            'role' => LocalAgent::ROLE_DEVELOPMENT,
             'name' => $this->faker->userName() . '-laptop',
             'hostname' => $this->faker->domainWord() . '-pc',
             'operating_system' => 'windows',
@@ -51,6 +52,19 @@ class LocalAgentFactory extends Factory
                 'approved_at' => now(),
             ];
         });
+    }
+
+    public function productionBuild(): self
+    {
+        return $this->approved()->state([
+            'role' => LocalAgent::ROLE_PRODUCTION_BUILD,
+            'last_seen_at' => now(),
+            'capabilities' => [
+                'git' => true,
+                'php' => '8.4',
+                'laravel_release_manifest' => true,
+            ],
+        ]);
     }
 
     public function disabled(): self

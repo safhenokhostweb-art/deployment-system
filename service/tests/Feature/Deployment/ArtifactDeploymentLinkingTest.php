@@ -267,11 +267,16 @@ class ArtifactDeploymentLinkingTest extends TestCase
             'auto_deploy' => true,
             'requires_complete_artifact' => true,
         ]);
-        $localAgent = LocalAgent::factory()->approved()->create();
+        $localAgent = LocalAgent::factory()->productionBuild()->create();
+        $project->update(['authoritative_build_local_agent_id' => $localAgent->id]);
         LocalProjectMapping::factory()->create([
             'project_id' => $project->id,
             'local_agent_id' => $localAgent->id,
             'git_branch' => 'main',
+            'local_head_sha' => str_repeat('c0', 20),
+            'reported_branch' => 'main',
+            'working_tree_dirty' => false,
+            'reported_at' => now(),
         ]);
         $commitHash = str_repeat('c0', 20);
 
@@ -295,9 +300,10 @@ class ArtifactDeploymentLinkingTest extends TestCase
             'git_branch' => 'main',
             'reported_at' => now(),
         ]);
-        $capableAgent = LocalAgent::factory()->approved()->create([
+        $capableAgent = LocalAgent::factory()->productionBuild()->create([
             'agent_version' => config('deployment.min_local_agent_version_for_artifact'),
         ]);
+        $project->update(['authoritative_build_local_agent_id' => $capableAgent->id]);
         LocalProjectMapping::factory()->create([
             'project_id' => $project->id,
             'local_agent_id' => $capableAgent->id,
@@ -305,6 +311,9 @@ class ArtifactDeploymentLinkingTest extends TestCase
             'source_workspace_path' => '/opt/deployment-agent/workspaces/customer-site',
             'production_path' => '/var/www/customer-site',
             'git_branch' => 'main',
+            'local_head_sha' => str_repeat('ab', 20),
+            'reported_branch' => 'main',
+            'working_tree_dirty' => false,
             'reported_at' => now()->subMinute(),
         ]);
 
@@ -328,11 +337,16 @@ class ArtifactDeploymentLinkingTest extends TestCase
             'auto_deploy' => true,
             'requires_complete_artifact' => true,
         ]);
-        $localAgent = LocalAgent::factory()->approved()->create();
+        $localAgent = LocalAgent::factory()->productionBuild()->create();
+        $project->update(['authoritative_build_local_agent_id' => $localAgent->id]);
         LocalProjectMapping::factory()->create([
             'project_id' => $project->id,
             'local_agent_id' => $localAgent->id,
             'git_branch' => 'main',
+            'local_head_sha' => str_repeat('f0', 20),
+            'reported_branch' => 'main',
+            'working_tree_dirty' => false,
+            'reported_at' => now(),
         ]);
         $commitHash = str_repeat('f0', 20);
 
@@ -388,11 +402,16 @@ class ArtifactDeploymentLinkingTest extends TestCase
             'server_id' => $server->id,
         ]);
         $commitHash = str_repeat('e0', 20);
-        $localAgent = LocalAgent::factory()->approved()->create();
+        $localAgent = LocalAgent::factory()->productionBuild()->create();
+        $project->update(['authoritative_build_local_agent_id' => $localAgent->id]);
         LocalProjectMapping::factory()->create([
             'project_id' => $project->id,
             'local_agent_id' => $localAgent->id,
             'git_branch' => 'main',
+            'local_head_sha' => str_repeat('e0', 20),
+            'reported_branch' => 'main',
+            'working_tree_dirty' => false,
+            'reported_at' => now(),
         ]);
 
         $job = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');

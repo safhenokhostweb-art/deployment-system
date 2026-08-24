@@ -23,6 +23,7 @@ require __DIR__ . '/../lib/ArtifactManager.php';
 require __DIR__ . '/../lib/ReleaseValidator.php';
 require __DIR__ . '/../lib/ProductionPathGuard.php';
 require __DIR__ . '/../lib/PipelineExecutor.php';
+require __DIR__ . '/../lib/HttpHealthCheckRunner.php';
 
 use DeploymentAgent\ArtifactManager;
 use DeploymentAgent\Client;
@@ -775,6 +776,55 @@ check('rollback: maintenance cleanup entry was reported (guaranteed artisan up)'
 check('rollback: the failing step is the last application step in the log', array_slice($rollbackStepNames, 0, -1) === ['maintenance mode', 'deploy artifact', 'broken migrate'], $failures, $passCount);
 $rollbackStatuses = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-rollback/status' ? ($e['body']['status'] ?? null) : null, readHubLog($hub['logPath']))));
 check('rollback: final status is failed', end($rollbackStatuses) === 'failed', $failures, $passCount);
+
+@unlink($hub['logPath']);
+file_put_contents($hub['logPath'], '');
+
+// ============================================================
+// Scenario 9: the plain pipeline always performs an explicitly configured
+// customer-facing HTTP check after its application commands. HTTP 200 is
+// the only success path; HTTP 500 is reported with a structured health log
+// and a failed terminal status.
+// ============================================================
+$healthDir = $workspace . '/health-site';
+mkdir($healthDir, 0777, true);
+$healthJob = [
+    'id' => 'job-health-ok',
+    'action' => 'deploy',
+    'project_key' => 'health-site',
+    'commit_hash' => str_repeat('1', 40),
+    'branch' => 'main',
+    'artifact' => null,
+    'pipeline' => [['name' => 'commands pass', 'command' => 'node -e "process.exit(0)"']],
+    'http_health_check' => [
+        'enabled' => true,
+        'url' => "http://127.0.0.1:{$hub['port']}/health-ok",
+        'expected_status' => 200,
+        'timeout_seconds' => 2,
+        'retries' => 0,
+        'retry_interval_seconds' => 0,
+        'allowed_redirects' => false,
+        'expected_content' => 'customer-homepage-marker',
+    ],
+];
+$pipelineExecutor->execute($healthJob, ['working_directory' => $healthDir, 'allowed_services' => []], 30);
+$healthOkEvents = readHubLog($hub['logPath']);
+$healthOkLog = array_values(array_filter($healthOkEvents, static fn ($e) => $e['path'] === '/api/agent/jobs/job-health-ok/log' && ($e['body']['step_type'] ?? null) === 'http_health_check'));
+$healthOkStatuses = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-health-ok/status' ? ($e['body']['status'] ?? null) : null, $healthOkEvents)));
+check('pipeline HTTP 200 records a successful explicit health step', count($healthOkLog) === 1 && $healthOkLog[0]['body']['exit_code'] === 0, $failures, $passCount);
+check('pipeline HTTP 200 permits terminal success', end($healthOkStatuses) === 'succeeded', $failures, $passCount);
+
+@unlink($hub['logPath']);
+file_put_contents($hub['logPath'], '');
+$healthJob['id'] = 'job-health-500';
+$healthJob['http_health_check']['url'] = "http://127.0.0.1:{$hub['port']}/health-error";
+$healthJob['http_health_check']['expected_content'] = null;
+$pipelineExecutor->execute($healthJob, ['working_directory' => $healthDir, 'allowed_services' => []], 30);
+$healthErrorEvents = readHubLog($hub['logPath']);
+$healthErrorLog = array_values(array_filter($healthErrorEvents, static fn ($e) => $e['path'] === '/api/agent/jobs/job-health-500/log' && ($e['body']['step_type'] ?? null) === 'http_health_check'));
+$healthErrorStatus = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-health-500/status' ? $e['body'] : null, $healthErrorEvents)));
+check('pipeline HTTP 500 records the actual health failure', count($healthErrorLog) === 1 && $healthErrorLog[0]['body']['exit_code'] === 1 && str_contains($healthErrorLog[0]['body']['output'], 'got 500'), $failures, $passCount);
+check('pipeline HTTP 500 blocks success with health_check_failed', end($healthErrorStatus)['status'] === 'failed' && end($healthErrorStatus)['failure_code'] === 'health_check_failed', $failures, $passCount);
 
 @unlink($hub['logPath']);
 file_put_contents($hub['logPath'], '');

@@ -126,6 +126,36 @@ class AgentTaskReleaseGateTest extends TestCase
         $this->assertSame(DeploymentTask::STATUS_RUNNING, $ctx['task']->fresh()->status);
     }
 
+    public function test_agent_without_http_health_protocol_is_rejected_before_task_execution(): void
+    {
+        $ctx = $this->makeTask([
+            'deployment' => [
+                'http_health_config' => ['enabled' => true, 'url' => 'https://customer.example/'],
+                'http_health_status' => Deployment::HTTP_HEALTH_PENDING,
+            ],
+        ]);
+
+        $this->assertNull(app(AgentTaskService::class)->claimNextTask($ctx['agent']));
+        $this->assertSame(DeploymentTask::STATUS_FAILED, $ctx['task']->fresh()->status);
+        $this->assertSame(Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE, $ctx['deployment']->fresh()->failure_code);
+    }
+
+    public function test_http_health_capable_agent_receives_the_snapshotted_health_contract(): void
+    {
+        $ctx = $this->makeTask([
+            'deployment' => [
+                'http_health_config' => ['enabled' => true, 'url' => 'https://customer.example/'],
+                'http_health_status' => Deployment::HTTP_HEALTH_PENDING,
+            ],
+        ]);
+        $ctx['agent']->update(['agent_version' => '1.3.0']);
+
+        $claimed = app(AgentTaskService::class)->claimNextTask($ctx['agent']);
+
+        $this->assertNotNull($claimed);
+        $this->assertSame('https://customer.example/', $claimed['job']['http_health_check']['url']);
+    }
+
     public function test_requires_complete_artifact_with_no_artifact_fails_closed(): void
     {
         $ctx = $this->makeTask(['project' => ['requires_complete_artifact' => true]]);

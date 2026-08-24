@@ -108,6 +108,9 @@ class RecipeDeploymentDashboardTest extends TestCase
             'started_at' => now()->subMinutes(3),
             'finished_at' => now(),
             'deployed_at' => now(),
+            'http_health_config' => ['enabled' => true, 'url' => 'https://example.test/'],
+            'http_health_status' => Deployment::HTTP_HEALTH_VERIFIED,
+            'http_health_verified_at' => now(),
         ]);
         $unverified = Deployment::factory()->create([
             'project_id' => $project->id,

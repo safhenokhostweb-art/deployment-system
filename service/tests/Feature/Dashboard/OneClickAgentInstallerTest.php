@@ -318,7 +318,7 @@ class OneClickAgentInstallerTest extends TestCase
         // agent.php's own pollAndExecute() for testability) — this count
         // is a derived fact about the directory's contents, not a value
         // worth freezing in place.
-        $this->assertCount(18, $matches, 'Expected agent.php + 17 lib/*.php files to be embedded.');
+        $this->assertCount(19, $matches, 'Expected agent.php + 18 lib/*.php files to be embedded.');
 
         foreach ($matches as $match) {
             [, $relativePath, , $heredocBody, $expectedChecksum] = $match;

@@ -13,6 +13,7 @@ use App\Services\Deployment\Artifact\ArtifactService;
 use App\Services\Security\JobPayloadSigner;
 use App\Services\Security\SecretRedactor;
 use Illuminate\Support\Facades\DB;
+use App\Support\Deployment\HttpHealthCheckPayload;
 
 class AgentJobService
 {
@@ -147,6 +148,20 @@ class AgentJobService
                 return null;
             }
 
+            if ($deployment->hasHttpHealthCheck() && !$this->serverAgentEnforcesHttpHealth($server)) {
+                $reportedVersion = $server->agents()->first()?->agent_version;
+                $requiredVersion = (string) config('deployment.min_server_agent_version_for_http_health');
+                $deployment->update([
+                    'status' => Deployment::STATUS_FAILED,
+                    'finished_at' => now(),
+                    'last_activity_at' => now(),
+                    'failure_code' => Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE,
+                    'failure_message' => "The server agent (version " . ($reportedVersion ?? 'unknown') . ") cannot execute customer-facing HTTP health verification. Upgrade the agent to at least {$requiredVersion} before deploying this project.",
+                ]);
+
+                return null;
+            }
+
             $job = [
                 'id' => $deployment->public_id,
                 'project_key' => $project->project_key,
@@ -164,7 +179,10 @@ class AgentJobService
                 // non-null — see Project::usesDeploymentRecipe(). Already
                 // fully normalized (defaults filled in) by RecipeValidator
                 // at save time, so the agent never has to guess a default.
-                'deployment_recipe' => $usesRecipe ? $project->deployment_recipe : null,
+                'deployment_recipe' => $usesRecipe
+                    ? HttpHealthCheckPayload::appendToRecipe($project->deployment_recipe, $deployment->http_health_config)
+                    : null,
+                'http_health_check' => $deployment->http_health_config,
                 // A rollback of a recipe-driven project never re-runs the
                 // build recipe against an old commit (slow, and the whole
                 // point of keeping releases around is to avoid rebuilding)
@@ -242,10 +260,55 @@ class AgentJobService
         $isTerminalFailure = $status === Deployment::STATUS_FAILED;
         $isRolledBack = $status === Deployment::STATUS_ROLLED_BACK;
 
+        $healthLog = $deployment->hasHttpHealthCheck()
+            ? $deployment->logEntries()->where('step_type', 'http_health_check')->reorder()->latest('sequence')->first()
+            : null;
+
+        // A configured health check is a fail-closed protocol contract. An
+        // old or faulty Agent cannot claim success without first recording
+        // the actual HTTP step and its successful exit code.
+        if ($isTerminalSuccess && $deployment->hasHttpHealthCheck()
+            && ($healthLog === null || $healthLog->exit_code !== 0 || $healthLog->timed_out)) {
+            $status = Deployment::STATUS_FAILED;
+            $message = 'The Agent reported success without a successful customer-facing HTTP health-check result.';
+            $failureCode = Deployment::FAILURE_CODE_HEALTH_CHECK_FAILED;
+            $isTerminalSuccess = false;
+            $isTerminalFailure = true;
+            $attributes['status'] = $status;
+        }
+
         if ($isTerminalSuccess || $isTerminalFailure || $isRolledBack) {
             $attributes['finished_at'] = $now;
             $attributes['failure_message'] = $isTerminalSuccess ? null : $message;
             $attributes['failure_code'] = $isTerminalSuccess ? null : $failureCode;
+        }
+
+        if ($isTerminalSuccess || ($isTerminalFailure && $failureCode === Deployment::FAILURE_CODE_HEALTH_CHECK_FAILED)) {
+            $attributes['execution_status'] = Deployment::EXECUTION_SUCCEEDED;
+            $attributes['execution_finished_at'] = $now;
+        } elseif ($isTerminalFailure) {
+            $attributes['execution_status'] = Deployment::EXECUTION_FAILED;
+            $attributes['execution_finished_at'] = $now;
+        }
+
+        if ($deployment->hasHttpHealthCheck() && $isTerminalSuccess) {
+            $attributes['http_health_status'] = Deployment::HTTP_HEALTH_VERIFIED;
+            $attributes['http_health_verified_at'] = $now;
+            $attributes['http_health_details'] = [
+                'step_name' => $healthLog?->step_name,
+                'exit_code' => $healthLog?->exit_code,
+                'duration_ms' => $healthLog?->duration_ms,
+                'output' => $healthLog?->output,
+            ];
+        } elseif ($deployment->hasHttpHealthCheck() && $isTerminalFailure
+            && $failureCode === Deployment::FAILURE_CODE_HEALTH_CHECK_FAILED) {
+            $attributes['http_health_status'] = Deployment::HTTP_HEALTH_FAILED;
+            $attributes['http_health_details'] = [
+                'step_name' => $healthLog?->step_name,
+                'exit_code' => $healthLog?->exit_code,
+                'duration_ms' => $healthLog?->duration_ms,
+                'output' => $healthLog?->output ?? $message,
+            ];
         }
 
         if ($isTerminalSuccess) {
@@ -372,5 +435,14 @@ class AgentJobService
         }
 
         return version_compare($agentVersion, (string) config('deployment.min_server_agent_version_for_artifact'), '>=');
+    }
+
+    private function serverAgentEnforcesHttpHealth(Server $server): bool
+    {
+        $agentVersion = $server->agents()->first()?->agent_version;
+
+        return is_string($agentVersion)
+            && $agentVersion !== ''
+            && version_compare($agentVersion, (string) config('deployment.min_server_agent_version_for_http_health'), '>=');
     }
 }

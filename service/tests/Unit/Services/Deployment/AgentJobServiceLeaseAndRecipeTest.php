@@ -127,7 +127,9 @@ class AgentJobServiceLeaseAndRecipeTest extends TestCase
 
         $this->assertNotNull($updated->finished_at);
         $this->assertNotNull($updated->deployed_at);
-        $this->assertTrue($updated->isVerifiedDeployed());
+        $this->assertFalse($updated->isVerifiedDeployed());
+        $this->assertSame(Deployment::EXECUTION_SUCCEEDED, $updated->execution_status);
+        $this->assertSame(Deployment::HTTP_HEALTH_NOT_CONFIGURED, $updated->http_health_status);
         $this->assertNull($updated->failure_code);
     }
 

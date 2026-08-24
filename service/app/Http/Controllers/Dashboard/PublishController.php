@@ -9,6 +9,7 @@ use App\Models\Project;
 use App\Models\PublishJob;
 use App\Services\Deployment\DeploymentDispatcher;
 use App\Services\Publish\ArtifactCommitSelector;
+use App\Services\Publish\AuthoritativeBuildAgentResolver;
 use App\Services\Publish\PublishJobService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -27,6 +28,7 @@ class PublishController extends Controller
         private readonly PublishJobService $publishJobs,
         private readonly ArtifactCommitSelector $artifactCommits,
         private readonly DeploymentDispatcher $deployments,
+        private readonly AuthoritativeBuildAgentResolver $buildAgents,
     ) {
     }
 
@@ -34,7 +36,9 @@ class PublishController extends Controller
     {
         Gate::authorize('local_agents.publish');
 
-        $mapping = $this->resolveMapping($request, $project);
+        $mapping = $project->requires_complete_artifact
+            ? $this->buildAgents->resolve($project, $project->branch)
+            : $this->resolveMapping($request, $project);
 
         if ($project->requires_complete_artifact) {
             $validated = $request->validate([

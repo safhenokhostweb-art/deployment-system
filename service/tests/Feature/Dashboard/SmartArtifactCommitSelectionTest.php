@@ -200,9 +200,49 @@ class SmartArtifactCommitSelectionTest extends TestCase
         $this->assertStringNotContainsString('/var/www/saas-platform', $this->artifactSelectorHtml($response->getContent()));
     }
 
+    public function test_production_like_mapping_is_never_presented_as_a_verified_source(): void
+    {
+        [$user, $project, $mapping] = $this->verifiedProject('customer-site', str_repeat('6', 40));
+        $mapping->update([
+            'local_path' => '/var/www/customer-site',
+            'source_workspace_path' => '/var/www/customer-site',
+            'production_path' => '/var/www/customer-site',
+        ]);
+
+        $response = $this->actingAs($user)->get(route('projects.show', $project));
+        $selector = $this->artifactSelectorHtml($response->getContent());
+
+        $this->assertStringNotContainsString('/var/www/customer-site', $selector);
+        $this->assertStringContainsString('production-like', $selector);
+    }
+
     public function test_saas_platform_can_deploy_an_existing_artifact_without_rebuilding_it(): void
     {
         $this->assertExistingArtifactDeploymentFor('saas-platform', str_repeat('4', 40), '/var/www/saas-platform');
+    }
+
+    public function test_required_project_shows_roles_but_no_ambiguous_agent_selector(): void
+    {
+        [$user, $project] = $this->verifiedProject('customer-site', str_repeat('5', 40));
+        $development = LocalAgent::factory()->approved()->create([
+            'name' => 'DESKTOP-DEVELOPMENT',
+            'last_seen_at' => now(),
+        ]);
+        LocalProjectMapping::factory()->create([
+            'local_agent_id' => $development->id,
+            'project_id' => $project->id,
+            'local_path' => 'C:\\workspaces\\customer-site',
+            'source_workspace_path' => 'C:\\workspaces\\customer-site',
+            'git_branch' => 'main',
+        ]);
+
+        $response = $this->actingAs($user)->get(route('projects.show', $project));
+
+        $response->assertOk()
+            ->assertSee('Authoritative Build Agent')
+            ->assertSee(LocalAgent::ROLE_PRODUCTION_BUILD)
+            ->assertSee(LocalAgent::ROLE_DEVELOPMENT)
+            ->assertDontSee('<select name="local_project_mapping_id"', false);
     }
 
     /** @return array{User, Project, LocalProjectMapping} */
@@ -216,7 +256,7 @@ class SmartArtifactCommitSelectionTest extends TestCase
             'branch' => 'main',
             'requires_complete_artifact' => true,
         ]);
-        $agent = LocalAgent::factory()->approved()->create();
+        $agent = LocalAgent::factory()->productionBuild()->create();
         $mapping = LocalProjectMapping::factory()->create([
             'local_agent_id' => $agent->id,
             'project_id' => $project->id,
@@ -230,6 +270,7 @@ class SmartArtifactCommitSelectionTest extends TestCase
             'working_tree_dirty' => false,
             'reported_at' => now(),
         ]);
+        $project->update(['authoritative_build_local_agent_id' => $agent->id]);
 
         return [$user, $project, $mapping];
     }

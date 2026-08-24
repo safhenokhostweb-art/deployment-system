@@ -14,6 +14,18 @@ $manifestPath = getenv('ARTIFACT_MANIFEST_PATH');
 
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
 
+if ($path === '/health-ok') {
+    http_response_code(200);
+    echo 'customer-homepage-marker';
+    return;
+}
+
+if ($path === '/health-error') {
+    http_response_code(500);
+    echo 'customer application error';
+    return;
+}
+
 if (preg_match('#^/api/agent/artifacts/([^/]+)/download$#', $path, $m)) {
     $manifest = json_decode((string) @file_get_contents($manifestPath), true) ?: [];
     $entry = $manifest[$m[1]] ?? null;

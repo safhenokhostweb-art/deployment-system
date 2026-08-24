@@ -99,4 +99,39 @@ class DeploymentStatusAggregationTest extends TestCase
 
         $this->assertEquals($firstFinishedAt, $deployment->fresh()->finished_at);
     }
+
+    public function test_all_targets_with_required_health_evidence_aggregate_as_verified(): void
+    {
+        $deployment = $this->makeDeploymentWithTasks([DeploymentTask::STATUS_SUCCEEDED, DeploymentTask::STATUS_SUCCEEDED]);
+        $deployment->update([
+            'http_health_config' => ['enabled' => true, 'url' => 'https://customer.example/'],
+            'http_health_status' => Deployment::HTTP_HEALTH_PENDING,
+        ]);
+
+        $result = $this->aggregator()->recalculate($deployment->fresh());
+
+        $this->assertSame(Deployment::EXECUTION_SUCCEEDED, $result->execution_status);
+        $this->assertSame(Deployment::HTTP_HEALTH_VERIFIED, $result->http_health_status);
+        $this->assertTrue($result->isVerifiedDeployed());
+    }
+
+    public function test_health_only_target_failures_preserve_execution_success_and_health_failure(): void
+    {
+        $deployment = $this->makeDeploymentWithTasks([DeploymentTask::STATUS_FAILED]);
+        $deployment->update([
+            'http_health_config' => ['enabled' => true, 'url' => 'https://customer.example/'],
+            'http_health_status' => Deployment::HTTP_HEALTH_PENDING,
+        ]);
+        $deployment->tasks()->update([
+            'failure_code' => Deployment::FAILURE_CODE_HEALTH_CHECK_FAILED,
+            'failure_message' => 'Expected HTTP 200, got HTTP 500.',
+        ]);
+
+        $result = $this->aggregator()->recalculate($deployment->fresh());
+
+        $this->assertSame(Deployment::STATUS_FAILED, $result->status);
+        $this->assertSame(Deployment::EXECUTION_SUCCEEDED, $result->execution_status);
+        $this->assertSame(Deployment::HTTP_HEALTH_FAILED, $result->http_health_status);
+        $this->assertFalse($result->isVerifiedDeployed());
+    }
 }

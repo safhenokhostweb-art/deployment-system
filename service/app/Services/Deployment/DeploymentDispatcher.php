@@ -12,7 +12,7 @@ use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use App\Models\PublishJob;
 use App\Services\Deployment\Artifact\ArtifactService;
-use App\Support\Deployment\SourceWorkspacePath;
+use App\Services\Publish\AuthoritativeBuildAgentResolver;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -42,6 +42,7 @@ class DeploymentDispatcher
     public function __construct(
         private readonly DeploymentTargetResolver $resolver,
         private readonly ArtifactService $artifacts,
+        private readonly AuthoritativeBuildAgentResolver $buildAgents,
     ) {
     }
 
@@ -440,6 +441,10 @@ class DeploymentDispatcher
                 'approved_by' => $autoApprove ? $approvedBy : null,
                 'approved_at' => $autoApprove ? now() : null,
                 'artifact_id' => $artifactId,
+                'http_health_config' => $project->deploymentHttpHealthConfig(),
+                'http_health_status' => $project->requiresHttpHealthVerification()
+                    ? Deployment::HTTP_HEALTH_PENDING
+                    : Deployment::HTTP_HEALTH_NOT_CONFIGURED,
             ]);
 
             // artifact_id is assigned in the INSERT itself. Required projects
@@ -519,6 +524,10 @@ class DeploymentDispatcher
                 'approved_by' => $autoApprove ? ($trigger === Deployment::TRIGGER_WEBHOOK || $trigger === Deployment::TRIGGER_PUBLISH ? 'auto_deploy' : $triggeredBy) : null,
                 'approved_at' => $autoApprove ? now() : null,
                 'artifact_id' => $artifactId,
+                'http_health_config' => $project->deploymentHttpHealthConfig(),
+                'http_health_status' => $project->requiresHttpHealthVerification()
+                    ? Deployment::HTTP_HEALTH_PENDING
+                    : Deployment::HTTP_HEALTH_NOT_CONFIGURED,
             ]);
 
             // artifact_id is assigned before any queued DeploymentTasks exist.
@@ -571,23 +580,7 @@ class DeploymentDispatcher
      */
     private function queueRequiredArtifactBuild(Project $project, string $commitHash, string $branch, array $deploymentRequest): PublishJob
     {
-        $mapping = LocalProjectMapping::query()
-            ->where('project_id', $project->id)
-            ->whereHas('localAgent', fn ($query) => $query->where('status', LocalAgent::STATUS_APPROVED))
-            ->with(['localAgent', 'project'])
-            ->orderByDesc('reported_at')
-            ->get()
-            ->first(function (LocalProjectMapping $candidate) use ($branch): bool {
-                $agentVersion = $candidate->localAgent?->agent_version;
-                $minimumVersion = (string) config('deployment.min_local_agent_version_for_artifact');
-
-                return $candidate->effectiveBranch() === $branch
-                    && is_string($agentVersion)
-                    && version_compare($agentVersion, $minimumVersion, '>=')
-                    && !SourceWorkspacePath::isProductionLike($candidate->sourceWorkspacePath());
-            });
-
-        abort_if($mapping === null, 422, 'This artifact-required project has no approved, artifact-capable Local Agent mapping with an isolated source workspace for the requested branch.');
+        $mapping = $this->buildAgents->resolve($project, $branch);
 
         $requestedBy = (string) ($deploymentRequest['triggered_by'] ?? 'system');
         $job = PublishJob::create([

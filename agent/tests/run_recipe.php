@@ -28,6 +28,7 @@ require __DIR__ . '/../lib/ShellPlaceholders.php';
 require __DIR__ . '/../lib/ServiceAllowlist.php';
 require __DIR__ . '/../lib/ReleaseManager.php';
 require __DIR__ . '/../lib/RecipeStepRunner.php';
+require __DIR__ . '/../lib/HttpHealthCheckRunner.php';
 
 use DeploymentAgent\Client;
 use DeploymentAgent\Executor;

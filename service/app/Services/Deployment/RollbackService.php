@@ -39,6 +39,10 @@ class RollbackService
                 'approved_at' => now(),
                 'queued_at' => now(),
                 'rollback_of_deployment_id' => $target->id,
+                'http_health_config' => $project->deploymentHttpHealthConfig(),
+                'http_health_status' => $project->requiresHttpHealthVerification()
+                    ? Deployment::HTTP_HEALTH_PENDING
+                    : Deployment::HTTP_HEALTH_NOT_CONFIGURED,
             ]);
 
             AuditLogEntry::record(
@@ -122,6 +126,10 @@ class RollbackService
                 'approved_at' => now(),
                 'queued_at' => now(),
                 'rollback_of_deployment_id' => $targetTask->deployment_id,
+                'http_health_config' => $project->deploymentHttpHealthConfig(),
+                'http_health_status' => $project->requiresHttpHealthVerification()
+                    ? Deployment::HTTP_HEALTH_PENDING
+                    : Deployment::HTTP_HEALTH_NOT_CONFIGURED,
             ]);
 
             DeploymentTask::create([

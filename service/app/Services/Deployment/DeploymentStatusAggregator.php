@@ -45,10 +45,33 @@ class DeploymentStatusAggregator
             // deployment showed "verified deployed: no" on the details page
             // even though it passed every health check.
             $attributes['deployed_at'] = now();
+            $attributes['execution_status'] = Deployment::EXECUTION_SUCCEEDED;
+            $attributes['execution_finished_at'] = now();
+            if ($deployment->hasHttpHealthCheck()) {
+                $attributes['http_health_status'] = Deployment::HTTP_HEALTH_VERIFIED;
+                $attributes['http_health_verified_at'] = now();
+                $attributes['http_health_details'] = ['targets_verified' => $statuses->count()];
+            }
         }
 
         if (in_array($newStatus, [Deployment::STATUS_SUCCEEDED, Deployment::STATUS_FAILED, Deployment::STATUS_PARTIAL_SUCCESS], true)) {
             $attributes['finished_at'] = now();
+            if ($newStatus !== Deployment::STATUS_SUCCEEDED) {
+                $failureCodes = $deployment->tasks()->where('status', DeploymentTask::STATUS_FAILED)->pluck('failure_code');
+                $healthOnlyFailure = $failureCodes->isNotEmpty()
+                    && $failureCodes->every(fn (?string $code): bool => $code === Deployment::FAILURE_CODE_HEALTH_CHECK_FAILED);
+                $attributes['execution_status'] = $healthOnlyFailure
+                    ? Deployment::EXECUTION_SUCCEEDED
+                    : Deployment::EXECUTION_FAILED;
+                $attributes['execution_finished_at'] = now();
+                if ($deployment->hasHttpHealthCheck() && $healthOnlyFailure) {
+                    $attributes['http_health_status'] = Deployment::HTTP_HEALTH_FAILED;
+                    $attributes['http_health_details'] = [
+                        'failed_targets' => $failureCodes->count(),
+                        'message' => 'One or more targets failed customer-facing HTTP health verification.',
+                    ];
+                }
+            }
             $this->releaseEnvironmentLock($deployment);
         }
 

@@ -22,6 +22,7 @@ class ProjectFactory extends Factory
                 ['name' => 'git pull', 'command' => 'git fetch origin {branch} && git reset --hard {commit}'],
                 ['name' => 'cache clear', 'command' => '{php_binary} artisan optimize:clear'],
             ],
+            'http_health_check' => null,
             'auto_deploy' => false,
             'github_webhook_secret' => Str::random(40),
             'is_active' => true,

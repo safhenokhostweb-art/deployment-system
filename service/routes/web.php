@@ -58,6 +58,7 @@ Route::middleware('auth')->group(function () {
     Route::post('/local-agents/{localAgent:public_id}/reject', [LocalAgentController::class, 'reject'])->name('local-agents.reject');
     Route::post('/local-agents/{localAgent:public_id}/disable', [LocalAgentController::class, 'disable'])->name('local-agents.disable');
     Route::post('/local-agents/{localAgent:public_id}/reenable', [LocalAgentController::class, 'reenable'])->name('local-agents.reenable');
+    Route::post('/local-agents/{localAgent:public_id}/role', [LocalAgentController::class, 'updateRole'])->name('local-agents.role');
     Route::post('/local-agents/{localAgent:public_id}/restart', [LocalAgentController::class, 'restart'])->name('local-agents.restart');
     Route::post('/local-agents/{localAgent:public_id}/fetch-logs', [LocalAgentController::class, 'fetchLogs'])->name('local-agents.fetch-logs');
     Route::post('/local-agents/{localAgent:public_id}/reload-config', [LocalAgentController::class, 'reloadConfig'])->name('local-agents.reload-config');

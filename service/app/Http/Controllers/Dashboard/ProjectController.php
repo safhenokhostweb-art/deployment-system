@@ -8,6 +8,7 @@ use App\Models\AuditLogEntry;
 use App\Models\Environment;
 use App\Models\GitHubAccount;
 use App\Models\LocalChangeDetectionJob;
+use App\Models\LocalAgent;
 use App\Models\Project;
 use App\Models\PublishJob;
 use App\Models\Server;
@@ -165,6 +166,7 @@ class ProjectController extends Controller
             'server_id' => $validated['server_id'],
             'pipeline' => $validated['pipeline'],
             'deployment_recipe' => $validated['deployment_recipe'],
+            'http_health_check' => $validated['http_health_check'],
             'application_root' => $validated['application_root'],
             'auto_deploy' => $request->boolean('auto_deploy'),
             'github_webhook_secret' => $plainWebhookSecret,
@@ -217,6 +219,7 @@ class ProjectController extends Controller
             // Phase 5: One-Click Publish — only approved local agents are
             // ever offered as a publish target from this page.
             'localProjectMappings.localAgent',
+            'authoritativeBuildAgent',
         ]);
         // Phase 4-L Task 2: candidates for the "connect GitHub" action
         // shown when this project has no github_account_id yet — never
@@ -323,8 +326,13 @@ class ProjectController extends Controller
 
         $servers = Server::where('is_active', true)->get();
         $pipelineJson = json_encode($project->pipeline, JSON_PRETTY_PRINT);
+        $project->load('localProjectMappings.localAgent');
+        $buildAgentCandidates = $project->localProjectMappings
+            ->map->localAgent
+            ->unique('id')
+            ->values();
 
-        return view('projects.edit', compact('project', 'servers', 'pipelineJson'));
+        return view('projects.edit', compact('project', 'servers', 'pipelineJson', 'buildAgentCandidates'));
     }
 
     public function update(Request $request, Project $project): RedirectResponse
@@ -363,6 +371,10 @@ class ProjectController extends Controller
             'server_id' => $validated['server_id'],
             'pipeline' => $validated['pipeline'],
             'deployment_recipe' => $validated['deployment_recipe'],
+            'http_health_check' => $validated['http_health_check'],
+            'authoritative_build_local_agent_id' => array_key_exists('authoritative_build_local_agent_id', $validated)
+                ? $validated['authoritative_build_local_agent_id']
+                : $project->authoritative_build_local_agent_id,
             'artifact_preserve_paths' => $validated['artifact_preserve_paths'] ?? $project->artifact_preserve_paths,
             'artifact_persistent_paths' => $validated['artifact_persistent_paths'] ?? $project->artifact_persistent_paths,
             'artifact_persistent_root' => $validated['artifact_persistent_root'] ?? $project->artifact_persistent_root,
@@ -465,6 +477,16 @@ class ProjectController extends Controller
             'server_id' => 'required|exists:servers,id',
             'pipeline' => 'required|string',
             'deployment_recipe' => 'nullable|string',
+            'authoritative_build_local_agent_id' => 'nullable|exists:local_agents,id',
+            'http_health_enabled' => 'sometimes|boolean',
+            'http_health_base_url' => 'nullable|url:http,https|max:2048',
+            'http_health_path' => 'nullable|string|max:1024',
+            'http_health_expected_status' => 'nullable|integer|min:100|max:599',
+            'http_health_timeout_seconds' => 'nullable|integer|min:1|max:120',
+            'http_health_retries' => 'nullable|integer|min:0|max:10',
+            'http_health_retry_interval_seconds' => 'nullable|integer|min:0|max:300',
+            'http_health_allowed_redirects' => 'sometimes|boolean',
+            'http_health_expected_content' => 'nullable|string|max:500',
             'artifact_preserve_paths' => 'sometimes|nullable|array|max:20',
             'artifact_preserve_paths.*' => 'required|string|max:255',
             'artifact_persistent_paths' => 'sometimes|nullable|array|max:20',
@@ -517,6 +539,22 @@ class ProjectController extends Controller
                 : $this->recipeValidator->validate(json_decode($rawRecipe, true));
         }
         $validated['application_root'] = $validated['application_root'] ?? $project?->application_root ?? '.';
+        $validated['http_health_check'] = $this->normalizeHttpHealthCheck($request, $validated, $project);
+
+        if (!empty($validated['authoritative_build_local_agent_id'])) {
+            $agentId = (int) $validated['authoritative_build_local_agent_id'];
+            $agent = LocalAgent::query()->findOrFail($agentId);
+            if (!$agent->canBuildProductionArtifacts()) {
+                throw ValidationException::withMessages([
+                    'authoritative_build_local_agent_id' => 'The authoritative build Agent must be approved and have the production_build role.',
+                ]);
+            }
+            if ($project === null || !$project->localProjectMappings()->where('local_agent_id', $agentId)->exists()) {
+                throw ValidationException::withMessages([
+                    'authoritative_build_local_agent_id' => 'The authoritative build Agent must have a mapping for this project.',
+                ]);
+            }
+        }
         if (array_key_exists('artifact_preserve_paths', $validated)) {
             $validated['artifact_preserve_paths'] = $this->normalizeArtifactPreservePaths($validated['artifact_preserve_paths']);
         }
@@ -549,6 +587,39 @@ class ProjectController extends Controller
         }
 
         return $validated;
+    }
+
+    /** @param array<string, mixed> $validated @return array<string, mixed>|null */
+    private function normalizeHttpHealthCheck(Request $request, array $validated, ?Project $project): ?array
+    {
+        if (!$request->has('http_health_enabled')) {
+            return $project?->http_health_check;
+        }
+
+        if (!$request->boolean('http_health_enabled')) {
+            return null;
+        }
+
+        $baseUrl = rtrim((string) ($validated['http_health_base_url'] ?? ''), '/');
+        if ($baseUrl === '') {
+            throw ValidationException::withMessages(['http_health_base_url' => 'A base URL is required when HTTP health verification is enabled.']);
+        }
+
+        $path = trim((string) ($validated['http_health_path'] ?? '/'));
+        $path = '/' . ltrim($path === '' ? '/' : $path, '/');
+
+        return [
+            'enabled' => true,
+            'base_url' => $baseUrl,
+            'path' => $path,
+            'url' => $baseUrl . ($path === '/' ? '/' : $path),
+            'expected_status' => (int) ($validated['http_health_expected_status'] ?? 200),
+            'timeout_seconds' => (int) ($validated['http_health_timeout_seconds'] ?? 15),
+            'retries' => (int) ($validated['http_health_retries'] ?? 3),
+            'retry_interval_seconds' => (int) ($validated['http_health_retry_interval_seconds'] ?? 5),
+            'allowed_redirects' => $request->boolean('http_health_allowed_redirects'),
+            'expected_content' => ($validated['http_health_expected_content'] ?? null) ?: null,
+        ];
     }
 
     /** @param array<int, string>|null $paths @return array<int, string>|null */

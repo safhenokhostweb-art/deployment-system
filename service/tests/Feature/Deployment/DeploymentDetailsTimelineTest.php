@@ -191,9 +191,9 @@ class DeploymentDetailsTimelineTest extends TestCase
     }
 
     // CASE 7 — the details page for an approved, successful multi-target
-    // deployment shows "verified deployed: yes", never the contradictory
-    // "not verified" row, and still shows the approval record.
-    public function test_case7_successful_approved_deployment_page_shows_verified_not_unverified(): void
+    // deployment without an HTTP policy shows command success separately
+    // from the honest "HTTP not verified" state.
+    public function test_case7_successful_approved_deployment_without_http_check_is_not_health_verified(): void
     {
         $ctx = $this->makeApprovedTaskDeployment();
 
@@ -208,8 +208,8 @@ class DeploymentDetailsTimelineTest extends TestCase
 
         $response->assertOk();
         $response->assertSee('admin@example.test', false);
-        $response->assertSee(__('ui.deployments.verified_deployed_yes'));
-        $response->assertDontSee(__('ui.deployments.verified_deployed_no'));
+        $response->assertSee(__('ui.deployments.verified_deployed_no'));
+        $response->assertDontSee(__('ui.deployments.verified_deployed_yes'));
     }
 
     // CASE 8 — a legacy deployment with started_at = null renders without

@@ -63,6 +63,8 @@ class RetryDeploymentService
                     ->update([
                         'status' => DeploymentTask::STATUS_QUEUED,
                         'next_retry_at' => null,
+                        'failure_code' => null,
+                        'failure_message' => null,
                     ]);
             }
 
@@ -72,6 +74,14 @@ class RetryDeploymentService
                 'failure_code' => null,
                 'failure_message' => null,
                 'finished_at' => null,
+                'deployed_at' => null,
+                'execution_status' => Deployment::EXECUTION_PENDING,
+                'execution_finished_at' => null,
+                'http_health_status' => $deployment->hasHttpHealthCheck()
+                    ? Deployment::HTTP_HEALTH_PENDING
+                    : Deployment::HTTP_HEALTH_NOT_CONFIGURED,
+                'http_health_verified_at' => null,
+                'http_health_details' => null,
             ]);
 
             AuditLogEntry::record(
@@ -108,6 +118,8 @@ class RetryDeploymentService
             $task->update([
                 'status' => DeploymentTask::STATUS_QUEUED,
                 'next_retry_at' => null,
+                'failure_code' => null,
+                'failure_message' => null,
             ]);
 
             if ($deployment->isRetryable() || $deployment->isInProgress()) {
@@ -117,6 +129,14 @@ class RetryDeploymentService
                     'failure_code' => null,
                     'failure_message' => null,
                     'finished_at' => null,
+                    'deployed_at' => null,
+                    'execution_status' => Deployment::EXECUTION_PENDING,
+                    'execution_finished_at' => null,
+                    'http_health_status' => $deployment->hasHttpHealthCheck()
+                        ? Deployment::HTTP_HEALTH_PENDING
+                        : Deployment::HTTP_HEALTH_NOT_CONFIGURED,
+                    'http_health_verified_at' => null,
+                    'http_health_details' => null,
                 ]);
             }
 
@@ -140,7 +160,7 @@ class RetryDeploymentService
         $requiresGate = $deployment->artifact_id !== null
             || ($deployment->project->requires_complete_artifact && $deployment->action === Deployment::ACTION_DEPLOY);
 
-        if (!$requiresGate) {
+        if (!$requiresGate && !$deployment->hasHttpHealthCheck()) {
             return;
         }
 
@@ -156,8 +176,14 @@ class RetryDeploymentService
         foreach ($servers as $server) {
             $version = $server->agents()->first()?->agent_version;
 
-            if (!is_string($version) || $version === '' || version_compare($version, $required, '<')) {
+            if ($requiresGate && (!is_string($version) || $version === '' || version_compare($version, $required, '<'))) {
                 abort(409, "The server agent (version " . ($version ?? 'unknown') . ") is too old to enforce the Laravel release-completeness gate. Upgrade the agent to at least {$required} before retrying this deployment.");
+            }
+
+            $healthRequired = (string) config('deployment.min_server_agent_version_for_http_health');
+            if ($deployment->hasHttpHealthCheck()
+                && (!is_string($version) || $version === '' || version_compare($version, $healthRequired, '<'))) {
+                abort(409, "The server agent (version " . ($version ?? 'unknown') . ") cannot execute customer-facing HTTP health verification. Upgrade the agent to at least {$healthRequired} before retrying this deployment.");
             }
         }
     }

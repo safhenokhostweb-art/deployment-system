@@ -27,6 +27,7 @@ require __DIR__ . '/lib/ShellPlaceholders.php';
 require __DIR__ . '/lib/ServiceAllowlist.php';
 require __DIR__ . '/lib/ReleaseManager.php';
 require __DIR__ . '/lib/RecipeStepRunner.php';
+require __DIR__ . '/lib/HttpHealthCheckRunner.php';
 require __DIR__ . '/lib/ArtifactManager.php';
 require __DIR__ . '/lib/ReleaseValidator.php';
 require __DIR__ . '/lib/PipelineExecutor.php';
@@ -51,7 +52,7 @@ use DeploymentAgent\WorkspaceScanner;
  * can flag servers running an outdated agent. Bump this when agent.php or
  * lib/* changes in a way that matters operationally.
  */
-const AGENT_VERSION = '1.2.0';
+const AGENT_VERSION = '1.3.0';
 
 $configPath = __DIR__ . '/config.php';
 

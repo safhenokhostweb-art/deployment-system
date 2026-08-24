@@ -24,6 +24,9 @@ class AgentJobLogEntry extends Model
         'exit_code',
         'duration_ms',
         'timed_out',
+        'status',
+        'step_type',
+        'failure_code',
     ];
 
     protected function casts(): array

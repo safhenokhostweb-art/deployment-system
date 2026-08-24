@@ -21,9 +21,22 @@ class LocalAgent extends Model
     public const STATUS_APPROVED = 'approved';
     public const STATUS_DISABLED = 'disabled';
 
+    public const ROLE_PRODUCTION_BUILD = 'production_build';
+    public const ROLE_DEVELOPMENT = 'development';
+    public const ROLE_CONTROL = 'control';
+    public const ROLE_DISABLED_FOR_ARTIFACTS = 'disabled_for_artifacts';
+
+    public const ROLES = [
+        self::ROLE_PRODUCTION_BUILD,
+        self::ROLE_DEVELOPMENT,
+        self::ROLE_CONTROL,
+        self::ROLE_DISABLED_FOR_ARTIFACTS,
+    ];
+
     protected $fillable = [
         'public_id',
         'status',
+        'role',
         'name',
         'hostname',
         'operating_system',
@@ -71,6 +84,16 @@ class LocalAgent extends Model
     public function publishJobs(): HasMany
     {
         return $this->hasMany(PublishJob::class);
+    }
+
+    public function authoritativeProjects(): HasMany
+    {
+        return $this->hasMany(Project::class, 'authoritative_build_local_agent_id');
+    }
+
+    public function canBuildProductionArtifacts(): bool
+    {
+        return $this->isApproved() && $this->role === self::ROLE_PRODUCTION_BUILD;
     }
 
     public function changeDetectionJobs(): HasMany

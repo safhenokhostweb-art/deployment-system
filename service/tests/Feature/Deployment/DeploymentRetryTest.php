@@ -183,6 +183,33 @@ class DeploymentRetryTest extends TestCase
         $this->assertSame($artifact->id, $result->artifact_id);
     }
 
+    public function test_http_health_retry_requires_capable_agent_and_resets_health_state(): void
+    {
+        $ctx = $this->makeLegacyFailedDeployment([
+            'http_health_config' => ['enabled' => true, 'url' => 'https://customer.example/'],
+            'http_health_status' => Deployment::HTTP_HEALTH_FAILED,
+            'http_health_details' => ['output' => 'HTTP 500'],
+            'execution_status' => Deployment::EXECUTION_SUCCEEDED,
+            'execution_finished_at' => now(),
+        ]);
+
+        try {
+            $this->retryService()->retry($ctx['deployment'], 'admin@example.test');
+            $this->fail('Expected HTTP health retry to reject Agent 1.2.0.');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $exception) {
+            $this->assertSame(409, $exception->getStatusCode());
+            $this->assertStringContainsString('1.3.0', $exception->getMessage());
+        }
+
+        $ctx['agent']->update(['agent_version' => '1.3.0']);
+        $retried = $this->retryService()->retry($ctx['deployment']->fresh(), 'admin@example.test');
+        $this->assertSame(Deployment::STATUS_QUEUED, $retried->status);
+        $this->assertSame(Deployment::EXECUTION_PENDING, $retried->execution_status);
+        $this->assertSame(Deployment::HTTP_HEALTH_PENDING, $retried->http_health_status);
+        $this->assertNull($retried->http_health_details);
+        $this->assertNull($retried->http_health_verified_at);
+    }
+
     public function test_retry_rejects_non_retryable_terminal_states(): void
     {
         foreach ([Deployment::STATUS_SUCCEEDED, Deployment::STATUS_CANCELLED, Deployment::STATUS_ROLLED_BACK] as $status) {
