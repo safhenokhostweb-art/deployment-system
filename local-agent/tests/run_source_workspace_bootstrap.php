@@ -5,6 +5,7 @@ declare(strict_types=1);
 require __DIR__ . '/../lib/GitManager.php';
 require __DIR__ . '/../lib/Logger.php';
 require __DIR__ . '/../lib/SafetyChecker.php';
+require __DIR__ . '/../lib/SafeFilesystem.php';
 require __DIR__ . '/../lib/InvalidProjectCacheException.php';
 require __DIR__ . '/../lib/ProjectConfigCache.php';
 require __DIR__ . '/../lib/LocalProjectStateReporter.php';
@@ -116,9 +117,12 @@ try {
     $existingKey = 'deployment-system';
     $existingWorkspace = $root . '/workspaces/' . $existingKey;
     file_put_contents($existingWorkspace . '/reuse-marker.txt', 'keep');
+    $run(['git', 'remote', 'set-url', 'origin', 'git@github-safhe:safhenokhostweb-art/deployment-system.git'], $existingWorkspace);
     $unavailableRemote = $remotePaths[$existingKey] . '.offline';
     rename($remotePaths[$existingKey], $unavailableRemote);
-    $reused = $manager->reconcileProject($existingKey, $cachedProjects[$existingKey]);
+    $existingConfig = $cachedProjects[$existingKey];
+    $existingConfig['repository_url'] = 'https://github.com/safhenokhostweb-art/deployment-system.git';
+    $reused = $manager->reconcileProject($existingKey, $existingConfig);
     $check('existing workspace is reused without cloning again', $reused === 'reused');
     $check('existing workspace content survives reuse', is_file($existingWorkspace . '/reuse-marker.txt'));
     rename($unavailableRemote, $remotePaths[$existingKey]);
@@ -141,6 +145,8 @@ try {
     }
     $check('network/clone failure is surfaced', $cloneFailureRaised);
     $check('network/clone failure restores the existing workspace and its data', is_file($failedRepairWorkspace . '/must-survive.txt'));
+    $failedCloneDirectories = glob($root . '/workspaces/.workspace-clone-saas-platform-*') ?: [];
+    $check('network/clone failure removes only its generated partial clone', $failedCloneDirectories === []);
     rename($failedRepairRemote, $remotePaths[$failedRepairKey]);
 
     // A non-Git directory is preserved in quarantine, then replaced by a

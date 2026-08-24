@@ -150,11 +150,15 @@ final class SourceWorkspaceManager
 
             return $state;
         } catch (\Throwable $e) {
-            // Preserve a partial clone for diagnosis, but restore an existing
-            // invalid workspace to its original path so repair is reversible.
+            // A partial clone is generated data, so remove it; restore an
+            // existing invalid workspace to its original path so repair is
+            // reversible and retries never accumulate duplicate clones.
             if ($this->pathExists($temporaryPath)) {
-                $failedPath = $parent . DIRECTORY_SEPARATOR . '.workspace-failed-' . $baseName . '-' . $suffix;
-                @rename($temporaryPath, $failedPath);
+                try {
+                    $this->removeGeneratedClone($temporaryPath, $parent);
+                } catch (\Throwable $cleanupError) {
+                    $this->logger->warn("Could not remove failed generated clone '{$temporaryPath}': " . $cleanupError->getMessage());
+                }
             }
             if ($quarantined && !$this->pathExists($path) && $this->pathExists($quarantinePath)) {
                 @rename($quarantinePath, $path);
@@ -264,9 +268,36 @@ final class SourceWorkspaceManager
     {
         $normalized = trim(str_replace('\\', '/', $repository));
         if (preg_match('/^git@([^:]+):(.+)$/i', $normalized, $matches) === 1) {
-            $normalized = 'https://' . $matches[1] . '/' . $matches[2];
+            $host = strtolower($matches[1]);
+            // SSH config aliases such as "github-safhe" still identify
+            // github.com; compare the canonical GitHub repository identity,
+            // not the machine-local transport alias.
+            if ($host === 'github.com' || $host === 'github-safhe') {
+                return 'github.com/' . strtolower(preg_replace('#\.git/?$#i', '', $matches[2]) ?? $matches[2]);
+            }
+
+            $normalized = $host . '/' . $matches[2];
+        }
+
+        $parts = parse_url($normalized);
+        if (is_array($parts) && strtolower((string) ($parts['host'] ?? '')) === 'github.com') {
+            $path = ltrim((string) ($parts['path'] ?? ''), '/');
+
+            return 'github.com/' . strtolower(preg_replace('#\.git/?$#i', '', $path) ?? $path);
         }
 
         return preg_replace('#\.git/?$#i', '', rtrim($normalized, '/')) ?? $normalized;
+    }
+
+    private function removeGeneratedClone(string $path, string $parent): void
+    {
+        if (dirname($path) !== $parent || !str_starts_with(basename($path), '.workspace-clone-')) {
+            throw new \RuntimeException('Refusing to remove a path that is not a generated workspace clone.');
+        }
+
+        SafeFilesystem::recursiveDelete($path);
+        if ($this->pathExists($path)) {
+            throw new \RuntimeException('the generated clone could not be fully removed');
+        }
     }
 }
