@@ -117,7 +117,7 @@ return [
     | that keeps these three from drifting apart again.
     |
     */
-    'latest_local_agent_version' => env('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION', '1.4.5'),
+    'latest_local_agent_version' => env('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION', '1.4.6'),
 
     /*
     |--------------------------------------------------------------------------
@@ -239,11 +239,12 @@ return [
     |--------------------------------------------------------------------------
     |
     | Artifacts must be produced by a Local Agent build that embeds the
-    | in-artifact release manifest (.deployment/release-manifest.json) and
-    | runs the build-time vendor/build gate. LocalAgentArtifactController
-    | rejects uploads from an older/unknown Local Agent (fail-closed).
+    | in-artifact release manifest (.deployment/release-manifest.json),
+    | runs the build-time vendor/build gate, and resolves input only from an
+    | isolated source workspace. LocalAgentArtifactController rejects uploads
+    | from an older/unknown Local Agent (fail-closed).
     |
     */
-    'min_local_agent_version_for_artifact' => (string) env('DEPLOYMENT_MIN_LOCAL_AGENT_VERSION_FOR_ARTIFACT', '1.4.4'),
+    'min_local_agent_version_for_artifact' => (string) env('DEPLOYMENT_MIN_LOCAL_AGENT_VERSION_FOR_ARTIFACT', '1.4.6'),
 
 ];

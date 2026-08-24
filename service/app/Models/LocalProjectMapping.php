@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Support\Deployment\SourceWorkspacePath;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -65,7 +66,13 @@ class LocalProjectMapping extends Model
     /** The only path authorized for git and artifact-source operations. */
     public function sourceWorkspacePath(): string
     {
-        return $this->source_workspace_path ?: $this->local_path;
+        foreach ([$this->source_workspace_path, $this->local_path] as $candidate) {
+            if (is_string($candidate) && trim($candidate) !== '' && !SourceWorkspacePath::isProductionLike($candidate)) {
+                return trim($candidate);
+            }
+        }
+
+        return SourceWorkspacePath::defaultFor($this->project->project_key);
     }
 
     protected function casts(): array

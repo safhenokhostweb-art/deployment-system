@@ -57,11 +57,13 @@ require __DIR__ . '/lib/ArtifactBuilder.php';
 require __DIR__ . '/lib/ArtifactUploader.php';
 require __DIR__ . '/lib/PublishJobHeartbeatWorker.php';
 require __DIR__ . '/lib/LocalBuildFailedException.php';
+require __DIR__ . '/lib/ArtifactSourceResolver.php';
 require __DIR__ . '/lib/ApplicationRoot.php';
 require __DIR__ . '/lib/LocalBuildRunner.php';
 require __DIR__ . '/lib/LinuxUpgradeRunner.php';
 
 use LocalAgent\ArtifactBuilder;
+use LocalAgent\ArtifactSourceResolver;
 use LocalAgent\ArtifactUploader;
 use LocalAgent\Client;
 use LocalAgent\CommitManager;
@@ -92,7 +94,7 @@ use LocalAgent\WorkspaceSourcePreparer;
  * Hub side for why this never triggers an automatic download). Bump
  * when agent.php or lib/* changes in a way that matters operationally.
  */
-const LOCAL_AGENT_VERSION = '1.4.5';
+const LOCAL_AGENT_VERSION = '1.4.6';
 
 $configPath = __DIR__ . '/config.php';
 
@@ -354,7 +356,9 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
         return;
     }
 
-    $repositoryPath = $projectConfig['source_workspace_path'] ?? $projectConfig['local_path'] ?? '';
+    $repositoryPath = $job['action'] === 'build_artifact'
+        ? ArtifactSourceResolver::resolve($projectConfig, $projectKey)
+        : ($projectConfig['source_workspace_path'] ?? $projectConfig['local_path'] ?? '');
     $remoteName = $projectConfig['remote_name'] ?? 'origin';
     $branch = $projectConfig['branch'] ?? 'main';
 
@@ -526,6 +530,13 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
 
         $logger->error("Job {$job['id']}: unknown action '{$job['action']}'");
         $reportTerminal(['status' => 'failed', 'error_message' => "Unknown action '{$job['action']}'"]);
+    } catch (\LocalAgent\LocalBuildFailedException $e) {
+        $logger->error("Job {$job['id']} artifact source resolution failed [{$e->failureCode}]: " . $e->getMessage());
+        $reportTerminal([
+            'status' => 'failed',
+            'error_message' => $e->getMessage(),
+            'failure_code' => $e->failureCode,
+        ]);
     } catch (GitCommandException $e) {
         // Distinct failure_code so the Hub can tell "the agent's own
         // command timed out" (this) apart from a plain git failure (a

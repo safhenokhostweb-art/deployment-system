@@ -37,6 +37,7 @@ class LocalAgentProjectSyncController extends Controller
                 'remote_name' => $mapping->remote_name,
                 'branch' => $mapping->effectiveBranch(),
                 'application_root' => $mapping->project->application_root ?? '.',
+                'requires_complete_artifact' => (bool) $mapping->project->requires_complete_artifact,
             ])
             ->values();
 

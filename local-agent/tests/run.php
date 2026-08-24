@@ -326,12 +326,13 @@ rrmdir($logDirForShutdown);
 // LocalAgentProjectSyncController's response shape on the Hub side). ---
 
 $validApiResponse = [
-    ['project_key' => 'saas-platform', 'local_path' => 'C:\\laragon\\www\\saas-platform', 'repository_url' => 'https://github.com/example/saas-platform.git', 'remote_name' => 'origin', 'branch' => 'main'],
+    ['project_key' => 'saas-platform', 'local_path' => 'C:\\laragon\\www\\saas-platform', 'repository_url' => 'https://github.com/example/saas-platform.git', 'remote_name' => 'origin', 'branch' => 'main', 'requires_complete_artifact' => true],
     ['project_key' => 'customer-site', 'local_path' => 'C:\\laragon\\www\\customer-site', 'repository_url' => 'https://github.com/example/customer-site.git', 'remote_name' => 'origin', 'branch' => 'main'],
 ];
 $normalized = ProjectConfigCache::fromApiResponse($validApiResponse);
 check('fromApiResponse() keys the map by project_key', array_keys($normalized) === ['saas-platform', 'customer-site'], $failures, $passCount);
 check('fromApiResponse() maps the API path to source_workspace_path', $normalized['saas-platform']['source_workspace_path'] === 'C:\\laragon\\www\\saas-platform', $failures, $passCount);
+check('fromApiResponse() persists requires_complete_artifact in the local cache', $normalized['saas-platform']['requires_complete_artifact'] === true, $failures, $passCount);
 check('fromApiResponse() preserves branch', $normalized['customer-site']['branch'] === 'main', $failures, $passCount);
 check('fromApiResponse() on an empty list is valid (zero assigned projects)', ProjectConfigCache::fromApiResponse([]) === [], $failures, $passCount);
 

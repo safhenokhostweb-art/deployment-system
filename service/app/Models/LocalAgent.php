@@ -107,9 +107,12 @@ class LocalAgent extends Model
             ->get()
             ->map(fn (LocalProjectMapping $mapping) => implode('|', [
                 $mapping->project->project_key,
-                $mapping->local_path,
+                $mapping->sourceWorkspacePath(),
+                $mapping->project->repository,
                 $mapping->remote_name,
                 $mapping->effectiveBranch(),
+                $mapping->project->application_root ?? '.',
+                $mapping->project->requires_complete_artifact ? 'artifact-required' : 'artifact-optional',
                 optional($mapping->updated_at)->timestamp,
                 optional($mapping->project->updated_at)->timestamp,
             ]))

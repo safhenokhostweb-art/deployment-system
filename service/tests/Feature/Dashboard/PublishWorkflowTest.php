@@ -108,6 +108,27 @@ class PublishWorkflowTest extends TestCase
         $this->assertSame(str_repeat('b', 40), PublishJob::first()->reviewed_head_sha);
     }
 
+    public function test_artifact_required_project_rejects_an_agent_that_cannot_enforce_workspace_isolation(): void
+    {
+        $developer = User::factory()->create(['role' => User::ROLE_DEVELOPER]);
+        $project = $this->projectWithApprovedMapping();
+        $project->update(['requires_complete_artifact' => true]);
+        $mapping = $project->localProjectMappings()->first();
+        $mapping->localAgent->update(['agent_version' => '1.4.5']);
+        $mapping->update([
+            'local_path' => '/var/www/customer-site',
+            'source_workspace_path' => '/opt/deployment-agent/workspaces/customer-site',
+            'production_path' => '/var/www/customer-site',
+            'local_head_sha' => str_repeat('c', 40),
+        ]);
+
+        $this->actingAs($developer)->post(route('projects.publish', $project), [
+            'local_project_mapping_id' => $mapping->id,
+        ])->assertStatus(409);
+
+        $this->assertDatabaseCount('publish_jobs', 0);
+    }
+
     public function test_publish_requires_an_approved_local_agent_mapping(): void
     {
         $developer = User::factory()->create(['role' => User::ROLE_DEVELOPER]);

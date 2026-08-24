@@ -282,6 +282,39 @@ class ArtifactDeploymentLinkingTest extends TestCase
         $this->assertDatabaseCount('deployments', 0);
     }
 
+    public function test_required_artifact_build_selects_the_capable_isolated_workspace_mapping(): void
+    {
+        $project = Project::factory()->create(['requires_complete_artifact' => true]);
+        $legacyAgent = LocalAgent::factory()->approved()->create(['agent_version' => '1.4.5']);
+        LocalProjectMapping::factory()->create([
+            'project_id' => $project->id,
+            'local_agent_id' => $legacyAgent->id,
+            'local_path' => '/var/www/customer-site',
+            'source_workspace_path' => null,
+            'production_path' => '/var/www/customer-site',
+            'git_branch' => 'main',
+            'reported_at' => now(),
+        ]);
+        $capableAgent = LocalAgent::factory()->approved()->create([
+            'agent_version' => config('deployment.min_local_agent_version_for_artifact'),
+        ]);
+        LocalProjectMapping::factory()->create([
+            'project_id' => $project->id,
+            'local_agent_id' => $capableAgent->id,
+            'local_path' => '/var/www/customer-site',
+            'source_workspace_path' => '/opt/deployment-agent/workspaces/customer-site',
+            'production_path' => '/var/www/customer-site',
+            'git_branch' => 'main',
+            'reported_at' => now()->subMinute(),
+        ]);
+
+        $job = app(DeploymentDispatcher::class)->createFromWebhook($project, str_repeat('ab', 20), 'main', 'github');
+
+        $this->assertInstanceOf(PublishJob::class, $job);
+        $this->assertSame($capableAgent->id, $job->local_agent_id);
+        $this->assertDatabaseCount('deployments', 0);
+    }
+
     /**
      * Regression test (artifact race condition): the artifact lands a moment
      * AFTER the webhook created the queued deployment — claimNextJob()

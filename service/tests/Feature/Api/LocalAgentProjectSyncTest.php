@@ -37,13 +37,15 @@ class LocalAgentProjectSyncTest extends TestCase
         $agentSecret = LocalAgentFactory::$lastPlainSecret;
         $otherAgent = LocalAgent::factory()->approved()->create();
 
-        $project = Project::factory()->create(['project_key' => 'saas-platform', 'branch' => 'main']);
+        $project = Project::factory()->create(['project_key' => 'saas-platform', 'branch' => 'main', 'requires_complete_artifact' => true]);
         $otherProject = Project::factory()->create(['project_key' => 'customer-site', 'branch' => 'main']);
 
         LocalProjectMapping::factory()->create([
             'local_agent_id' => $agent->id,
             'project_id' => $project->id,
-            'local_path' => 'C:\\laragon\\www\\saas-platform',
+            'local_path' => '/var/www/saas-platform',
+            'source_workspace_path' => '/opt/deployment-agent/workspaces/saas-platform',
+            'production_path' => '/var/www/saas-platform',
             'remote_name' => 'origin',
             'git_branch' => null,
         ]);
@@ -60,12 +62,32 @@ class LocalAgentProjectSyncTest extends TestCase
 
         $response->assertJsonCount(1, 'projects');
         $response->assertJsonPath('projects.0.project_key', 'saas-platform');
-        $response->assertJsonPath('projects.0.source_workspace_path', 'C:\\laragon\\www\\saas-platform');
+        $response->assertJsonPath('projects.0.source_workspace_path', '/opt/deployment-agent/workspaces/saas-platform');
         $response->assertJsonPath('projects.0.repository_url', 'https://github.com/' . $project->repository . '.git');
         $response->assertJsonMissingPath('projects.0.production_path');
         $response->assertJsonPath('projects.0.remote_name', 'origin');
         $response->assertJsonPath('projects.0.branch', 'main');
+        $response->assertJsonPath('projects.0.requires_complete_artifact', true);
         $response->assertJsonPath('config_version', $agent->fresh()->projectConfigVersion());
+    }
+
+    public function test_legacy_production_local_path_is_never_returned_as_artifact_source(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create();
+        $project = Project::factory()->create(['project_key' => 'customer-site', 'requires_complete_artifact' => true]);
+        LocalProjectMapping::factory()->create([
+            'local_agent_id' => $agent->id,
+            'project_id' => $project->id,
+            'local_path' => '/var/www/customer-site',
+            'source_workspace_path' => null,
+            'production_path' => '/var/www/customer-site',
+        ]);
+
+        $headers = $this->headersFor($agent, 'GET', '/api/local-agent/projects', LocalAgentFactory::$lastPlainToken, LocalAgentFactory::$lastPlainSecret);
+        $response = $this->get('/api/local-agent/projects', $headers)->assertOk();
+
+        $response->assertJsonPath('projects.0.source_workspace_path', '/opt/deployment-agent/workspaces/customer-site');
+        $response->assertJsonMissingPath('projects.0.production_path');
     }
 
     public function test_config_version_changes_after_a_new_mapping_is_added(): void

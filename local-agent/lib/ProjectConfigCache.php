@@ -62,6 +62,7 @@ final class ProjectConfigCache
                 'branch' => $entry['branch'] ?? null,
                 'application_root' => $entry['application_root'] ?? '.',
                 'repository_url' => $entry['repository_url'] ?? null,
+                'requires_complete_artifact' => $entry['requires_complete_artifact'] ?? false,
             ];
         }
 
@@ -93,6 +94,7 @@ final class ProjectConfigCache
                 || !is_string($entry['branch'] ?? null) || $entry['branch'] === ''
                 || !is_string($entry['application_root'] ?? '.')
                 || (isset($entry['repository_url']) && (!is_string($entry['repository_url']) || $entry['repository_url'] === ''))
+                || !is_bool($entry['requires_complete_artifact'] ?? false)
             ) {
                 throw new \InvalidArgumentException("invalid configuration for project '{$key}' (source_workspace_path/remote_name/branch must be non-empty strings)");
             }

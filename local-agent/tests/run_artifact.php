@@ -30,6 +30,8 @@ require __DIR__ . '/../lib/Logger.php';
 require __DIR__ . '/../lib/Client.php';
 require __DIR__ . '/../lib/GitManager.php';
 require __DIR__ . '/../lib/LocalBuildFailedException.php';
+require __DIR__ . '/../lib/SafetyChecker.php';
+require __DIR__ . '/../lib/ArtifactSourceResolver.php';
 require __DIR__ . '/../lib/ApplicationRoot.php';
 require __DIR__ . '/../lib/LocalBuildRunner.php';
 require __DIR__ . '/../lib/RetryPolicy.php';
@@ -40,6 +42,7 @@ require __DIR__ . '/../lib/ArtifactBuilder.php';
 require __DIR__ . '/../lib/ArtifactUploader.php';
 
 use LocalAgent\ArtifactBuilder;
+use LocalAgent\ArtifactSourceResolver;
 use LocalAgent\ArtifactUploader;
 use LocalAgent\BuildWorkspace;
 use LocalAgent\Client;
@@ -345,8 +348,29 @@ $buildResult = ['ranComposer' => true, 'ranNpmBuild' => true];
 $commitTimestamp = time();
 $archive = $builder->build($fixture['path'], $workspace, $commitTimestamp, $buildResult);
 
+$customerSiteSource = ArtifactSourceResolver::resolve([
+    'source_workspace_path' => $fixture['path'],
+    'local_path' => '/var/www/customer-site',
+    'production_path' => '/var/www/customer-site',
+    'requires_complete_artifact' => true,
+], 'customer-site');
+check('artifact-required customer-site resolves its isolated source workspace instead of production_path/local_path', $customerSiteSource === $fixture['path'], $failures, $passCount);
+check('artifact source resolver accepts a validated isolated legacy cache path only as fallback', ArtifactSourceResolver::resolve(['local_path' => $fixture['path']], 'customer-site') === $fixture['path'], $failures, $passCount);
+
 check('ArtifactBuilder: produces a real, nonzero-size file', is_file($archive['path']) && $archive['size'] > 0, $failures, $passCount);
 check('ArtifactBuilder: checksum matches hash_file()', $archive['checksum'] === hash_file('sha256', $archive['path']), $failures, $passCount);
+
+foreach (['/var/www/customer-site', '/home/customer/public_html', 'C:\\xampp\\htdocs\\customer-site'] as $forbiddenSource) {
+    check("artifact source resolver rejects production-like source {$forbiddenSource}", (function () use ($forbiddenSource): bool {
+        try {
+            ArtifactSourceResolver::resolve(['local_path' => $forbiddenSource], 'customer-site');
+
+            return false;
+        } catch (LocalBuildFailedException $e) {
+            return $e->failureCode === 'production_source_forbidden';
+        }
+    })(), $failures, $passCount);
+}
 
 $names = zipEntryNames($archive['path']);
 check('artifact contains the tracked source file', in_array('app/Kernel.php', $names, true), $failures, $passCount);

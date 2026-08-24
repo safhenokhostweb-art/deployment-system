@@ -11,6 +11,7 @@ use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use App\Models\PublishJob;
 use App\Services\Deployment\Artifact\ArtifactService;
+use App\Support\Deployment\SourceWorkspacePath;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -518,11 +519,20 @@ class DeploymentDispatcher
         $mapping = LocalProjectMapping::query()
             ->where('project_id', $project->id)
             ->whereHas('localAgent', fn ($query) => $query->where('status', LocalAgent::STATUS_APPROVED))
+            ->with(['localAgent', 'project'])
             ->orderByDesc('reported_at')
             ->get()
-            ->first(fn (LocalProjectMapping $candidate) => $candidate->effectiveBranch() === $branch);
+            ->first(function (LocalProjectMapping $candidate) use ($branch): bool {
+                $agentVersion = $candidate->localAgent?->agent_version;
+                $minimumVersion = (string) config('deployment.min_local_agent_version_for_artifact');
 
-        abort_if($mapping === null, 422, 'This artifact-required project has no approved Local Agent mapping for the requested branch.');
+                return $candidate->effectiveBranch() === $branch
+                    && is_string($agentVersion)
+                    && version_compare($agentVersion, $minimumVersion, '>=')
+                    && !SourceWorkspacePath::isProductionLike($candidate->sourceWorkspacePath());
+            });
+
+        abort_if($mapping === null, 422, 'This artifact-required project has no approved, artifact-capable Local Agent mapping with an isolated source workspace for the requested branch.');
 
         $requestedBy = (string) ($deploymentRequest['triggered_by'] ?? 'system');
         $job = PublishJob::create([

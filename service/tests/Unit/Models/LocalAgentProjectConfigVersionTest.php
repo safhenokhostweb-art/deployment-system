@@ -6,6 +6,7 @@ use App\Models\LocalAgent;
 use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 
 /**
@@ -39,13 +40,45 @@ class LocalAgentProjectConfigVersionTest extends TestCase
         $this->assertNotSame($before, $agent->fresh()->projectConfigVersion());
     }
 
-    public function test_version_changes_when_local_path_is_edited(): void
+    public function test_version_ignores_legacy_local_path_when_an_explicit_source_workspace_exists(): void
     {
         $agent = LocalAgent::factory()->approved()->create();
         $mapping = LocalProjectMapping::factory()->create(['local_agent_id' => $agent->id, 'local_path' => 'C:\\old']);
         $before = $agent->fresh()->projectConfigVersion();
 
         $mapping->update(['local_path' => 'C:\\new']);
+
+        $this->assertSame($before, $agent->fresh()->projectConfigVersion());
+    }
+
+    public function test_version_changes_when_the_safe_legacy_path_is_the_effective_source(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create();
+        $mapping = LocalProjectMapping::factory()->create([
+            'local_agent_id' => $agent->id,
+            'local_path' => 'C:\\isolated\\old',
+            'source_workspace_path' => null,
+        ]);
+        $before = $agent->fresh()->projectConfigVersion();
+
+        DB::table('local_project_mappings')->where('id', $mapping->id)->update(['local_path' => 'C:\\isolated\\new']);
+
+        $this->assertNotSame($before, $agent->fresh()->projectConfigVersion());
+    }
+
+    public function test_version_changes_when_source_workspace_path_changes_even_without_a_timestamp_change(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create();
+        $mapping = LocalProjectMapping::factory()->create([
+            'local_agent_id' => $agent->id,
+            'local_path' => '/var/www/customer-site',
+            'source_workspace_path' => '/opt/deployment-agent/workspaces/old-customer-site',
+        ]);
+        $before = $agent->fresh()->projectConfigVersion();
+
+        DB::table('local_project_mappings')->where('id', $mapping->id)->update([
+            'source_workspace_path' => '/opt/deployment-agent/workspaces/customer-site',
+        ]);
 
         $this->assertNotSame($before, $agent->fresh()->projectConfigVersion());
     }
