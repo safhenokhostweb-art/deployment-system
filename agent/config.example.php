@@ -105,8 +105,9 @@ return [
         //     // (e.g. a separately-mounted database or uploads volume)
         //     // stays outside the swappable release and survives every
         //     // swap/rollback untouched, and the release tree itself stays
-        //     // small. Both keys are strictly server-local: the Hub never
-        //     // learns them. Every configured path must already exist at
+        //     // small. A Hub-managed signed artifact_persistence job contract
+        //     // takes precedence; these keys remain the compatibility fallback
+        //     // for older Hubs. Every configured path must already exist at
         //     // {artifact_persistent_root}/{path} before the first deploy
         //     // (a missing target fails closed — a fresh release must
         //     // never silently start against empty state).
@@ -128,6 +129,8 @@ return [
         //     // install/deployment-runtime-permissions).
         //     // 'artifact_persistent_paths' => ['storage', 'database'],
         //     // 'artifact_persistent_root' => '/var/www/deployment-system/persistent',
+        //     // Associative mapping is supported when layouts differ:
+        //     // ['public/uploads' => 'uploads'].
         //
         //     // How many previous releases (renamed aside as
         //     // `working_directory.backup-*`, never deleted outright) to

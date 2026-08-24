@@ -76,12 +76,12 @@
         <p class="muted">One relative runtime path per line. Paths must not be absolute or contain <code>..</code>.</p>
 
         <label for="artifact_persistent_paths_text">Artifact persistent paths</label>
-        <textarea id="artifact_persistent_paths_text" name="artifact_persistent_paths_text" rows="4" dir="ltr" style="text-align:left;">{{ old('artifact_persistent_paths_text', implode("\n", $project->artifact_persistent_paths ?? [])) }}</textarea>
-        <p class="muted">One relative runtime path per line — symlinked from the persistent root into each release instead of copied. Must not overlap preserve paths.</p>
+        <textarea id="artifact_persistent_paths_text" name="artifact_persistent_paths_text" rows="4" dir="ltr" style="text-align:left;">{{ old('artifact_persistent_paths_text', collect($project->artifact_persistent_paths ?? [])->map(fn ($target, $release) => is_string($release) ? "{$release} => {$target}" : $target)->implode("\n")) }}</textarea>
+        <p class="muted">One relative runtime path per line. Use <code>release/path =&gt; shared/path</code> when layouts differ (for example <code>public/uploads =&gt; uploads</code>). Must not overlap preserve paths.</p>
 
         <label for="artifact_persistent_root">Artifact persistent root</label>
         <input type="text" id="artifact_persistent_root" name="artifact_persistent_root" value="{{ old('artifact_persistent_root', $project->artifact_persistent_root) }}" dir="ltr" style="text-align:left;">
-        <p class="muted">Absolute directory on the target server holding the persistent state (configured there in agent config.php; the Hub never learns server paths).</p>
+        <p class="muted">Absolute directory outside the release tree. The signed deployment job carries this Hub-managed contract; legacy server-local config remains a fallback.</p>
 
         <input type="hidden" name="requires_complete_artifact" value="0">
         <label>

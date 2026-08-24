@@ -273,6 +273,11 @@ class ServerAgentPrivilegedDropInTest extends TestCase
         $this->assertStringContainsString('trap rollback ERR', $upgrade);
         $this->assertStringContainsString('mv "$BACKUP" "$INSTALL_DIR"', $upgrade);
         $this->assertGreaterThanOrEqual(2, substr_count($upgrade, 'sha256sum "$INSTALL_DIR/config.php"'));
+        $this->assertStringContainsString('visudo -cf "$SCRIPT_DIR/deployment-runtime-permissions.sudoers"', $upgrade);
+        $this->assertStringContainsString('install -o root -g root -m 0755 "$SCRIPT_DIR/deployment-runtime-permissions" "$RUNTIME_HELPER"', $upgrade);
+        $this->assertStringContainsString('install -o root -g root -m 0440 "$SCRIPT_DIR/deployment-runtime-permissions.sudoers" "$RUNTIME_SUDOERS"', $upgrade);
+        $this->assertStringContainsString('PRIVILEGED_BACKUP=', $upgrade);
+        $this->assertStringContainsString('PRIVILEGED_ACTIVATED=true', $upgrade);
     }
 
     // ------------------------------------------------------------------
@@ -291,6 +296,7 @@ class ServerAgentPrivilegedDropInTest extends TestCase
 
         $this->assertStringContainsString('/usr/local/sbin/deployment-runtime-permissions deployment-system', $runtimeSudoers);
         $this->assertStringContainsString('/usr/local/sbin/deployment-runtime-permissions saas-platform', $runtimeSudoers);
+        $this->assertStringContainsString('/usr/local/sbin/deployment-runtime-permissions customer-site', $runtimeSudoers);
         $this->assertStringContainsString('/usr/local/sbin/deployment-service-reload deployment-system', $reloadSudoers);
         $this->assertStringContainsString('/usr/local/sbin/deployment-service-reload saas-platform', $reloadSudoers);
 

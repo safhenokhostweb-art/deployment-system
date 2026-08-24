@@ -89,6 +89,23 @@ class AgentTaskReleaseGateTest extends TestCase
         $this->assertSame($ctx['deployment']->commit_hash, $claimed['job']['commit_hash']);
     }
 
+    public function test_task_payload_carries_persistent_runtime_mapping(): void
+    {
+        $ctx = $this->makeTask(['project' => [
+            'artifact_persistent_paths' => ['public/uploads' => 'uploads'],
+            'artifact_persistent_root' => '/var/www/customer-site-shared',
+        ]]);
+        $ctx['agent']->update(['agent_version' => '1.3.1']);
+        $this->attachArtifact($ctx, $ctx['deployment']->commit_hash);
+
+        $claimed = app(AgentTaskService::class)->claimNextTask($ctx['agent']);
+
+        $this->assertSame([
+            'paths' => ['public/uploads' => 'uploads'],
+            'root' => '/var/www/customer-site-shared',
+        ], $claimed['job']['artifact_persistence']);
+    }
+
     public function test_old_server_agent_rejects_artifact_task_before_execution(): void
     {
         $ctx = $this->makeTask();

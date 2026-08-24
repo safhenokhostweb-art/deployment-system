@@ -9,6 +9,10 @@ fail() {
 
 project_key="${1:-missing}"
 [ "$#" -eq 1 ] || fail "$project_key" validate - 'argument count' 64
+OWNER=www-data
+GROUP=www-data
+DIRECTORY_MODE=0775
+FILE_MODE=0664
 case "$project_key" in
   deployment-system)
     ROOT=/var/www/deployment-system/service
@@ -30,6 +34,24 @@ case "$project_key" in
     paths=("$ROOT/storage" "$ROOT/bootstrap/cache" "$ROOT/public/storage")
     files=()
     ;;
+  customer-site)
+    ROOT=/var/www/customer-site
+    PERSISTENT_ROOT=/var/www/customer-site-shared
+    UPLOADS_ROOT="$PERSISTENT_ROOT/uploads"
+    OWNER=deployment-agent
+    GROUP=www-data
+    DIRECTORY_MODE=2775
+    FILE_MODE=0664
+    # Bootstrap is intentionally idempotent. install -d reuses an existing
+    # directory, never clears it, and fixes only the approved directory
+    # entries before the confined recursive normalization below.
+    [ ! -L "$PERSISTENT_ROOT" ] || fail "$project_key" validate "$PERSISTENT_ROOT" 'shared root must not be a symlink' 67
+    [ ! -L "$UPLOADS_ROOT" ] || fail "$project_key" validate "$UPLOADS_ROOT" 'uploads root must not be a symlink' 67
+    install -d -o "$OWNER" -g "$GROUP" -m "$DIRECTORY_MODE" "$PERSISTENT_ROOT" "$UPLOADS_ROOT" \
+      || fail "$project_key" prepare "$UPLOADS_ROOT" 'install persistent uploads root' 69
+    paths=("$UPLOADS_ROOT")
+    files=()
+    ;;
   *) fail "$project_key" validate - 'invalid project key' 65 ;;
 esac
 
@@ -37,7 +59,7 @@ esac
 # persistent chown/chmod failures. A vanished entry remains the one tolerated
 # race: it is absent when the child reaches it, so no failure is reported.
 export -f fail
-export project_key
+export project_key OWNER GROUP DIRECTORY_MODE FILE_MODE
 
 validate_path() {
   local path="$1"
@@ -69,20 +91,20 @@ for path in "${paths[@]}"; do
   # legitimate race; any persistent ownership/mode failure remains fatal.
   find -P "$path" -ignore_readdir_race -type d -exec /bin/bash -c '
     for target do
-      chown www-data:www-data -- "$target" 2>/dev/null || { [ ! -e "$target" ] || fail "$project_key" normalize "$target" chown 1; }
-      chmod 0775 -- "$target" 2>/dev/null || { [ ! -e "$target" ] || fail "$project_key" normalize "$target" chmod 1; }
+      chown "$OWNER:$GROUP" -- "$target" 2>/dev/null || { [ ! -e "$target" ] || fail "$project_key" normalize "$target" chown 1; }
+      chmod "$DIRECTORY_MODE" -- "$target" 2>/dev/null || { [ ! -e "$target" ] || fail "$project_key" normalize "$target" chmod 1; }
     done
   ' bash {} + || fail "$project_key" normalize "$path" 'find directory' 1
   find -P "$path" -ignore_readdir_race -type f -exec /bin/bash -c '
     for target do
-      chown www-data:www-data -- "$target" 2>/dev/null || { [ ! -e "$target" ] || fail "$project_key" normalize "$target" chown 1; }
-      chmod 0664 -- "$target" 2>/dev/null || { [ ! -e "$target" ] || fail "$project_key" normalize "$target" chmod 1; }
+      chown "$OWNER:$GROUP" -- "$target" 2>/dev/null || { [ ! -e "$target" ] || fail "$project_key" normalize "$target" chown 1; }
+      chmod "$FILE_MODE" -- "$target" 2>/dev/null || { [ ! -e "$target" ] || fail "$project_key" normalize "$target" chmod 1; }
     done
   ' bash {} + || fail "$project_key" normalize "$path" 'find file' 1
 done
 
 for path in "${files[@]}"; do
   [ -f "$path" ] || fail "$project_key" normalize "$path" 'required database.sqlite existence check' 68
-  chown www-data:www-data "$path" || fail "$project_key" normalize "$path" chown 1
-  chmod 0664 "$path" || fail "$project_key" normalize "$path" chmod 1
+  chown "$OWNER:$GROUP" "$path" || fail "$project_key" normalize "$path" chown 1
+  chmod "$FILE_MODE" "$path" || fail "$project_key" normalize "$path" chmod 1
 done

@@ -162,6 +162,20 @@ class AgentJobService
                 return null;
             }
 
+            if ($this->projectHasPersistentRuntime($project) && !$this->serverAgentEnforcesPersistentRuntime($server)) {
+                $reportedVersion = $server->agents()->first()?->agent_version;
+                $requiredVersion = (string) config('deployment.min_server_agent_version_for_persistent_runtime');
+                $deployment->update([
+                    'status' => Deployment::STATUS_FAILED,
+                    'finished_at' => now(),
+                    'last_activity_at' => now(),
+                    'failure_code' => Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE,
+                    'failure_message' => "The server agent (version " . ($reportedVersion ?? 'unknown') . ") cannot enforce the persistent runtime contract. Upgrade the agent to at least {$requiredVersion} before deploying this project.",
+                ]);
+
+                return null;
+            }
+
             $job = [
                 'id' => $deployment->public_id,
                 'project_key' => $project->project_key,
@@ -183,6 +197,20 @@ class AgentJobService
                     ? HttpHealthCheckPayload::appendToRecipe($project->deployment_recipe, $deployment->http_health_config)
                     : null,
                 'http_health_check' => $deployment->http_health_config,
+                // Hub-managed persistent runtime contract. It is included
+                // only when fully configured, keeping legacy server-local
+                // config as the compatibility fallback. The signed payload
+                // makes project edits deterministic without mutating the
+                // Server Agent's preserved config.php during an upgrade.
+                'artifact_persistence' => $project->artifact_persistent_paths !== null
+                    && $project->artifact_persistent_paths !== []
+                    && is_string($project->artifact_persistent_root)
+                    && trim($project->artifact_persistent_root) !== ''
+                        ? [
+                            'paths' => $project->artifact_persistent_paths,
+                            'root' => $project->artifact_persistent_root,
+                        ]
+                        : null,
                 // A rollback of a recipe-driven project never re-runs the
                 // build recipe against an old commit (slow, and the whole
                 // point of keeping releases around is to avoid rebuilding)
@@ -444,5 +472,22 @@ class AgentJobService
         return is_string($agentVersion)
             && $agentVersion !== ''
             && version_compare($agentVersion, (string) config('deployment.min_server_agent_version_for_http_health'), '>=');
+    }
+
+    private function serverAgentEnforcesPersistentRuntime(Server $server): bool
+    {
+        $agentVersion = $server->agents()->first()?->agent_version;
+
+        return is_string($agentVersion)
+            && $agentVersion !== ''
+            && version_compare($agentVersion, (string) config('deployment.min_server_agent_version_for_persistent_runtime'), '>=');
+    }
+
+    private function projectHasPersistentRuntime(\App\Models\Project $project): bool
+    {
+        return is_array($project->artifact_persistent_paths)
+            && $project->artifact_persistent_paths !== []
+            && is_string($project->artifact_persistent_root)
+            && trim($project->artifact_persistent_root) !== '';
     }
 }

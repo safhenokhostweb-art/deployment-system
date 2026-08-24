@@ -92,6 +92,12 @@ class AgentTaskService
                     continue;
                 }
 
+                if ($this->projectHasPersistentRuntime($task->deployment->project) && !$this->agentEnforcesPersistentRuntime($agent)) {
+                    $this->rejectIncompatiblePersistentRuntimeTask($task, $agent);
+
+                    continue;
+                }
+
                 // Root-cause fix (Laravel release completeness): a project
                 // with requires_complete_artifact=true must NEVER fall back to
                 // the live-directory git pipeline. No exact-commit AVAILABLE
@@ -184,6 +190,35 @@ class AgentTaskService
         return is_string($agent->agent_version)
             && $agent->agent_version !== ''
             && version_compare($agent->agent_version, (string) config('deployment.min_server_agent_version_for_http_health'), '>=');
+    }
+
+    private function agentEnforcesPersistentRuntime(Agent $agent): bool
+    {
+        return is_string($agent->agent_version)
+            && $agent->agent_version !== ''
+            && version_compare($agent->agent_version, (string) config('deployment.min_server_agent_version_for_persistent_runtime'), '>=');
+    }
+
+    private function projectHasPersistentRuntime(\App\Models\Project $project): bool
+    {
+        return is_array($project->artifact_persistent_paths)
+            && $project->artifact_persistent_paths !== []
+            && is_string($project->artifact_persistent_root)
+            && trim($project->artifact_persistent_root) !== '';
+    }
+
+    private function rejectIncompatiblePersistentRuntimeTask(DeploymentTask $task, Agent $agent): void
+    {
+        $requiredVersion = (string) config('deployment.min_server_agent_version_for_persistent_runtime');
+        $task->update([
+            'status' => DeploymentTask::STATUS_FAILED,
+            'failure_code' => Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE,
+        ]);
+        $task->deployment->update([
+            'failure_code' => Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE,
+            'failure_message' => "Server Agent {$agent->public_id} cannot enforce persistent runtime preparation; version {$requiredVersion} or newer is required.",
+        ]);
+        $this->aggregator->recalculate($task->deployment);
     }
 
     private function rejectIncompatibleHealthAgentTask(DeploymentTask $task, Agent $agent): void
@@ -309,6 +344,15 @@ class AgentTaskService
                 ? HttpHealthCheckPayload::appendToRecipe($task->deployment->project->deployment_recipe, $task->deployment->http_health_config)
                 : null,
             'http_health_check' => $task->deployment->http_health_config,
+            'artifact_persistence' => $task->deployment->project->artifact_persistent_paths !== null
+                && $task->deployment->project->artifact_persistent_paths !== []
+                && is_string($task->deployment->project->artifact_persistent_root)
+                && trim($task->deployment->project->artifact_persistent_root) !== ''
+                    ? [
+                        'paths' => $task->deployment->project->artifact_persistent_paths,
+                        'root' => $task->deployment->project->artifact_persistent_root,
+                    ]
+                    : null,
             'recipe_rollback' => $task->deployment->project->usesDeploymentRecipe()
                 && $task->deployment->action === Deployment::ACTION_ROLLBACK,
             'artifact' => $task->deployment->artifact !== null ? [

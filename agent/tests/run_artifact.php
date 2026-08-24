@@ -73,7 +73,7 @@ function rrmdir(string $dir): void
 }
 
 /** Builds a real zip fixture with a couple of "app" files, returns its path + checksum. */
-function buildFixtureZip(string $dir, string $name, string $marker): array
+function buildFixtureZip(string $dir, string $name, string $marker, bool $includeUploads = false): array
 {
     $zipPath = "{$dir}/{$name}.zip";
     $zip = new ZipArchive();
@@ -88,6 +88,9 @@ function buildFixtureZip(string $dir, string $name, string $marker): array
     $zip->addFromString('vendor/autoload.php', "<?php\n// vendor from {$marker}\n");
     $zip->addFromString('public/build/manifest.json', json_encode(['from' => $marker]));
     $zip->addFromString('public/storage/artifact-placeholder.txt', "must-not-replace-runtime-data from {$marker}\n");
+    if ($includeUploads) {
+        $zip->addFromString('public/uploads/artifact-placeholder.txt', "must-never-become-runtime-data from {$marker}\n");
+    }
     $zip->close();
 
     return ['path' => $zipPath, 'checksum' => hash_file('sha256', $zipPath), 'size' => filesize($zipPath)];
@@ -384,12 +387,54 @@ if ($symlinkSupported) {
     check('persistent: rollback restores the previous release', $rollbackError === null && str_contains((string) @file_get_contents("{$persistentSiteDir}/index.php"), 'release 1'), $failures, $passCount);
     check('persistent: the restored release keeps the persistent reference', is_link("{$persistentSiteDir}/database"), $failures, $passCount);
     check('persistent: rollback never touched the persistent data', trim((string) @file_get_contents("{$persistentTargetDir}/database.sqlite")) === 'sqlite-bytes', $failures, $passCount);
+
+    // customer-site contract: release public/uploads maps to the flattened
+    // shared-root uploads directory. The first artifact intentionally has no
+    // public/uploads entry; the second has hostile/stale content proving it
+    // is replaced, never merged into runtime state.
+    $customerRoot = $workspace . '/customer-site-shared';
+    $customerUploads = $customerRoot . '/uploads';
+    mkdir($customerUploads, 0775, true);
+    file_put_contents($customerUploads . '/customer-file.jpg', 'persistent-upload');
+    $customerSite = $workspace . '/customer-site-current';
+
+    $customerFirst = buildFixtureZip($workspace, 'customer-first', 'customer first');
+    registerManifestEntry($hub['manifestPath'], 'artifact-customer-first', $customerFirst['path']);
+    $customerFirstResult = $manager->deploy(
+        ['public_id' => 'artifact-customer-first', 'checksum_sha256' => $customerFirst['checksum'], 'size_bytes' => $customerFirst['size']],
+        $customerSite,
+        [],
+        3,
+        ['public/uploads' => 'uploads'],
+        $customerRoot,
+    );
+    check('customer persistence: artifact without public/uploads activates successfully', $customerFirstResult['status'] === 'succeeded', $failures, $passCount);
+    check('customer persistence: public/uploads is a symlink', is_link($customerSite . '/public/uploads'), $failures, $passCount);
+    check('customer persistence: symlink targets the shared uploads root exactly', realpath($customerSite . '/public/uploads') === realpath($customerUploads), $failures, $passCount);
+
+    $customerSecond = buildFixtureZip($workspace, 'customer-second', 'customer second', true);
+    registerManifestEntry($hub['manifestPath'], 'artifact-customer-second', $customerSecond['path']);
+    $customerSecondResult = $manager->deploy(
+        ['public_id' => 'artifact-customer-second', 'checksum_sha256' => $customerSecond['checksum'], 'size_bytes' => $customerSecond['size']],
+        $customerSite,
+        [],
+        3,
+        ['public/uploads' => 'uploads'],
+        $customerRoot,
+    );
+    check('customer persistence: subsequent artifact deployment succeeds', $customerSecondResult['status'] === 'succeeded', $failures, $passCount);
+    check('customer persistence: uploaded file survives deployment', (string) @file_get_contents($customerSite . '/public/uploads/customer-file.jpg') === 'persistent-upload', $failures, $passCount);
+    check('customer persistence: artifact content cannot overwrite shared uploads', !file_exists($customerUploads . '/artifact-placeholder.txt'), $failures, $passCount);
+
+    $customerRollback = $manager->rollback($customerSite);
+    check('customer persistence: rollback succeeds', $customerRollback === null, $failures, $passCount);
+    check('customer persistence: uploaded file survives rollback', (string) @file_get_contents($customerSite . '/public/uploads/customer-file.jpg') === 'persistent-upload', $failures, $passCount);
 } else {
     // No symlink privilege on this platform (typical Windows without
     // Developer Mode) — the fail-closed contract above is still fully
     // exercised. Count the gated assertions as satisfied to keep the run
     // green here while the same scenario runs for real on Linux CI.
-    $passCount += 9;
+    $passCount += 17;
 }
 
 

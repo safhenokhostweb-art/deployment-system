@@ -352,11 +352,21 @@ class ProjectController extends Controller
             ]);
         }
         if ($request->has('artifact_persistent_paths_text')) {
+            $persistentPaths = [];
+            foreach (preg_split('/\R/', (string) $request->input('artifact_persistent_paths_text')) ?: [] as $line) {
+                $line = trim($line);
+                if ($line === '') {
+                    continue;
+                }
+                if (str_contains($line, '=>')) {
+                    [$releasePath, $targetPath] = array_map('trim', explode('=>', $line, 2));
+                    $persistentPaths[$releasePath] = $targetPath;
+                } else {
+                    $persistentPaths[] = $line;
+                }
+            }
             $request->merge([
-                'artifact_persistent_paths' => array_values(array_filter(
-                    preg_split('/\R/', (string) $request->input('artifact_persistent_paths_text')) ?: [],
-                    static fn (string $path): bool => trim($path) !== '',
-                )),
+                'artifact_persistent_paths' => $persistentPaths,
             ]);
         }
 
@@ -580,6 +590,20 @@ class ProjectController extends Controller
                     'artifact_persistent_root' => 'artifact_persistent_root is required when artifact_persistent_paths are set.',
                 ]);
             }
+            if (!str_starts_with((string) $validated['artifact_persistent_root'], '/')) {
+                throw ValidationException::withMessages([
+                    'artifact_persistent_root' => 'artifact_persistent_root must be an absolute Unix path outside the release tree.',
+                ]);
+            }
+            $projectKey = $project?->project_key ?? ($validated['project_key'] ?? null);
+            if ($projectKey === 'customer-site' && (
+                rtrim((string) $validated['artifact_persistent_root'], '/') !== '/var/www/customer-site-shared'
+                || $persistent !== ['public/uploads' => 'uploads']
+            )) {
+                throw ValidationException::withMessages([
+                    'artifact_persistent_paths' => 'customer-site must map public/uploads => uploads under /var/www/customer-site-shared.',
+                ]);
+            }
         }
 
         if ($project !== null) {
@@ -628,10 +652,31 @@ class ProjectController extends Controller
         return $this->normalizeArtifactRelativePaths($paths, 'artifact_preserve_paths');
     }
 
-    /** @param array<int, string>|null $paths @return array<int, string>|null */
+    /** @param array<int|string, string>|null $paths @return array<int|string, string>|null */
     private function normalizeArtifactPersistentPaths(?array $paths): ?array
     {
-        return $this->normalizeArtifactRelativePaths($paths, 'artifact_persistent_paths');
+        if ($paths === null) {
+            return null;
+        }
+
+        $normalized = [];
+        foreach ($paths as $releaseKey => $targetValue) {
+            $releasePath = is_string($releaseKey) ? $releaseKey : $targetValue;
+            $releasePath = $this->normalizeArtifactRelativePath($releasePath, 'artifact_persistent_paths');
+            $targetPath = $this->normalizeArtifactRelativePath($targetValue, 'artifact_persistent_paths');
+
+            if (array_key_exists($releasePath, $normalized) || in_array($releasePath, $normalized, true)) {
+                throw ValidationException::withMessages(['artifact_persistent_paths' => 'Release paths must not contain duplicates.']);
+            }
+
+            if (is_string($releaseKey)) {
+                $normalized[$releasePath] = $targetPath;
+            } else {
+                $normalized[] = $releasePath;
+            }
+        }
+
+        return $normalized;
     }
 
     /** @param array<int, string>|null $paths @return array<int, string>|null */
@@ -643,13 +688,7 @@ class ProjectController extends Controller
 
         $normalized = [];
         foreach ($paths as $path) {
-            $path = rtrim(str_replace('\\', '/', trim($path)), '/');
-            if ($path === '' || str_starts_with($path, '/') || preg_match('/^[A-Za-z]:\//', $path) === 1
-                || preg_match('#(^|/)\.\.(/|$)#', $path) === 1 || str_contains($path, "\0")) {
-                throw ValidationException::withMessages([
-                    $field => 'Paths must be relative paths without traversal segments.',
-                ]);
-            }
+            $path = $this->normalizeArtifactRelativePath($path, $field);
             if (in_array($path, $normalized, true)) {
                 throw ValidationException::withMessages([
                     $field => 'Paths must not contain duplicates.',
@@ -661,6 +700,19 @@ class ProjectController extends Controller
         return $normalized;
     }
 
+    private function normalizeArtifactRelativePath(string $path, string $field): string
+    {
+        $path = rtrim(str_replace('\\', '/', trim($path)), '/');
+        if ($path === '' || str_starts_with($path, '/') || preg_match('/^[A-Za-z]:\//', $path) === 1
+            || preg_match('#(^|/)\.\.(/|$)#', $path) === 1 || str_contains($path, "\0")) {
+            throw ValidationException::withMessages([
+                $field => 'Paths must be relative paths without traversal segments.',
+            ]);
+        }
+
+        return $path;
+    }
+
     /**
      * Mirrors ArtifactManager::persistentOverlapError() so the Hub rejects an
      * ambiguous preserve+persistent contract before a deploy ever fails on the
@@ -669,11 +721,12 @@ class ProjectController extends Controller
      * (the same project path can never be both copied and symlinked).
      *
      * @param array<int, string> $preservePaths
-     * @param array<int, string> $persistentPaths
+     * @param array<int|string, string> $persistentPaths
      */
     private static function persistentOverlapError(array $preservePaths, array $persistentPaths): ?string
     {
-        foreach ($persistentPaths as $persistent) {
+        foreach ($persistentPaths as $releaseKey => $targetValue) {
+            $persistent = is_string($releaseKey) ? $releaseKey : $targetValue;
             $p = rtrim(str_replace('\\', '/', trim($persistent)), '/');
             foreach ($preservePaths as $preserve) {
                 $s = rtrim(str_replace('\\', '/', trim($preserve)), '/');

@@ -98,6 +98,40 @@ class AgentJobServiceReleaseGateTest extends TestCase
         $this->assertSame(Deployment::STATUS_RUNNING, $deployment->fresh()->status);
     }
 
+    public function test_current_agent_receives_signed_persistent_runtime_contract(): void
+    {
+        $server = $this->serverWithAgent('1.3.1');
+        $artifact = $this->artifactFor($server);
+        $artifact->project->update([
+            'artifact_persistent_paths' => ['public/uploads' => 'uploads'],
+            'artifact_persistent_root' => '/var/www/customer-site-shared',
+        ]);
+        $deployment = $this->queuedArtifactDeployment($server, $artifact);
+
+        $claimed = app(AgentJobService::class)->claimNextJob($server);
+
+        $this->assertSame([
+            'paths' => ['public/uploads' => 'uploads'],
+            'root' => '/var/www/customer-site-shared',
+        ], $claimed['job']['artifact_persistence']);
+        $this->assertSame(Deployment::STATUS_RUNNING, $deployment->fresh()->status);
+    }
+
+    public function test_persistent_runtime_contract_rejects_pre_1_3_1_agent(): void
+    {
+        $server = $this->serverWithAgent('1.3.0');
+        $artifact = $this->artifactFor($server);
+        $artifact->project->update([
+            'artifact_persistent_paths' => ['public/uploads' => 'uploads'],
+            'artifact_persistent_root' => '/var/www/customer-site-shared',
+        ]);
+        $deployment = $this->queuedArtifactDeployment($server, $artifact);
+
+        $this->assertNull(app(AgentJobService::class)->claimNextJob($server));
+        $this->assertSame(Deployment::STATUS_FAILED, $deployment->fresh()->status);
+        $this->assertSame(Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE, $deployment->fresh()->failure_code);
+    }
+
     public function test_plain_git_pipeline_deployment_is_unaffected_by_the_gate(): void
     {
         $server = $this->serverWithAgent('1.0.0');

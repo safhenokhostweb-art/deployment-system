@@ -38,8 +38,8 @@ final class ArtifactManager
      *
      * @param array{public_id: string, checksum_sha256: string, size_bytes: int} $artifactDescriptor
      * @param array<int, string> $preservePaths project-relative paths to carry over from the currently-active version (copy semantics, unchanged)
-     * @param array<int, string> $persistentPaths project-relative paths that live OUTSIDE the swappable release and are referenced via symlink, never copied
-     * @param string|null $persistentRoot trusted absolute persistent root (server-local config, never Hub-supplied)
+     * @param array<int|string, string> $persistentPaths project-relative paths that live OUTSIDE the swappable release and are referenced via symlink, never copied. Associative entries map release path => persistent-root-relative target.
+     * @param string|null $persistentRoot trusted absolute persistent root (signed Hub contract, with server-local compatibility fallback)
      * @return array{status: 'succeeded'|'failed', message: ?string, failureCode: ?string}
      */
     public function deploy(array $artifactDescriptor, string $workingDirectory, array $preservePaths, int $retentionCount, array $persistentPaths = [], ?string $persistentRoot = null, ?callable $onTick = null, ?string $phpBinary = null): array
@@ -62,7 +62,7 @@ final class ArtifactManager
      *
      * @param array{public_id: string, checksum_sha256: string, size_bytes: int} $artifactDescriptor
      * @param array<int, string> $preservePaths
-     * @param array<int, string> $persistentPaths
+     * @param array<int|string, string> $persistentPaths
      * @return array{status: 'succeeded'|'failed', stagingPath: string|null, message: ?string, failureCode: ?string}
      */
     public function prepare(array $artifactDescriptor, string $workingDirectory, array $preservePaths, array $persistentPaths = [], ?string $persistentRoot = null, ?callable $onTick = null, ?string $phpBinary = null): array
@@ -323,7 +323,7 @@ final class ArtifactManager
      * an invalid path, a missing/escaping target, or an overlap with the
      * effective preserve list aborts BEFORE activation.
      *
-     * @param array<int, string> $persistentPaths
+     * @param array<int|string, string> $persistentPaths
      * @param array<int, string> $effectivePreservePaths
      * @return array{code: string, message: string}|null null on success
      */
@@ -344,18 +344,27 @@ final class ArtifactManager
 
         $rootPrefix = rtrim($rootReal, '/') . '/';
 
-        foreach ($persistentPaths as $relativePath) {
+        foreach ($persistentPaths as $releaseKey => $configuredTargetPath) {
+            $relativePath = is_string($releaseKey) ? $releaseKey : $configuredTargetPath;
+            $targetRelativePath = $configuredTargetPath;
+
             $error = self::validateRelativePersistentPath($relativePath);
             if ($error !== null) {
                 return ['code' => 'artifact_persistent_path_invalid', 'message' => "Invalid persistent path '{$relativePath}': {$error}."];
             }
 
+            $targetError = self::validateRelativePersistentPath($targetRelativePath);
+            if ($targetError !== null) {
+                return ['code' => 'artifact_persistent_path_invalid', 'message' => "Invalid persistent target path '{$targetRelativePath}': {$targetError}."];
+            }
+
             $normalized = rtrim(str_replace('\\', '/', trim($relativePath)), '/');
+            $targetNormalized = rtrim(str_replace('\\', '/', trim($targetRelativePath)), '/');
             if ($normalized === '') {
                 return ['code' => 'artifact_persistent_path_invalid', 'message' => 'Persistent path must not be empty.'];
             }
 
-            $target = $rootPrefix . $normalized;
+            $target = $rootPrefix . $targetNormalized;
             $targetReal = realpath($target);
             if ($targetReal === false || !file_exists($targetReal)) {
                 return ['code' => 'artifact_persistent_target_missing', 'message' => "Persistent target '{$target}' does not exist — refusing to activate (missing persistent state would be silently replaced). Create it first (installer/runtime helper)."];
@@ -412,11 +421,12 @@ final class ArtifactManager
      * @return string|null an actionable error when a persistent path overlaps
      *                     a preserve path, null when the two contracts are disjoint
      * @param array<int, string> $preservePaths
-     * @param array<int, string> $persistentPaths
+     * @param array<int|string, string> $persistentPaths
      */
     private static function persistentOverlapError(array $preservePaths, array $persistentPaths): ?string
     {
-        foreach ($persistentPaths as $persistent) {
+        foreach ($persistentPaths as $releaseKey => $configuredTargetPath) {
+            $persistent = is_string($releaseKey) ? $releaseKey : $configuredTargetPath;
             $p = rtrim(str_replace('\\', '/', trim($persistent)), '/');
             foreach ($preservePaths as $preserve) {
                 $s = rtrim(str_replace('\\', '/', trim($preserve)), '/');

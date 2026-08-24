@@ -357,6 +357,35 @@ $normalizationFailureLogs = array_values(array_filter(readHubLog($hub['logPath']
 check('failed immediate normalization: logs activation and failed normalization only', array_map(static fn ($e) => $e['body']['step_name'] ?? null, $normalizationFailureLogs) === ['deploy artifact', 'runtime permissions (post-artifact)'], $failures, $passCount);
 check('failed immediate normalization: normalizer was still invoked exactly once', count($normalizationCalls) === 1, $failures, $passCount);
 
+// Persistent-runtime preparation happens before artifact preparation and
+// activation even when the pipeline has no runtime_permissions typed step.
+// A helper failure must leave the existing release byte-for-byte active.
+@unlink($hub['logPath']);
+file_put_contents($hub['logPath'], '');
+$persistentFailureSite = $workspace . '/persistent-preflight-failure-site';
+mkdir($persistentFailureSite, 0777, true);
+file_put_contents($persistentFailureSite . '/sentinel.txt', 'current-release');
+$persistentFailureFixture = buildFixtureZip($workspace, 'persistent-preflight-failure');
+registerManifestEntry($hub['manifestPath'], 'artifact-persistent-preflight-failure', $persistentFailureFixture['path']);
+$normalizationShouldFail = true;
+$normalizationCalls = [];
+$normalizationPipelineExecutor->execute([
+    'id' => 'job-persistent-preflight-failure',
+    'action' => 'deploy',
+    'project_key' => 'customer-site',
+    'commit_hash' => str_repeat('1', 40),
+    'branch' => 'main',
+    'artifact' => ['public_id' => 'artifact-persistent-preflight-failure', 'checksum_sha256' => $persistentFailureFixture['checksum'], 'size_bytes' => $persistentFailureFixture['size']],
+    'artifact_persistence' => ['paths' => ['public/uploads' => 'uploads'], 'root' => '/var/www/customer-site-shared'],
+    'pipeline' => [],
+], ['working_directory' => $persistentFailureSite], 30);
+check('persistent preflight failure: existing release remains active', (string) @file_get_contents($persistentFailureSite . '/sentinel.txt') === 'current-release', $failures, $passCount);
+check('persistent preflight failure: candidate artifact is never activated', !is_file($persistentFailureSite . '/index.php'), $failures, $passCount);
+$persistentFailureLogs = array_values(array_filter(readHubLog($hub['logPath']), static fn ($e) => $e['path'] === '/api/agent/jobs/job-persistent-preflight-failure/log'));
+check('persistent preflight failure: only pre-activation preparation is logged', array_map(static fn ($e) => $e['body']['step_name'] ?? null, $persistentFailureLogs) === ['prepare persistent runtime'], $failures, $passCount);
+$persistentFailureStatuses = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-persistent-preflight-failure/status' ? ($e['body']['status'] ?? null) : null, readHubLog($hub['logPath']))));
+check('persistent preflight failure: explicit failed state is reported', $persistentFailureStatuses === ['running', 'failed'], $failures, $passCount);
+
 @unlink($hub['logPath']);
 file_put_contents($hub['logPath'], '');
 

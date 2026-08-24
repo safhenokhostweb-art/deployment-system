@@ -154,6 +154,65 @@ class ProjectArtifactSettingsUpdateTest extends TestCase
         $this->assertSame('/var/www/deployment-system/persistent', $project->artifact_persistent_root);
     }
 
+    public function test_customer_upload_release_path_can_map_to_flattened_shared_target(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = Project::factory()->create(['project_key' => 'customer-site']);
+
+        $this->actingAs($admin)->put(route('projects.update', $project), $this->payload($project, [
+            'artifact_persistent_paths' => ['public/uploads' => 'uploads'],
+            'artifact_persistent_root' => '/var/www/customer-site-shared',
+        ]))->assertRedirect(route('projects.show', $project));
+
+        $project->refresh();
+        $this->assertSame(['public/uploads' => 'uploads'], $project->artifact_persistent_paths);
+        $this->assertSame('/var/www/customer-site-shared', $project->artifact_persistent_root);
+    }
+
+    public function test_mapping_textarea_round_trips_release_and_shared_paths(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = Project::factory()->create(['project_key' => 'customer-site']);
+
+        $this->actingAs($admin)->put(route('projects.update', $project), $this->payload($project, [
+            'artifact_persistent_paths_text' => "public/uploads => uploads",
+            'artifact_persistent_root' => '/var/www/customer-site-shared',
+        ]))->assertRedirect(route('projects.show', $project));
+
+        $this->assertSame(['public/uploads' => 'uploads'], $project->fresh()->artifact_persistent_paths);
+        $this->actingAs($admin)->get(route('projects.edit', $project))
+            ->assertOk()
+            ->assertSee('public/uploads =&gt; uploads', false);
+    }
+
+    public function test_persistent_root_must_be_an_absolute_unix_path(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = Project::factory()->create();
+
+        $this->actingAs($admin)->from(route('projects.edit', $project))
+            ->put(route('projects.update', $project), $this->payload($project, [
+                'artifact_persistent_paths' => ['public/uploads' => 'uploads'],
+                'artifact_persistent_root' => 'relative/shared',
+            ]))
+            ->assertRedirect(route('projects.edit', $project))
+            ->assertSessionHasErrors('artifact_persistent_root');
+    }
+
+    public function test_customer_site_rejects_any_contract_not_supported_by_the_fixed_helper(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = Project::factory()->create(['project_key' => 'customer-site']);
+
+        $this->actingAs($admin)->from(route('projects.edit', $project))
+            ->put(route('projects.update', $project), $this->payload($project, [
+                'artifact_persistent_paths' => ['public/uploads'],
+                'artifact_persistent_root' => '/var/www/customer-site-shared',
+            ]))
+            ->assertRedirect(route('projects.edit', $project))
+            ->assertSessionHasErrors('artifact_persistent_paths');
+    }
+
     public function test_persistent_paths_normalize_backslashes(): void
     {
         $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);

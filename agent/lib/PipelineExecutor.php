@@ -80,6 +80,69 @@ final class PipelineExecutor
         $usedArtifact = false;
         $runtimePermissionsNormalized = false;
         if (!empty($job['artifact'])) {
+            $persistence = is_array($job['artifact_persistence'] ?? null)
+                ? $job['artifact_persistence']
+                : [];
+            $persistentPaths = is_array($persistence['paths'] ?? null)
+                ? $persistence['paths']
+                : ($projectConfig['artifact_persistent_paths'] ?? []);
+            $persistentRoot = is_string($persistence['root'] ?? null)
+                ? $persistence['root']
+                : ($projectConfig['artifact_persistent_root'] ?? null);
+
+            // Persistent targets are privileged runtime state. Prepare and
+            // normalize them through the fixed project-key allowlist before
+            // extracting or activating a candidate release. A missing helper,
+            // invalid project key, ownership failure, or permission failure
+            // therefore leaves the current release completely untouched.
+            if ($persistentPaths !== []) {
+                $sequence++;
+                $command = 'sudo -n /usr/local/sbin/deployment-runtime-permissions ' . $job['project_key'];
+                $contractError = self::persistentContractError($job['project_key'], $persistentPaths, $persistentRoot);
+                if ($contractError !== null) {
+                    $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+                        'sequence' => $sequence,
+                        'step_name' => 'prepare persistent runtime',
+                        'command' => $command,
+                        'output' => $contractError,
+                        'exit_code' => 1,
+                        'duration_ms' => 0,
+                        'timed_out' => false,
+                        'failure_code' => 'artifact_persistent_config_invalid',
+                    ]);
+                    $this->client->request('POST', "/api/agent/jobs/{$job['id']}/status", [
+                        'status' => 'failed',
+                        'message' => $contractError,
+                        'failure_code' => 'artifact_persistent_config_invalid',
+                    ]);
+
+                    return;
+                }
+                $result = $this->runRuntimePermissions($job['project_key'], $workingDirectory, $stepTimeout);
+                $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+                    'sequence' => $sequence,
+                    'step_name' => 'prepare persistent runtime',
+                    'command' => $command,
+                    'output' => mb_substr($result['output'], -50000),
+                    'exit_code' => $result['exitCode'],
+                    'duration_ms' => $result['durationMs'],
+                    'timed_out' => $result['timedOut'],
+                    'failure_code' => $result['exitCode'] === 0 ? null : 'artifact_persistent_permissions_invalid',
+                ]);
+
+                if ($result['exitCode'] !== 0) {
+                    $message = 'Persistent runtime preparation failed before artifact activation; the live release was not changed.';
+                    $this->logger->error("Job {$job['id']}: {$message} " . self::formatRuntimePermissionsFailureOutput($result['output']));
+                    $this->client->request('POST', "/api/agent/jobs/{$job['id']}/status", [
+                        'status' => 'failed',
+                        'message' => $message,
+                        'failure_code' => 'artifact_persistent_permissions_invalid',
+                    ]);
+
+                    return;
+                }
+            }
+
             $sequence++;
 
             // PHASE 1 — PREPARE: download/verify/extract + carry over legacy
@@ -91,8 +154,8 @@ final class PipelineExecutor
                 $job['artifact'],
                 $workingDirectory,
                 $projectConfig['artifact_preserve_paths'] ?? [],
-                $projectConfig['artifact_persistent_paths'] ?? [],
-                $projectConfig['artifact_persistent_root'] ?? null,
+                $persistentPaths,
+                $persistentRoot,
                 null,
                 $projectConfig['php_binary'] ?? 'php',
             );
@@ -386,6 +449,23 @@ final class PipelineExecutor
         }
 
         return false;
+    }
+
+    /** @param array<int|string, string> $persistentPaths */
+    private static function persistentContractError(string $projectKey, array $persistentPaths, ?string $persistentRoot): ?string
+    {
+        if (!is_string($persistentRoot) || !str_starts_with($persistentRoot, '/')) {
+            return 'Persistent runtime root must be an absolute Unix path; the live release was not changed.';
+        }
+
+        if ($projectKey === 'customer-site' && (
+            rtrim($persistentRoot, '/') !== '/var/www/customer-site-shared'
+            || $persistentPaths !== ['public/uploads' => 'uploads']
+        )) {
+            return 'customer-site persistent runtime must map public/uploads to /var/www/customer-site-shared/uploads; the live release was not changed.';
+        }
+
+        return null;
     }
 
     /** @return array{exitCode: int, output: string, timedOut: bool, durationMs: int} */
