@@ -1,5 +1,5 @@
 [Unit]
-Description=Deployment Agent (polls Deployment Service, no inbound access required)
+Description=Deployment Server Agent
 After=network-online.target
 Wants=network-online.target
 

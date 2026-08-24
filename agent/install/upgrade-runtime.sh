@@ -1,61 +1,86 @@
 #!/usr/bin/env bash
-# Official in-place runtime upgrade. It copies only executable Agent source;
-# config.php (identity/credentials) and storage remain untouched.
+# Official in-place Server Agent runtime upgrade. Source must be the isolated
+# deployment-system workspace. The active runtime is replaced atomically while
+# config.php, credentials, storage, and the previous runtime remain preserved.
 set -Eeuo pipefail
 
-INSTALL_DIR=/opt/deployment-agent
-SOURCE_DIR=/var/www/deployment-system/agent
-SERVICE=deployment-agent
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SOURCE_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+INSTALL_DIR=/opt/deployment-server-agent
+SERVICE=deployment-server-agent
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+STAGING="${INSTALL_DIR}.staging-${STAMP}"
 BACKUP="${INSTALL_DIR}.backup-${STAMP}"
-ETC_BACKUP="/root/deployment-agent-runtime-${STAMP}"
+FAILED="${INSTALL_DIR}.failed-${STAMP}"
+CURRENT_MOVED=false
+ACTIVATED=false
 
-[ "$(id -u)" -eq 0 ] || { echo 'Run as root.' >&2; exit 1; }
-[ -f "$INSTALL_DIR/config.php" ] || { echo 'Existing Agent config.php is required.' >&2; exit 1; }
-[ -f "$SOURCE_DIR/agent.php" ] || { echo 'Repository Agent source is missing.' >&2; exit 1; }
+fail() { echo "Server Agent upgrade refused: $1" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || fail 'run as root'
+case "$SOURCE_DIR" in
+    /opt/deployment-agent/workspaces/deployment-system/agent) ;;
+    *) fail "source must be /opt/deployment-agent/workspaces/deployment-system/agent (got $SOURCE_DIR)" ;;
+esac
+[ -d "$INSTALL_DIR" ] || fail "existing runtime $INSTALL_DIR is required"
+[ -f "$INSTALL_DIR/config.php" ] || fail 'existing Server Agent config.php is required'
+[ -f "$SOURCE_DIR/agent.php" ] || fail 'Server Agent source is missing'
+[ ! -e "$STAGING" ] || fail "staging path already exists: $STAGING"
+[ ! -e "$BACKUP" ] || fail "backup path already exists: $BACKUP"
+
+SOURCE_VERSION="$(sed -n "s/^const AGENT_VERSION = '\([^']*\)';/\1/p" "$SOURCE_DIR/agent.php" | head -n 1)"
+CURRENT_VERSION="$(sed -n "s/^const AGENT_VERSION = '\([^']*\)';/\1/p" "$INSTALL_DIR/agent.php" | head -n 1)"
+[ -n "$SOURCE_VERSION" ] || fail 'source AGENT_VERSION could not be read'
+[ -n "$CURRENT_VERSION" ] || fail 'installed AGENT_VERSION could not be read'
+php -r 'exit(version_compare($argv[1], $argv[2], ">=") ? 0 : 1);' "$SOURCE_VERSION" "$CURRENT_VERSION" \
+    || fail "downgrade is forbidden ($CURRENT_VERSION -> $SOURCE_VERSION)"
+
 php -l "$SOURCE_DIR/agent.php" >/dev/null
 for file in "$SOURCE_DIR"/lib/*.php; do php -l "$file" >/dev/null; done
 
-# Identity compatibility: config.php is preserved untouched by design, and
-# agent.php resolves the canonical `agent_id` with legacy `server_id` /
-# `local_agent_id` fallbacks, so a legacy-only config keeps working after
-# this upgrade. Inform only — never fail an upgrade over a legacy config.
-if ! grep -q "'agent_id'" "$INSTALL_DIR/config.php"; then
-    echo "NOTICE: $INSTALL_DIR/config.php has no canonical 'agent_id' — using its legacy identity key (server_id/local_agent_id). Rotate to 'agent_id' when possible."
-fi
-
-cp -a "$INSTALL_DIR" "$BACKUP"
-mkdir -p "$ETC_BACKUP"
-for path in /usr/local/sbin/deployment-runtime-permissions /usr/local/sbin/deployment-service-reload /etc/sudoers.d/deployment-runtime-permissions /etc/sudoers.d/deployment-service-reload /etc/systemd/system/deployment-agent.service.d/10-privileged-helpers.conf; do
-    [ -e "$path" ] && cp -a --parents "$path" "$ETC_BACKUP"
+CONFIG_HASH="$(sha256sum "$INSTALL_DIR/config.php" | awk '{print $1}')"
+cp -a "$INSTALL_DIR" "$STAGING"
+chown deployment-agent:deployment-agent "$STAGING"
+chmod 0750 "$STAGING"
+install -d -o deployment-agent -g deployment-agent -m 0750 "$STAGING/lib"
+install -o deployment-agent -g deployment-agent -m 0644 "$SOURCE_DIR/agent.php" "$STAGING/agent.php"
+for file in "$SOURCE_DIR"/lib/*.php; do
+    install -o deployment-agent -g deployment-agent -m 0644 "$file" "$STAGING/lib/$(basename "$file")"
 done
-rollback() { cp -a "$BACKUP/." "$INSTALL_DIR/"; systemctl restart "$SERVICE" || true; }
+chown deployment-agent:deployment-agent "$STAGING/config.php"
+chmod 0600 "$STAGING/config.php"
+
+for file in "$STAGING/agent.php" "$STAGING"/lib/*.php "$STAGING/config.php"; do
+    php -l "$file" >/dev/null
+done
+[ "$(sha256sum "$STAGING/config.php" | awk '{print $1}')" = "$CONFIG_HASH" ] \
+    || fail 'staged config.php differs from the installed credentials/configuration'
+
+rollback() {
+    code=$?
+    trap - ERR
+    if [ "$ACTIVATED" = true ]; then
+        systemctl stop "$SERVICE" || true
+        [ ! -e "$FAILED" ] && mv "$INSTALL_DIR" "$FAILED"
+    fi
+    if [ "$CURRENT_MOVED" = true ] && [ -d "$BACKUP" ]; then
+        mv "$BACKUP" "$INSTALL_DIR"
+        systemctl restart "$SERVICE" || true
+    fi
+    echo "Server Agent upgrade failed; previous runtime restored. Failed candidate: $FAILED" >&2
+    exit "$code"
+}
 trap rollback ERR
 
-install -d -o deployment-agent -g deployment-agent -m 0750 "$INSTALL_DIR/lib"
-install -o deployment-agent -g deployment-agent -m 0644 "$SOURCE_DIR/agent.php" "$INSTALL_DIR/agent.php"
-for file in "$SOURCE_DIR"/lib/*.php; do install -o deployment-agent -g deployment-agent -m 0644 "$file" "$INSTALL_DIR/lib/$(basename "$file")"; done
-chown deployment-agent:deployment-agent "$INSTALL_DIR/config.php"
-chmod 0600 "$INSTALL_DIR/config.php"
-
-# The service remains unprivileged. NoNewPrivileges must be disabled solely
-# so sudo can invoke the two exact commands constrained below; sudoers still
-# rejects every other elevation attempt.
-install -o root -g root -m 0755 "$SOURCE_DIR/install/deployment-runtime-permissions" /usr/local/sbin/deployment-runtime-permissions
-install -o root -g root -m 0755 "$SOURCE_DIR/install/deployment-service-reload" /usr/local/sbin/deployment-service-reload
-install -o root -g root -m 0440 "$SOURCE_DIR/install/deployment-runtime-permissions.sudoers" /etc/sudoers.d/deployment-runtime-permissions
-install -o root -g root -m 0440 "$SOURCE_DIR/install/deployment-service-reload.sudoers" /etc/sudoers.d/deployment-service-reload
-visudo -cf /etc/sudoers.d/deployment-runtime-permissions
-visudo -cf /etc/sudoers.d/deployment-service-reload
-install -d -o root -g root -m 0755 /etc/systemd/system/deployment-agent.service.d
-cat > /etc/systemd/system/deployment-agent.service.d/10-privileged-helpers.conf <<'EOF'
-[Service]
-# sudo is constrained to two literal root-owned helpers in /etc/sudoers.d.
-NoNewPrivileges=false
-EOF
-chmod 0644 /etc/systemd/system/deployment-agent.service.d/10-privileged-helpers.conf
-systemctl daemon-reload
+mv "$INSTALL_DIR" "$BACKUP"
+CURRENT_MOVED=true
+mv "$STAGING" "$INSTALL_DIR"
+ACTIVATED=true
 systemctl restart "$SERVICE"
+sleep 2
 systemctl is-active --quiet "$SERVICE"
+[ "$(sha256sum "$INSTALL_DIR/config.php" | awk '{print $1}')" = "$CONFIG_HASH" ]
+grep -q "^const AGENT_VERSION = '$SOURCE_VERSION';$" "$INSTALL_DIR/agent.php"
+
 trap - ERR
-echo "UPGRADE_OK backup=$BACKUP"
+echo "UPGRADE_OK service=$SERVICE version=$CURRENT_VERSION->$SOURCE_VERSION backup=$BACKUP"

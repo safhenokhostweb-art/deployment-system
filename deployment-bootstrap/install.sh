@@ -19,8 +19,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 chmod +x "$SCRIPT_DIR/verify.sh" "$SCRIPT_DIR/uninstall.sh" 2>/dev/null || true
 
 INSTALL_LOG="/var/log/deployment-bootstrap-install.log"
-INSTALL_DIR="/opt/deployment-agent"
-SERVICE_NAME="deployment-agent"
+INSTALL_DIR="/opt/deployment-server-agent"
+SERVICE_NAME="deployment-server-agent"
 SERVICE_USER="deployment-agent"
 
 say() {

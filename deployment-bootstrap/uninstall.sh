@@ -15,8 +15,8 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_DIR="/opt/deployment-agent"
-SERVICE_NAME="deployment-agent"
+INSTALL_DIR="/opt/deployment-server-agent"
+SERVICE_NAME="deployment-server-agent"
 SERVICE_USER="deployment-agent"
 
 MODE="disable-only"

@@ -228,7 +228,8 @@ class ServerAgentPrivilegedDropInTest extends TestCase
     {
         $install = $this->readRepoSource('deployment-bootstrap/install.sh');
 
-        $this->assertStringContainsString('SERVICE_NAME="deployment-agent"', $install);
+        $this->assertStringContainsString('INSTALL_DIR="/opt/deployment-server-agent"', $install);
+        $this->assertStringContainsString('SERVICE_NAME="deployment-server-agent"', $install);
         $this->assertStringContainsString('SERVICE_USER="deployment-agent"', $install);
         $this->assertStringContainsString('s#CHANGE_ME_DEPLOY_USER#${SERVICE_USER}#g', $install);
         $this->assertStringNotContainsString('User=root', $install);
@@ -254,24 +255,24 @@ class ServerAgentPrivilegedDropInTest extends TestCase
     }
 
     // ------------------------------------------------------------------
-    // CASE 5: the Local Agent's existing privileged-helper drop-in
-    // behavior remains exactly as before.
+    // CASE 5: the official Server Agent upgrader is isolated from the
+    // separately installed Local Agent runtime and service.
     // ------------------------------------------------------------------
 
-    public function test_runtime_upgrade_privileged_helper_drop_in_is_unchanged(): void
+    public function test_runtime_upgrade_targets_only_the_server_agent_and_is_atomic(): void
     {
         $upgrade = $this->readRepoSource('agent/install/upgrade-runtime.sh');
 
-        $dropInBlock = "install -d -o root -g root -m 0755 /etc/systemd/system/deployment-agent.service.d\n"
-            . "cat > /etc/systemd/system/deployment-agent.service.d/10-privileged-helpers.conf <<'EOF'\n"
-            . self::DROPIN_BODY
-            . "EOF\n"
-            . 'chmod 0644 /etc/systemd/system/deployment-agent.service.d/10-privileged-helpers.conf' . "\n";
-
-        $this->assertStringContainsString($dropInBlock, $upgrade);
-        $this->assertStringContainsString('SERVICE=deployment-agent', $upgrade);
-        $this->assertStringNotContainsString('rm -rf /etc/systemd/system', $upgrade);
-        $this->assertStringNotContainsString('rm -f /etc/systemd/system', $upgrade);
+        $this->assertStringContainsString('INSTALL_DIR=/opt/deployment-server-agent', $upgrade);
+        $this->assertStringContainsString('SERVICE=deployment-server-agent', $upgrade);
+        $this->assertStringContainsString('/opt/deployment-agent/workspaces/deployment-system/agent', $upgrade);
+        $this->assertStringNotContainsString("INSTALL_DIR=/opt/deployment-agent\n", $upgrade);
+        $this->assertStringNotContainsString("SERVICE=deployment-agent\n", $upgrade);
+        $this->assertStringContainsString('mv "$INSTALL_DIR" "$BACKUP"', $upgrade);
+        $this->assertStringContainsString('mv "$STAGING" "$INSTALL_DIR"', $upgrade);
+        $this->assertStringContainsString('trap rollback ERR', $upgrade);
+        $this->assertStringContainsString('mv "$BACKUP" "$INSTALL_DIR"', $upgrade);
+        $this->assertGreaterThanOrEqual(2, substr_count($upgrade, 'sha256sum "$INSTALL_DIR/config.php"'));
     }
 
     // ------------------------------------------------------------------
