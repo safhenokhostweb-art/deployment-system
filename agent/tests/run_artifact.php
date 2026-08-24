@@ -384,7 +384,8 @@ if ($symlinkSupported) {
 
     // Rollback restores the previous release — the same persistent target.
     $rollbackError = $manager->rollback($persistentSiteDir);
-    check('persistent: rollback restores the previous release', $rollbackError === null && str_contains((string) @file_get_contents("{$persistentSiteDir}/index.php"), 'release 1'), $failures, $passCount);
+    $restoredPersistentRelease = (string) @file_get_contents("{$persistentSiteDir}/index.php");
+    check('persistent: rollback restores the previous release', $rollbackError === null && str_contains($restoredPersistentRelease, 'persistent release') && !str_contains($restoredPersistentRelease, 'persistent release 2'), $failures, $passCount);
     check('persistent: the restored release keeps the persistent reference', is_link("{$persistentSiteDir}/database"), $failures, $passCount);
     check('persistent: rollback never touched the persistent data', trim((string) @file_get_contents("{$persistentTargetDir}/database.sqlite")) === 'sqlite-bytes', $failures, $passCount);
 
