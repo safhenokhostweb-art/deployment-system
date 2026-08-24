@@ -121,13 +121,43 @@ final class SourceWorkspaceManager
         }
 
         try {
-            $clone = $this->git->run([
-                'git', 'clone', '--origin', $remoteName, '--branch', $branch,
-                '--single-branch', '--', $repositoryUrl, $temporaryPath,
-            ], $parent, $this->git->timeoutFor('pull'));
+            $cloneErrors = [];
+            $cloned = false;
+            $cloneUrls = [$repositoryUrl];
+            $sshFallback = $this->githubSshFallback($repositoryUrl);
+            if ($sshFallback !== null) {
+                $cloneUrls[] = $sshFallback;
+            }
 
-            if ($clone['exitCode'] !== 0) {
-                throw new \RuntimeException('git clone failed: ' . trim($clone['output']));
+            foreach ($cloneUrls as $cloneUrl) {
+                if ($this->pathExists($temporaryPath)) {
+                    $this->removeGeneratedClone($temporaryPath, $parent);
+                }
+                $clone = $this->git->run([
+                    'git', 'clone', '--origin', $remoteName, '--branch', $branch,
+                    '--single-branch', '--', $cloneUrl, $temporaryPath,
+                ], $parent, $this->git->timeoutFor('pull'));
+                if ($clone['exitCode'] === 0) {
+                    // Git URL rewrite rules may otherwise persist their local
+                    // replacement in remote.origin.url. Record the transport
+                    // that actually succeeded so subsequent syncs can compare
+                    // the canonical repository identity deterministically.
+                    $remoteSet = $this->git->run(
+                        ['git', 'remote', 'set-url', $remoteName, $cloneUrl],
+                        $temporaryPath,
+                        $this->git->timeoutFor('status'),
+                    );
+                    if ($remoteSet['exitCode'] !== 0) {
+                        throw new \RuntimeException('could not record the successful clone remote: ' . trim($remoteSet['output']));
+                    }
+                    $cloned = true;
+                    break;
+                }
+                $cloneErrors[] = trim($clone['output']);
+            }
+
+            if (!$cloned) {
+                throw new \RuntimeException('git clone failed: ' . implode("\nFallback clone failed: ", $cloneErrors));
             }
 
             if (!$this->isExpectedCheckout($temporaryPath, $repositoryUrl, $remoteName, $branch)) {
@@ -179,7 +209,10 @@ final class SourceWorkspaceManager
             return false;
         }
 
-        $remote = $this->git->run(['git', 'remote', 'get-url', $remoteName], $path, $this->git->timeoutFor('status'));
+        // Read the stored value directly. `git remote get-url` expands
+        // url.*.insteadOf rules and can hide the repository identity that is
+        // actually recorded in this workspace.
+        $remote = $this->git->run(['git', 'config', '--get', 'remote.' . $remoteName . '.url'], $path, $this->git->timeoutFor('status'));
         if ($remote['exitCode'] !== 0 || $this->normalizeRepository((string) $remote['output']) !== $this->normalizeRepository($repositoryUrl)) {
             return false;
         }
@@ -280,13 +313,30 @@ final class SourceWorkspaceManager
         }
 
         $parts = parse_url($normalized);
-        if (is_array($parts) && strtolower((string) ($parts['host'] ?? '')) === 'github.com') {
+        if (is_array($parts) && in_array(strtolower((string) ($parts['host'] ?? '')), ['github.com', 'ssh.github.com'], true)) {
             $path = ltrim((string) ($parts['path'] ?? ''), '/');
 
             return 'github.com/' . strtolower(preg_replace('#\.git/?$#i', '', $path) ?? $path);
         }
 
         return preg_replace('#\.git/?$#i', '', rtrim($normalized, '/')) ?? $normalized;
+    }
+
+    private function githubSshFallback(string $repository): ?string
+    {
+        $parts = parse_url(trim($repository));
+        if (!is_array($parts)
+            || !in_array(strtolower((string) ($parts['scheme'] ?? '')), ['http', 'https'], true)
+            || strtolower((string) ($parts['host'] ?? '')) !== 'github.com') {
+            return null;
+        }
+
+        $path = ltrim((string) ($parts['path'] ?? ''), '/');
+        if (preg_match('#^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$#', $path) !== 1) {
+            return null;
+        }
+
+        return 'ssh://git@ssh.github.com:443/' . $path;
     }
 
     private function removeGeneratedClone(string $path, string $parent): void

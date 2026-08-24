@@ -117,7 +117,7 @@ try {
     $existingKey = 'deployment-system';
     $existingWorkspace = $root . '/workspaces/' . $existingKey;
     file_put_contents($existingWorkspace . '/reuse-marker.txt', 'keep');
-    $run(['git', 'remote', 'set-url', 'origin', 'git@github-safhe:safhenokhostweb-art/deployment-system.git'], $existingWorkspace);
+    $run(['git', 'remote', 'set-url', 'origin', 'ssh://git@ssh.github.com:443/safhenokhostweb-art/deployment-system.git'], $existingWorkspace);
     $unavailableRemote = $remotePaths[$existingKey] . '.offline';
     rename($remotePaths[$existingKey], $unavailableRemote);
     $existingConfig = $cachedProjects[$existingKey];
@@ -126,6 +126,24 @@ try {
     $check('existing workspace is reused without cloning again', $reused === 'reused');
     $check('existing workspace content survives reuse', is_file($existingWorkspace . '/reuse-marker.txt'));
     rename($unavailableRemote, $remotePaths[$existingKey]);
+
+    // Private GitHub repositories may reject HTTPS credentials while the
+    // Agent's SSH key is authorized. Prove the exact GitHub SSH/443 fallback
+    // is attempted offline and still activates only a verified clone.
+    $fallbackHttps = 'https://github.com/example/source-workspace-fallback.git';
+    $fallbackSsh = 'ssh://git@ssh.github.com:443/example/source-workspace-fallback.git';
+    $forcedHttpsFailure = $root . '/remotes/https-credentials-unavailable.bundle';
+    $run(['git', 'config', '--global', 'url.' . $forcedHttpsFailure . '.insteadOf', $fallbackHttps], $root);
+    $run(['git', 'config', '--global', 'url.' . $remotePaths['deployment-system'] . '.insteadOf', $fallbackSsh], $root);
+    $fallbackWorkspace = $root . '/workspaces/github-ssh-fallback';
+    $fallbackResult = $manager->reconcileProject('github-ssh-fallback', [
+        'source_workspace_path' => $fallbackWorkspace,
+        'repository_url' => $fallbackHttps,
+        'remote_name' => 'origin',
+        'branch' => 'main',
+    ]);
+    $check('failed GitHub HTTPS clone falls back to the equivalent SSH/443 repository', $fallbackResult === 'created' && is_dir($fallbackWorkspace . '/.git'));
+    $check('GitHub SSH fallback reports a valid SHA', preg_match('/^[0-9a-f]{40}$/', $git->lastCommitHash($fallbackWorkspace)) === 1);
 
     // A failed repair must put the original workspace back exactly where it
     // was; network failure may leave diagnostic clone data, but never remove
