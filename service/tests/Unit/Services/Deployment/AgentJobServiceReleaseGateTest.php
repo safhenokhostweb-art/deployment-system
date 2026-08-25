@@ -141,6 +141,56 @@ class AgentJobServiceReleaseGateTest extends TestCase
         $this->assertSame(Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE, $deployment->fresh()->failure_code);
     }
 
+    public function test_saas_persistence_requires_the_project_specific_agent_release(): void
+    {
+        $server = $this->serverWithAgent('1.3.4');
+        $artifact = $this->artifactFor($server);
+        $artifact->project->update([
+            'project_key' => 'saas-platform',
+            'artifact_preserve_paths' => ['.env'],
+            'artifact_persistent_paths' => [
+                'storage/app' => 'storage/app',
+                'storage/logs' => 'storage/logs',
+                'public/storage' => 'public/storage',
+                'public/uploads' => 'public/uploads',
+            ],
+            'artifact_persistent_root' => '/var/www/saas-platform-shared',
+        ]);
+        $deployment = $this->queuedArtifactDeployment($server, $artifact);
+
+        $this->assertNull(app(AgentJobService::class)->claimNextJob($server));
+        $this->assertSame(Deployment::STATUS_FAILED, $deployment->fresh()->status);
+        $this->assertStringContainsString('1.3.5', (string) $deployment->fresh()->failure_message);
+    }
+
+    public function test_saas_persistence_dispatches_to_server_agent_1_3_5_with_signed_contract(): void
+    {
+        $server = $this->serverWithAgent('1.3.5');
+        $artifact = $this->artifactFor($server);
+        $paths = [
+            'storage/app' => 'storage/app',
+            'storage/logs' => 'storage/logs',
+            'public/storage' => 'public/storage',
+            'public/uploads' => 'public/uploads',
+        ];
+        $artifact->project->update([
+            'project_key' => 'saas-platform',
+            'artifact_preserve_paths' => ['.env'],
+            'artifact_persistent_paths' => $paths,
+            'artifact_persistent_root' => '/var/www/saas-platform-shared',
+        ]);
+        $deployment = $this->queuedArtifactDeployment($server, $artifact);
+
+        $claimed = app(AgentJobService::class)->claimNextJob($server);
+
+        $this->assertSame([
+            'paths' => $paths,
+            'root' => '/var/www/saas-platform-shared',
+            'preserve_paths' => ['.env'],
+        ], $claimed['job']['artifact_persistence']);
+        $this->assertSame(Deployment::STATUS_RUNNING, $deployment->fresh()->status);
+    }
+
     public function test_plain_git_pipeline_deployment_is_unaffected_by_the_gate(): void
     {
         $server = $this->serverWithAgent('1.0.0');

@@ -188,9 +188,9 @@ class AgentJobService
                 return null;
             }
 
-            if ($this->projectHasPersistentRuntime($project) && !$this->serverAgentEnforcesPersistentRuntime($server)) {
+            if ($this->projectHasPersistentRuntime($project) && !$this->serverAgentEnforcesPersistentRuntime($server, $project)) {
                 $reportedVersion = $server->agents()->first()?->agent_version;
-                $requiredVersion = (string) config('deployment.min_server_agent_version_for_persistent_runtime');
+                $requiredVersion = $this->requiredPersistentRuntimeVersion($project);
                 $deployment->update([
                     'status' => Deployment::STATUS_FAILED,
                     'finished_at' => now(),
@@ -505,13 +505,20 @@ class AgentJobService
             && version_compare($agentVersion, (string) config('deployment.min_server_agent_version_for_http_health'), '>=');
     }
 
-    private function serverAgentEnforcesPersistentRuntime(Server $server): bool
+    private function serverAgentEnforcesPersistentRuntime(Server $server, \App\Models\Project $project): bool
     {
         $agentVersion = $server->agents()->first()?->agent_version;
 
         return is_string($agentVersion)
             && $agentVersion !== ''
-            && version_compare($agentVersion, (string) config('deployment.min_server_agent_version_for_persistent_runtime'), '>=');
+            && version_compare($agentVersion, $this->requiredPersistentRuntimeVersion($project), '>=');
+    }
+
+    private function requiredPersistentRuntimeVersion(\App\Models\Project $project): string
+    {
+        return (string) config($project->project_key === 'saas-platform'
+            ? 'deployment.min_server_agent_version_for_saas_persistent_runtime'
+            : 'deployment.min_server_agent_version_for_persistent_runtime');
     }
 
     private function projectHasPersistentRuntime(\App\Models\Project $project): bool

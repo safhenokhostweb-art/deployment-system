@@ -495,6 +495,19 @@ final class PipelineExecutor
             return 'customer-site persistent runtime must map public/uploads to /var/www/customer-site-shared/uploads; the live release was not changed.';
         }
 
+        $saasPaths = [
+            'storage/app' => 'storage/app',
+            'storage/logs' => 'storage/logs',
+            'public/storage' => 'public/storage',
+            'public/uploads' => 'public/uploads',
+        ];
+        if ($projectKey === 'saas-platform' && (
+            rtrim($persistentRoot, '/') !== '/var/www/saas-platform-shared'
+            || $persistentPaths != $saasPaths
+        )) {
+            return 'saas-platform persistent runtime must use the reviewed storage/app, storage/logs, public/storage, and public/uploads mappings under /var/www/saas-platform-shared; the live release was not changed.';
+        }
+
         // The production customer-site release currently uses the legacy
         // atomic-swap root directly. There is deliberately no `current/`
         // indirection. Fail closed instead of creating a valid-looking link
@@ -502,6 +515,10 @@ final class PipelineExecutor
         // a separately implemented and reviewed release-layout migration.
         if ($projectKey === 'customer-site' && rtrim($workingDirectory, '/') !== '/var/www/customer-site') {
             return "customer-site working_directory must be /var/www/customer-site for the current release layout; '/var/www/customer-site/current' is not supported. The live release was not changed.";
+        }
+
+        if ($projectKey === 'saas-platform' && rtrim($workingDirectory, '/') !== '/var/www/saas-platform') {
+            return "saas-platform working_directory must be /var/www/saas-platform for the current release layout; '/var/www/saas-platform/current' is not supported. The live release was not changed.";
         }
 
         return null;

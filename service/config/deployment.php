@@ -241,6 +241,12 @@ return [
     // PHP-FPM write access, rolling back before reporting activation success.
     'min_server_agent_version_for_persistent_runtime' => (string) env('DEPLOYMENT_MIN_SERVER_AGENT_VERSION_FOR_PERSISTENT_RUNTIME', '1.3.4'),
 
+    // SaaS persistence has a narrower shared/runtime permission contract than
+    // the customer-site implementation introduced in 1.3.4. Keep this gate
+    // project-specific so existing customer-site deployments remain valid
+    // while saas-platform fails closed until the matching helper is active.
+    'min_server_agent_version_for_saas_persistent_runtime' => (string) env('DEPLOYMENT_MIN_SERVER_AGENT_VERSION_FOR_SAAS_PERSISTENT_RUNTIME', '1.3.5'),
+
     /*
     |--------------------------------------------------------------------------
     | Laravel release completeness — Local Agent minimum (permanent fix)

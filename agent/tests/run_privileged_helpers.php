@@ -37,9 +37,16 @@ check('saas-platform is an explicit runtime-permissions project key', str_contai
 check('customer-site is an explicit runtime-permissions project key', str_contains($runtime, 'customer-site)'), $failures, $passCount);
 check('unknown runtime-permissions project keys are rejected with a concise diagnostic', str_contains($runtime, "*) fail \"\$project_key\" validate - 'invalid project key' 65 ;;"), $failures, $passCount);
 check('saas-platform runtime permissions use only its application root', str_contains($runtime, 'ROOT=/var/www/saas-platform'), $failures, $passCount);
-check('saas-platform runtime permissions include storage only as an approved path', str_contains($runtime, '"$ROOT/storage"'), $failures, $passCount);
-check('saas-platform runtime permissions include bootstrap/cache only as an approved path', str_contains($runtime, '"$ROOT/bootstrap/cache"'), $failures, $passCount);
-check('saas-platform runtime permissions include the real public/storage directory only as an approved path', str_contains($runtime, '"$ROOT/public/storage"'), $failures, $passCount);
+check('saas-platform uses a dedicated shared runtime root', str_contains($runtime, 'PERSISTENT_ROOT=/var/www/saas-platform-shared'), $failures, $passCount);
+foreach (['storage/app', 'storage/logs', 'public/storage', 'public/uploads'] as $persistentPath) {
+    check("saas persistent contract includes {$persistentPath}", str_contains($runtime, '"$PERSISTENT_ROOT/' . $persistentPath . '"'), $failures, $passCount);
+}
+check('saas persistent targets must already exist and cannot silently become empty state', str_contains($runtime, "'required persistent target missing' 68") && str_contains($runtime, "'persistent target must not be a symlink' 67"), $failures, $passCount);
+foreach (['storage/framework/cache', 'storage/framework/sessions', 'storage/framework/views', 'bootstrap/cache'] as $runtimePath) {
+    check("saas release-local runtime permissions explicitly allow {$runtimePath}", str_contains($runtime, '"$ROOT/' . $runtimePath . '"'), $failures, $passCount);
+}
+check('saas runtime paths are verified writable as www-data', str_contains($runtime, 'runuser -u www-data -- test -w "$path"') && str_contains($runtime, 'saas-platform ]; then'), $failures, $passCount);
+check('saas source tree is verified non-writable outside approved runtime paths', str_contains($runtime, 'if [ "$project_key" = customer-site ] || [ "$project_key" = saas-platform ]; then') && str_contains($runtime, '"$ROOT/public/storage"') && str_contains($runtime, '"$ROOT/public/uploads"'), $failures, $passCount);
 check('runtime helper resolves and confines every approved path below its root', str_contains($runtime, 'realpath -e -- "$path"') && str_contains($runtime, 'case "$resolved" in "$ROOT"/*)'), $failures, $passCount);
 check('runtime helper never mutates the whole application root', !str_contains($runtime, 'paths=("$ROOT")') && !str_contains($runtime, 'chown "$OWNER:$GROUP" -- "$ROOT"') && !str_contains($runtime, 'chmod "$DIRECTORY_MODE" -- "$ROOT"'), $failures, $passCount);
 check('deployment-system helper normalizes the SQLite directory and primary database file', str_contains($runtime, '"$ROOT/database"') && str_contains($runtime, '"$ROOT/database/database.sqlite"'), $failures, $passCount);
@@ -63,7 +70,7 @@ check('customer source tree remains outside recursive permission normalization',
 check('customer source tree is verified non-writable by www-data outside approved runtime paths', str_contains($runtime, 'unexpected_writable=') && str_contains($runtime, 'runuser -u www-data -- find -P "$ROOT"') && str_contains($runtime, "'unapproved www-data write access' 72"), $failures, $passCount);
 check('runtime helper confines a project persistent root alongside the release root', str_contains($runtime, 'PERSISTENT_ROOT=/var/www/deployment-system/persistent') && str_contains($runtime, 'case "$resolved" in "$ROOT"/*) return 0') && str_contains($runtime, 'case "$resolved" in "$PERSISTENT_ROOT"|"$PERSISTENT_ROOT"/*) return 0'), $failures, $passCount);
 check('runtime helper normalizes the persistent root as one approved path', str_contains($runtime, '"$PERSISTENT_ROOT")'), $failures, $passCount);
-check('runtime helper never normalizes a project without persistent configuration', str_contains($runtime, 'PERSISTENT_ROOT=/var/www/deployment-system/persistent') && !str_contains($runtime, 'PERSISTENT_ROOT=/var/www/saas-platform'), $failures, $passCount);
+check('runtime helper confines both deployment-system and saas persistent roots explicitly', str_contains($runtime, 'PERSISTENT_ROOT=/var/www/deployment-system/persistent') && str_contains($runtime, 'PERSISTENT_ROOT=/var/www/saas-platform-shared'), $failures, $passCount);
 
 check('deployment-system remains an explicit service-reload project key', str_contains($service, 'deployment-system)'), $failures, $passCount);
 check('saas-platform is an explicit service-reload project key', str_contains($service, 'saas-platform)'), $failures, $passCount);

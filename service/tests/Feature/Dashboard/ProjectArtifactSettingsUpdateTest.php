@@ -190,6 +190,58 @@ class ProjectArtifactSettingsUpdateTest extends TestCase
         $this->assertDatabaseCount((new Artifact())->getTable(), 0);
     }
 
+    public function test_saas_platform_accepts_only_the_reviewed_persistent_runtime_contract(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = Project::factory()->create(['project_key' => 'saas-platform']);
+        $paths = [
+            'storage/app' => 'storage/app',
+            'storage/logs' => 'storage/logs',
+            'public/storage' => 'public/storage',
+            'public/uploads' => 'public/uploads',
+        ];
+
+        $this->actingAs($admin)->put(route('projects.update', $project), $this->payload($project, [
+            'artifact_preserve_paths' => ['.env'],
+            'artifact_persistent_paths' => $paths,
+            'artifact_persistent_root' => '/var/www/saas-platform-shared',
+        ]))->assertRedirect(route('projects.show', $project));
+
+        $project->refresh();
+        $this->assertSame(['.env'], $project->artifact_preserve_paths);
+        $this->assertSame($paths, $project->artifact_persistent_paths);
+        $this->assertSame('/var/www/saas-platform-shared', $project->artifact_persistent_root);
+        $this->assertDatabaseCount((new Deployment())->getTable(), 0);
+        $this->assertDatabaseCount((new PublishJob())->getTable(), 0);
+        $this->assertDatabaseCount((new Artifact())->getTable(), 0);
+    }
+
+    public function test_saas_platform_rejects_unreviewed_persistence_or_release_layout_assumptions(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = Project::factory()->create(['project_key' => 'saas-platform']);
+        $validPaths = [
+            'storage/app' => 'storage/app',
+            'storage/logs' => 'storage/logs',
+            'public/storage' => 'public/storage',
+            'public/uploads' => 'public/uploads',
+        ];
+
+        foreach ([
+            ['paths' => ['storage' => 'storage'], 'root' => '/var/www/saas-platform-shared'],
+            ['paths' => $validPaths, 'root' => '/var/www/saas-platform/current/shared'],
+        ] as $contract) {
+            $this->actingAs($admin)->from(route('projects.edit', $project))
+                ->put(route('projects.update', $project), $this->payload($project, [
+                    'artifact_preserve_paths' => ['.env'],
+                    'artifact_persistent_paths' => $contract['paths'],
+                    'artifact_persistent_root' => $contract['root'],
+                ]))
+                ->assertRedirect(route('projects.edit', $project))
+                ->assertSessionHasErrors('artifact_persistent_paths');
+        }
+    }
+
     public function test_customer_site_rejects_current_release_layout_assumptions(): void
     {
         $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);

@@ -115,6 +115,27 @@ class AgentTaskReleaseGateTest extends TestCase
         ], $claimed['job']['artifact_persistence']);
     }
 
+    public function test_saas_persistence_task_rejects_server_agent_1_3_4(): void
+    {
+        $ctx = $this->makeTask(['project' => [
+            'project_key' => 'saas-platform',
+            'artifact_preserve_paths' => ['.env'],
+            'artifact_persistent_paths' => [
+                'storage/app' => 'storage/app',
+                'storage/logs' => 'storage/logs',
+                'public/storage' => 'public/storage',
+                'public/uploads' => 'public/uploads',
+            ],
+            'artifact_persistent_root' => '/var/www/saas-platform-shared',
+        ]]);
+        $ctx['agent']->update(['agent_version' => '1.3.4']);
+        $this->attachArtifact($ctx, $ctx['deployment']->commit_hash);
+
+        $this->assertNull(app(AgentTaskService::class)->claimNextTask($ctx['agent']));
+        $this->assertSame(DeploymentTask::STATUS_FAILED, $ctx['task']->fresh()->status);
+        $this->assertStringContainsString('1.3.5', (string) $ctx['deployment']->fresh()->failure_message);
+    }
+
     public function test_old_server_agent_rejects_artifact_task_before_execution(): void
     {
         $ctx = $this->makeTask();

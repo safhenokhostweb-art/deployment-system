@@ -419,6 +419,70 @@ check('customer current layout: reports running then failed', $invalidLayoutStat
 @unlink($hub['logPath']);
 file_put_contents($hub['logPath'], '');
 
+// SaaS has a distinct reviewed contract: durable application data and logs
+// are shared, while framework cache/session/view directories stay
+// release-local. Prove the exact production root is accepted and an
+// unsupported /current layout fails before the privileged helper.
+$saasPersistentPaths = [
+    'storage/app' => 'storage/app',
+    'storage/logs' => 'storage/logs',
+    'public/storage' => 'public/storage',
+    'public/uploads' => 'public/uploads',
+];
+$normalizationShouldFail = true;
+$normalizationCalls = [];
+$normalizationPipelineExecutor->execute([
+    'id' => 'job-saas-persistent-preflight',
+    'action' => 'deploy',
+    'project_key' => 'saas-platform',
+    'commit_hash' => str_repeat('3', 40),
+    'branch' => 'main',
+    'artifact' => ['public_id' => 'artifact-persistent-preflight-failure', 'checksum_sha256' => $persistentFailureFixture['checksum'], 'size_bytes' => $persistentFailureFixture['size']],
+    'artifact_persistence' => ['paths' => $saasPersistentPaths, 'root' => '/var/www/saas-platform-shared'],
+    'pipeline' => [],
+], ['working_directory' => '/var/www/saas-platform'], 30);
+check('saas persistent contract: reviewed production layout reaches only the fixed normalizer', ($normalizationCalls[0][0] ?? null) === 'saas-platform' && ($normalizationCalls[0][1] ?? null) === '/var/www/saas-platform', $failures, $passCount);
+$saasPreflightStatuses = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-saas-persistent-preflight/status' ? ($e['body']['status'] ?? null) : null, readHubLog($hub['logPath']))));
+check('saas persistent preflight failure: release remains undispatched and reports failed', $saasPreflightStatuses === ['running', 'failed'], $failures, $passCount);
+
+@unlink($hub['logPath']);
+file_put_contents($hub['logPath'], '');
+$normalizationShouldFail = false;
+$normalizationCalls = [];
+$normalizationPipelineExecutor->execute([
+    'id' => 'job-saas-current-layout-rejected',
+    'action' => 'deploy',
+    'project_key' => 'saas-platform',
+    'commit_hash' => str_repeat('4', 40),
+    'branch' => 'main',
+    'artifact' => ['public_id' => 'artifact-persistent-preflight-failure', 'checksum_sha256' => $persistentFailureFixture['checksum'], 'size_bytes' => $persistentFailureFixture['size']],
+    'artifact_persistence' => ['paths' => $saasPersistentPaths, 'root' => '/var/www/saas-platform-shared'],
+    'pipeline' => [],
+], ['working_directory' => '/var/www/saas-platform/current'], 30);
+check('saas current layout: privileged helper is not invoked', $normalizationCalls === [], $failures, $passCount);
+$saasInvalidLayoutLogs = array_values(array_filter(readHubLog($hub['logPath']), static fn ($e) => $e['path'] === '/api/agent/jobs/job-saas-current-layout-rejected/log'));
+check('saas current layout: rejected before activation with explicit layout message', ($saasInvalidLayoutLogs[0]['body']['failure_code'] ?? null) === 'artifact_persistent_config_invalid' && str_contains((string) ($saasInvalidLayoutLogs[0]['body']['output'] ?? ''), '/current'), $failures, $passCount);
+
+@unlink($hub['logPath']);
+file_put_contents($hub['logPath'], '');
+$normalizationCalls = [];
+$normalizationPipelineExecutor->execute([
+    'id' => 'job-saas-unreviewed-contract-rejected',
+    'action' => 'deploy',
+    'project_key' => 'saas-platform',
+    'commit_hash' => str_repeat('5', 40),
+    'branch' => 'main',
+    'artifact' => ['public_id' => 'artifact-persistent-preflight-failure', 'checksum_sha256' => $persistentFailureFixture['checksum'], 'size_bytes' => $persistentFailureFixture['size']],
+    'artifact_persistence' => ['paths' => ['storage' => 'storage'], 'root' => '/var/www/saas-platform-shared'],
+    'pipeline' => [],
+], ['working_directory' => '/var/www/saas-platform'], 30);
+check('saas unreviewed persistent mapping: rejected before privileged preparation', $normalizationCalls === [], $failures, $passCount);
+$saasInvalidContractLogs = array_values(array_filter(readHubLog($hub['logPath']), static fn ($e) => $e['path'] === '/api/agent/jobs/job-saas-unreviewed-contract-rejected/log'));
+check('saas unreviewed persistent mapping: reports the configuration failure code', ($saasInvalidContractLogs[0]['body']['failure_code'] ?? null) === 'artifact_persistent_config_invalid', $failures, $passCount);
+
+@unlink($hub['logPath']);
+file_put_contents($hub['logPath'], '');
+
 // ============================================================
 // Local failure observability (CASE 1-6).  The Hub becomes unavailable
 // (HTTP 500 / connection failure) the instant the post-artifact

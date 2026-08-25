@@ -103,8 +103,8 @@ class AgentTaskService
                     continue;
                 }
 
-                if ($this->projectHasPersistentRuntime($task->deployment->project) && !$this->agentEnforcesPersistentRuntime($agent)) {
-                    $this->rejectIncompatiblePersistentRuntimeTask($task, $agent);
+                if ($this->projectHasPersistentRuntime($task->deployment->project) && !$this->agentEnforcesPersistentRuntime($agent, $task->deployment->project)) {
+                    $this->rejectIncompatiblePersistentRuntimeTask($task, $agent, $task->deployment->project);
 
                     continue;
                 }
@@ -203,11 +203,18 @@ class AgentTaskService
             && version_compare($agent->agent_version, (string) config('deployment.min_server_agent_version_for_http_health'), '>=');
     }
 
-    private function agentEnforcesPersistentRuntime(Agent $agent): bool
+    private function agentEnforcesPersistentRuntime(Agent $agent, \App\Models\Project $project): bool
     {
         return is_string($agent->agent_version)
             && $agent->agent_version !== ''
-            && version_compare($agent->agent_version, (string) config('deployment.min_server_agent_version_for_persistent_runtime'), '>=');
+            && version_compare($agent->agent_version, $this->requiredPersistentRuntimeVersion($project), '>=');
+    }
+
+    private function requiredPersistentRuntimeVersion(\App\Models\Project $project): string
+    {
+        return (string) config($project->project_key === 'saas-platform'
+            ? 'deployment.min_server_agent_version_for_saas_persistent_runtime'
+            : 'deployment.min_server_agent_version_for_persistent_runtime');
     }
 
     private function projectHasPersistentRuntime(\App\Models\Project $project): bool
@@ -218,9 +225,9 @@ class AgentTaskService
             && trim($project->artifact_persistent_root) !== '';
     }
 
-    private function rejectIncompatiblePersistentRuntimeTask(DeploymentTask $task, Agent $agent): void
+    private function rejectIncompatiblePersistentRuntimeTask(DeploymentTask $task, Agent $agent, \App\Models\Project $project): void
     {
-        $requiredVersion = (string) config('deployment.min_server_agent_version_for_persistent_runtime');
+        $requiredVersion = $this->requiredPersistentRuntimeVersion($project);
         $task->update([
             'status' => DeploymentTask::STATUS_FAILED,
             'failure_code' => Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE,

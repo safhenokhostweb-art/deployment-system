@@ -604,6 +604,20 @@ class ProjectController extends Controller
                     'artifact_persistent_paths' => 'customer-site must map public/uploads => uploads under /var/www/customer-site-shared.',
                 ]);
             }
+            $saasPaths = [
+                'storage/app' => 'storage/app',
+                'storage/logs' => 'storage/logs',
+                'public/storage' => 'public/storage',
+                'public/uploads' => 'public/uploads',
+            ];
+            if ($projectKey === 'saas-platform' && (
+                rtrim((string) $validated['artifact_persistent_root'], '/') !== '/var/www/saas-platform-shared'
+                || $persistent != $saasPaths
+            )) {
+                throw ValidationException::withMessages([
+                    'artifact_persistent_paths' => 'saas-platform must use the reviewed storage/app, storage/logs, public/storage, and public/uploads mappings under /var/www/saas-platform-shared.',
+                ]);
+            }
         }
 
         if ($project !== null) {

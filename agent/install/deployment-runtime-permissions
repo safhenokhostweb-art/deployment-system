@@ -29,10 +29,41 @@ case "$project_key" in
     ;;
   saas-platform)
     ROOT=/var/www/saas-platform
-    # public/storage is a real runtime data directory for this application,
-    # not Laravel's usual storage symlink. It must remain writable after the
-    # artifact activation copies it into the new release.
-    paths=("$ROOT/storage" "$ROOT/bootstrap/cache" "$ROOT/public/storage")
+    PERSISTENT_ROOT=/var/www/saas-platform-shared
+    # SaaS runtime state is split deliberately. User/private data, exports,
+    # recovery packages and backups live below storage/app; logs, the legacy
+    # real public/storage directory, and the configured uploads disk are also
+    # durable. Framework cache/views/sessions remain release-local and can be
+    # regenerated. The shared tree must be migrated/provisioned explicitly:
+    # never create an empty replacement that could hide missing production
+    # data during the first persistent deployment.
+    persistent_paths=(
+      "$PERSISTENT_ROOT/storage/app"
+      "$PERSISTENT_ROOT/storage/logs"
+      "$PERSISTENT_ROOT/public/storage"
+      "$PERSISTENT_ROOT/public/uploads"
+    )
+    for persistent_path in "${persistent_paths[@]}"; do
+      [ -d "$persistent_path" ] || fail "$project_key" validate "$persistent_path" 'required persistent target missing' 68
+      [ ! -L "$persistent_path" ] || fail "$project_key" validate "$persistent_path" 'persistent target must not be a symlink' 67
+    done
+    paths=(
+      "${persistent_paths[@]}"
+      "$ROOT/storage/framework/cache"
+      "$ROOT/storage/framework/sessions"
+      "$ROOT/storage/framework/views"
+      "$ROOT/bootstrap/cache"
+    )
+    writable_paths=(
+      "$ROOT/storage/app"
+      "$ROOT/storage/logs"
+      "$ROOT/public/storage"
+      "$ROOT/public/uploads"
+      "$ROOT/storage/framework/cache"
+      "$ROOT/storage/framework/sessions"
+      "$ROOT/storage/framework/views"
+      "$ROOT/bootstrap/cache"
+    )
     files=()
     ;;
   customer-site)
@@ -130,17 +161,20 @@ for path in "${writable_paths[@]}"; do
     || fail "$project_key" verify "$path" 'www-data write access' 70
 done
 
-if [ "$project_key" = customer-site ]; then
+if [ "$project_key" = customer-site ] || [ "$project_key" = saas-platform ]; then
   # Prove the inverse side of the contract too: PHP-FPM may write only the
-  # five approved Laravel runtime trees. -P never follows public/uploads or
-  # any other symlink, and pruning excludes the approved subtrees themselves.
+  # explicitly approved runtime trees. -P never follows persistent symlinks,
+  # and pruning excludes the approved release-local subtrees themselves.
   unexpected_writable="$({
     runuser -u www-data -- find -P "$ROOT" \
-      \( -path "$ROOT/storage/logs" \
+      \( -path "$ROOT/storage/app" \
+         -o -path "$ROOT/storage/logs" \
          -o -path "$ROOT/storage/framework/cache" \
          -o -path "$ROOT/storage/framework/sessions" \
          -o -path "$ROOT/storage/framework/views" \
-         -o -path "$ROOT/bootstrap/cache" \) -prune \
+         -o -path "$ROOT/bootstrap/cache" \
+         -o -path "$ROOT/public/storage" \
+         -o -path "$ROOT/public/uploads" \) -prune \
       -o \( -type d -o -type f \) -writable -print -quit
   } 2>/dev/null)" || fail "$project_key" verify "$ROOT" 'source-tree write scan' 71
   [ -z "$unexpected_writable" ] \
