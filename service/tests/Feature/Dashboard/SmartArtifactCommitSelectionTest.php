@@ -12,6 +12,7 @@ use App\Models\PublishJob;
 use App\Models\User;
 use App\Services\GitHub\GitHubAppClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class SmartArtifactCommitSelectionTest extends TestCase
@@ -22,6 +23,7 @@ class SmartArtifactCommitSelectionTest extends TestCase
     {
         parent::setUp();
         app()->setLocale('en');
+        Storage::fake('artifacts');
     }
 
     public function test_latest_verified_workspace_commit_is_selected_and_displayed(): void
@@ -79,7 +81,7 @@ class SmartArtifactCommitSelectionTest extends TestCase
     public function test_existing_available_artifact_creates_a_new_deployment_with_the_artifact_and_no_build_job(): void
     {
         [$user, $project, $mapping] = $this->verifiedProject('customer-site', str_repeat('c', 40));
-        $artifact = Artifact::factory()->create([
+        $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => str_repeat('c', 40),
             'branch' => 'main',
@@ -125,7 +127,7 @@ class SmartArtifactCommitSelectionTest extends TestCase
             'failure_code' => Deployment::FAILURE_CODE_ARTIFACT_REQUIRED_MISSING,
         ]);
         $project->update(['requires_complete_artifact' => true]);
-        $artifact = Artifact::factory()->create([
+        $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => str_repeat('b', 40),
             'branch' => 'main',
@@ -286,7 +288,7 @@ class SmartArtifactCommitSelectionTest extends TestCase
     private function assertExistingArtifactDeploymentFor(string $projectKey, string $sha, string $productionPath): void
     {
         [$user, $project, $mapping] = $this->verifiedProject($projectKey, $sha, $productionPath);
-        $artifact = Artifact::factory()->create([
+        $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => $sha,
             'branch' => 'main',

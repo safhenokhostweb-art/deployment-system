@@ -19,6 +19,7 @@ use App\Services\Deployment\DeploymentDispatcher;
 use App\Services\Deployment\RollbackService;
 use App\Services\Publish\PublishJobService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
@@ -35,11 +36,17 @@ class ArtifactDeploymentLinkingTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+        Storage::fake('artifacts');
+    }
+
     public function test_webhook_created_deployment_attaches_a_matching_artifact(): void
     {
         $project = Project::factory()->create(['auto_deploy' => true]);
         $commitHash = str_repeat('a', 40);
-        $artifact = Artifact::factory()->create([
+        $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => $commitHash,
             'status' => Artifact::STATUS_AVAILABLE,
@@ -68,7 +75,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
         $this->assertSame(Deployment::STATUS_PENDING_APPROVAL, $deployment->status);
         $this->assertNull($deployment->artifact_id);
 
-        $artifact = Artifact::factory()->create([
+        $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => $commitHash,
             'status' => Artifact::STATUS_AVAILABLE,
@@ -95,7 +102,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
     {
         $project = Project::factory()->create();
         $commitHash = str_repeat('c', 40);
-        $artifact = Artifact::factory()->create([
+        $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => $commitHash,
             'status' => Artifact::STATUS_AVAILABLE,
@@ -111,7 +118,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
         $project = Project::factory()->create();
         $otherProject = Project::factory()->create();
         $commitHash = str_repeat('d', 40);
-        Artifact::factory()->create([
+        Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $otherProject->id,
             'commit_hash' => $commitHash,
             'status' => Artifact::STATUS_AVAILABLE,
@@ -126,7 +133,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
     {
         $project = Project::factory()->create(['auto_deploy' => false]);
         $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, str_repeat('1', 40), 'main', 'dev@example.test');
-        Artifact::factory()->create([
+        Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => str_repeat('2', 40),
             'status' => Artifact::STATUS_AVAILABLE,
@@ -141,7 +148,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
     {
         $project = Project::factory()->create();
         $commitHash = str_repeat('e', 40);
-        Artifact::factory()->create([
+        Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => $commitHash,
             'status' => Artifact::STATUS_UPLOADING,
@@ -157,7 +164,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
         $project = Project::factory()->create(['auto_deploy' => false]);
         $commitHash = str_repeat('9', 40);
         $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
-        Artifact::factory()->create([
+        Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => $commitHash,
             'status' => Artifact::STATUS_FAILED,
@@ -175,7 +182,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
         DeploymentTarget::factory()->count(2)->create(['environment_id' => $environment->id]);
         $commitHash = str_repeat('7', 40);
         $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
-        $artifact = Artifact::factory()->create([
+        $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => $commitHash,
             'status' => Artifact::STATUS_AVAILABLE,
@@ -198,7 +205,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
         $this->assertSame(Deployment::STATUS_QUEUED, $deployment->status);
         $this->assertNull($deployment->artifact_id);
 
-        Artifact::factory()->create([
+        Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => $commitHash,
             'status' => Artifact::STATUS_AVAILABLE,
@@ -212,12 +219,12 @@ class ArtifactDeploymentLinkingTest extends TestCase
         $project = Project::factory()->create(['auto_deploy' => false]);
         $commitHash = str_repeat('3', 40);
         $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
-        $existing = Artifact::factory()->create([
+        $existing = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => str_repeat('4', 40),
             'status' => Artifact::STATUS_AVAILABLE,
         ]);
-        $matching = Artifact::factory()->create([
+        $matching = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => $commitHash,
             'status' => Artifact::STATUS_AVAILABLE,
@@ -241,7 +248,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
             'commit_hash' => $commitHash,
             'finished_at' => now(),
         ]);
-        Artifact::factory()->create([
+        Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => $commitHash,
             'status' => Artifact::STATUS_AVAILABLE,
@@ -355,7 +362,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
         $this->assertDatabaseCount('deployments', 0);
 
         // Upload completes a moment later.
-        $artifact = Artifact::factory()->create([
+        $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => $commitHash,
             'branch' => 'main',
@@ -377,7 +384,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
             'requires_complete_artifact' => true,
         ]);
         $commitHash = str_repeat('d0', 20);
-        Artifact::factory()->create([
+        Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => $commitHash,
             'status' => Artifact::STATUS_AVAILABLE,
@@ -422,7 +429,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
 
         // The artifact lands after creation; the first claiming agent
         // re-attaches it and dispatches instead of failing closed.
-        $artifact = Artifact::factory()->create([
+        $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => $commitHash,
             'branch' => 'main',

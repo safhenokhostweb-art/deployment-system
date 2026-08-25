@@ -15,6 +15,7 @@ use App\Models\User;
 use App\Services\Deployment\DeploymentDispatcher;
 use App\Services\Publish\PublishJobService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 /**
@@ -34,6 +35,12 @@ use Tests\TestCase;
 class PublishNoSourceChangeDeploymentTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        Storage::fake('artifacts');
+    }
 
     private function mappedAgentAndProject(): array
     {
@@ -60,7 +67,7 @@ class PublishNoSourceChangeDeploymentTest extends TestCase
         ]);
 
         if ($withArtifact) {
-            Artifact::factory()->create([
+            Artifact::factory()->physicallyAvailable()->create([
                 'project_id' => $project->id,
                 'commit_hash' => $commit,
                 'status' => Artifact::STATUS_AVAILABLE,
@@ -110,7 +117,7 @@ class PublishNoSourceChangeDeploymentTest extends TestCase
         [$agent, $project] = $this->mappedAgentAndProject();
         $project->update(['auto_deploy' => true]);
         $commit = str_repeat('a', 40);
-        $artifact = Artifact::factory()->create([
+        $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => $commit,
             'status' => Artifact::STATUS_AVAILABLE,

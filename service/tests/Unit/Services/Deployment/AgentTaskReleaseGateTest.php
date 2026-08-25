@@ -13,6 +13,7 @@ use App\Services\Deployment\AgentTaskService;
 use App\Services\Deployment\Artifact\ArtifactService;
 use Database\Factories\AgentFactory;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
@@ -30,6 +31,12 @@ class AgentTaskReleaseGateTest extends TestCase
 
     private const CURRENT_AGENT = '1.2.0';
     private const OLD_AGENT = '1.1.0';
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        Storage::fake('artifacts');
+    }
 
     private function makeTask(array $overrides = []): array
     {
@@ -64,7 +71,7 @@ class AgentTaskReleaseGateTest extends TestCase
 
     private function attachArtifact(array $ctx, string $commitHash, array $requiredPaths = ['artisan', 'vendor/autoload.php']): Artifact
     {
-        $artifact = Artifact::factory()->create([
+        $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $ctx['project']->id,
             'commit_hash' => $commitHash,
             'required_paths' => $requiredPaths,
@@ -208,7 +215,7 @@ class AgentTaskReleaseGateTest extends TestCase
         // Simulate the real timing race: webhook deployment created BEFORE
         // the Local Agent finished uploading -> artifact exists but was not
         // attached to the deployment yet.
-        $artifact = Artifact::factory()->create([
+        $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $ctx['project']->id,
             'commit_hash' => $ctx['deployment']->commit_hash,
             'required_paths' => ['artisan'],
@@ -238,9 +245,9 @@ class AgentTaskReleaseGateTest extends TestCase
     public function test_attach_only_exact_commit_artifact(): void
     {
         $ctx = $this->makeTask();
-        $exact = Artifact::factory()->create(['project_id' => $ctx['project']->id, 'commit_hash' => $ctx['deployment']->commit_hash]);
-        $otherCommit = Artifact::factory()->create(['project_id' => $ctx['project']->id, 'commit_hash' => str_repeat('c', 40)]);
-        $otherProject = Artifact::factory()->create(['project_id' => Project::factory()->create()->id, 'commit_hash' => $ctx['deployment']->commit_hash]);
+        $exact = Artifact::factory()->physicallyAvailable()->create(['project_id' => $ctx['project']->id, 'commit_hash' => $ctx['deployment']->commit_hash]);
+        $otherCommit = Artifact::factory()->physicallyAvailable()->create(['project_id' => $ctx['project']->id, 'commit_hash' => str_repeat('c', 40)]);
+        $otherProject = Artifact::factory()->physicallyAvailable()->create(['project_id' => Project::factory()->create()->id, 'commit_hash' => $ctx['deployment']->commit_hash]);
 
         $attached = app(ArtifactService::class)->attachToDeploymentIfAvailable($ctx['deployment']->fresh());
 

@@ -13,6 +13,7 @@ use App\Models\Project;
 use App\Services\Security\JobPayloadSigner;
 use Database\Factories\AgentFactory;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 use Tests\Support\SignsAgentRequests;
 use Tests\TestCase;
 
@@ -27,6 +28,12 @@ class AgentTaskClaimTest extends TestCase
 {
     use RefreshDatabase;
     use SignsAgentRequests;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        Storage::fake('artifacts');
+    }
 
     private function makeClaimableTask(): array
     {
@@ -78,7 +85,7 @@ class AgentTaskClaimTest extends TestCase
     {
         $ctx = $this->makeClaimableTask();
         $agent = $ctx['agent'];
-        $artifact = Artifact::factory()->create([
+        $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $ctx['project']->id,
             'commit_hash' => $ctx['deployment']->commit_hash,
             'required_paths' => ['artisan', 'vendor/autoload.php'],

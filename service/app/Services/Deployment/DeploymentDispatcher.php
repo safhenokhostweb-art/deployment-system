@@ -138,6 +138,7 @@ class DeploymentDispatcher
                 ->first();
 
             abort_unless($artifact !== null, 409, 'The selected Artifact is no longer available for this project, commit, and branch.');
+            $artifact = $this->artifacts->assertPhysicalIntegrity($artifact);
 
             $targets = $this->resolver->resolveTargetsFor($project);
             if ($this->isLegacyTargetSet($targets)) {
@@ -254,6 +255,10 @@ class DeploymentDispatcher
         // pre-queue boundary so the queued job has one deterministic
         // artifact_id before either claim path can make it executable.
         $this->attachArtifactIfAvailable($deployment);
+
+        if ($deployment->artifact_id !== null) {
+            $this->artifacts->assertPhysicalIntegrity($deployment->artifact()->firstOrFail());
+        }
 
         abort_if(
             $deployment->project->requires_complete_artifact && $deployment->artifact_id === null,

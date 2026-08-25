@@ -236,11 +236,102 @@ class ArtifactService
 
     public function findMatching(Project $project, string $commitHash, string $branch): ?Artifact
     {
-        return Artifact::where('project_id', $project->id)
+        $artifact = Artifact::where('project_id', $project->id)
             ->where('commit_hash', $commitHash)
             ->where('branch', $branch)
             ->where('status', Artifact::STATUS_AVAILABLE)
             ->first();
+
+        return $artifact === null ? null : $this->assertPhysicalIntegrity($artifact);
+    }
+
+    /**
+     * Single physical-integrity preflight used by every artifact deployment
+     * entry point and again at the final Agent claim boundary. Hashing uses a
+     * stream so large artifacts are never loaded into Hub memory.
+     *
+     * @throws ArtifactPhysicalIntegrityException
+     */
+    public function assertPhysicalIntegrity(Artifact $artifact): Artifact
+    {
+        $stored = $artifact->exists && $artifact->getKey() !== null
+            ? Artifact::query()->find($artifact->getKey())
+            : null;
+
+        if ($stored === null) {
+            throw new ArtifactPhysicalIntegrityException(
+                'artifact_record_missing',
+                'Artifact physical integrity preflight failed: the Artifact database record no longer exists.',
+            );
+        }
+
+        if (!$stored->isAvailable()) {
+            throw new ArtifactPhysicalIntegrityException(
+                'artifact_unavailable',
+                "Artifact {$stored->id} physical integrity preflight failed: status is '{$stored->status}', expected 'available'.",
+            );
+        }
+
+        $disk = Storage::disk('artifacts');
+        if (!$disk->exists($stored->disk_path)) {
+            throw new ArtifactPhysicalIntegrityException(
+                'artifact_file_missing',
+                "Artifact {$stored->id} physical integrity preflight failed: the physical file is missing from artifact storage.",
+            );
+        }
+
+        try {
+            $actualSize = $disk->size($stored->disk_path);
+        } catch (\Throwable) {
+            throw new ArtifactPhysicalIntegrityException(
+                'artifact_file_unreadable',
+                "Artifact {$stored->id} physical integrity preflight failed: the physical file size could not be read.",
+            );
+        }
+
+        if ($actualSize !== (int) $stored->size_bytes) {
+            throw new ArtifactPhysicalIntegrityException(
+                'artifact_size_mismatch',
+                "Artifact {$stored->id} physical integrity preflight failed: expected {$stored->size_bytes} bytes, found {$actualSize} bytes.",
+            );
+        }
+
+        try {
+            $stream = $disk->readStream($stored->disk_path);
+        } catch (\Throwable) {
+            $stream = false;
+        }
+
+        if (!is_resource($stream)) {
+            throw new ArtifactPhysicalIntegrityException(
+                'artifact_file_unreadable',
+                "Artifact {$stored->id} physical integrity preflight failed: the physical file could not be read.",
+            );
+        }
+
+        try {
+            $hash = hash_init('sha256');
+            $hashedBytes = hash_update_stream($hash, $stream);
+            $actualChecksum = hash_final($hash);
+        } finally {
+            fclose($stream);
+        }
+
+        if ($hashedBytes !== (int) $stored->size_bytes) {
+            throw new ArtifactPhysicalIntegrityException(
+                'artifact_size_mismatch',
+                "Artifact {$stored->id} physical integrity preflight failed: expected {$stored->size_bytes} readable bytes, found {$hashedBytes} bytes.",
+            );
+        }
+
+        if (!hash_equals(strtolower((string) $stored->checksum_sha256), $actualChecksum)) {
+            throw new ArtifactPhysicalIntegrityException(
+                'artifact_checksum_mismatch',
+                "Artifact {$stored->id} physical integrity preflight failed: SHA-256 checksum does not match the Artifact record.",
+            );
+        }
+
+        return $stored;
     }
 
     /**

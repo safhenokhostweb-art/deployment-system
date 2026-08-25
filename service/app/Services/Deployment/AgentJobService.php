@@ -10,6 +10,7 @@ use App\Models\Deployment;
 use App\Models\DeploymentLogEntry;
 use App\Models\Server;
 use App\Services\Deployment\Artifact\ArtifactService;
+use App\Services\Deployment\Artifact\ArtifactPhysicalIntegrityException;
 use App\Services\Security\JobPayloadSigner;
 use App\Services\Security\SecretRedactor;
 use Illuminate\Support\Facades\DB;
@@ -64,6 +65,31 @@ class AgentJobService
             // live-directory git pipeline.
             $this->artifacts->attachToDeploymentIfAvailable($deployment);
             $deployment->load('artifact');
+
+            if ($deployment->artifact !== null) {
+                try {
+                    $deployment->setRelation('artifact', $this->artifacts->assertPhysicalIntegrity($deployment->artifact));
+                } catch (ArtifactPhysicalIntegrityException $e) {
+                    $deployment->update([
+                        'status' => Deployment::STATUS_FAILED,
+                        'finished_at' => now(),
+                        'last_activity_at' => now(),
+                        'failure_code' => Deployment::FAILURE_CODE_ARTIFACT_INTEGRITY_FAILED,
+                        'failure_message' => $e->getMessage(),
+                    ]);
+
+                    AuditLogEntry::record(
+                        actorType: AuditLogEntry::ACTOR_SYSTEM,
+                        actorIdentifier: null,
+                        action: 'deployment.rejected_artifact_integrity',
+                        subjectType: Deployment::class,
+                        subjectId: $deployment->id,
+                        metadata: ['artifact_id' => $deployment->artifact_id, 'reason' => $e->reason],
+                    );
+
+                    return null;
+                }
+            }
 
             // Root-cause fix (Laravel release completeness): a project with
             // requires_complete_artifact=true must NEVER fall back to the

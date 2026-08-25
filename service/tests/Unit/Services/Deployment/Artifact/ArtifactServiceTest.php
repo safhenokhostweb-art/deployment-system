@@ -5,6 +5,7 @@ namespace Tests\Unit\Services\Deployment\Artifact;
 use App\Models\Artifact;
 use App\Models\Project;
 use App\Services\Deployment\Artifact\ArtifactService;
+use App\Services\Deployment\Artifact\ArtifactPhysicalIntegrityException;
 use App\Services\Deployment\Artifact\ArtifactValidationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Storage;
@@ -196,5 +197,64 @@ class ArtifactServiceTest extends TestCase
 
         $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
         app(ArtifactService::class)->finalizeUpload($artifact, str_repeat('x', 2 * 1024 * 1024), 3);
+    }
+
+    public function test_available_artifact_with_matching_physical_file_passes_preflight(): void
+    {
+        $artifact = Artifact::factory()->physicallyAvailable('valid artifact')->create();
+
+        $validated = app(ArtifactService::class)->assertPhysicalIntegrity($artifact);
+
+        $this->assertSame($artifact->id, $validated->id);
+    }
+
+    public function test_missing_physical_file_fails_preflight(): void
+    {
+        $artifact = Artifact::factory()->create();
+
+        $this->assertIntegrityFailure($artifact, 'artifact_file_missing');
+    }
+
+    public function test_missing_database_record_fails_preflight(): void
+    {
+        $artifact = Artifact::factory()->physicallyAvailable()->create();
+        $artifact->delete();
+
+        $this->assertIntegrityFailure($artifact, 'artifact_record_missing');
+    }
+
+    public function test_physical_file_size_mismatch_fails_preflight(): void
+    {
+        $artifact = Artifact::factory()->physicallyAvailable('valid artifact')->create();
+        $artifact->update(['size_bytes' => $artifact->size_bytes + 1]);
+
+        $this->assertIntegrityFailure($artifact, 'artifact_size_mismatch');
+    }
+
+    public function test_physical_file_checksum_mismatch_fails_preflight(): void
+    {
+        $artifact = Artifact::factory()->physicallyAvailable('same-size-A')->create();
+        Storage::disk('artifacts')->put($artifact->disk_path, 'same-size-B');
+
+        $this->assertIntegrityFailure($artifact, 'artifact_checksum_mismatch');
+    }
+
+    public function test_unavailable_artifact_fails_preflight(): void
+    {
+        $artifact = Artifact::factory()->physicallyAvailable()->create();
+        $artifact->update(['status' => Artifact::STATUS_FAILED]);
+
+        $this->assertIntegrityFailure($artifact, 'artifact_unavailable');
+    }
+
+    private function assertIntegrityFailure(Artifact $artifact, string $reason): void
+    {
+        try {
+            app(ArtifactService::class)->assertPhysicalIntegrity($artifact);
+            $this->fail('Expected an ArtifactPhysicalIntegrityException.');
+        } catch (ArtifactPhysicalIntegrityException $exception) {
+            $this->assertSame($reason, $exception->reason);
+            $this->assertSame(409, $exception->getStatusCode());
+        }
     }
 }

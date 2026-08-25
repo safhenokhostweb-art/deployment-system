@@ -79,6 +79,7 @@ class Deployment extends Model
     /** Root-cause fix (customer-site): artifact-based deploy failure codes — see ArtifactManager on the agent side. */
     public const FAILURE_CODE_ARTIFACT_DOWNLOAD_FAILED = 'artifact_download_failed';
     public const FAILURE_CODE_ARTIFACT_CHECKSUM_MISMATCH = 'artifact_checksum_mismatch';
+    public const FAILURE_CODE_ARTIFACT_INTEGRITY_FAILED = 'artifact_integrity_failed';
     public const FAILURE_CODE_ARTIFACT_EXTRACT_FAILED = 'artifact_extract_failed';
 
     /** A project with requires_complete_artifact=true has no AVAILABLE artifact for the exact deployment commit - git fallback is forbidden, so this fails closed instead. */

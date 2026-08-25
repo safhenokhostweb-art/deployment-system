@@ -10,6 +10,7 @@ use App\Models\Server;
 use App\Services\Deployment\AgentJobService;
 use App\Support\Deployment\FailureCodeGuidance;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
@@ -24,6 +25,12 @@ use Tests\TestCase;
 class AgentJobServiceReleaseGateTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        Storage::fake('artifacts');
+    }
 
     private function serverWithAgent(?string $agentVersion): Server
     {
@@ -40,7 +47,7 @@ class AgentJobServiceReleaseGateTest extends TestCase
     {
         $project = Project::factory()->create(['server_id' => $server->id]);
 
-        return Artifact::factory()->create(array_merge([
+        return Artifact::factory()->physicallyAvailable()->create(array_merge([
             'project_id' => $project->id,
             'commit_hash' => str_repeat('a', 40),
             'required_paths' => ['composer.json', 'vendor/autoload.php'],
@@ -202,7 +209,7 @@ class AgentJobServiceReleaseGateTest extends TestCase
         ]));
         // Simulate the timing race: artifact upload completed AFTER the
         // webhook created the deployment (so artifact_id is still null).
-        $artifact = Artifact::factory()->create([
+        $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => $deployment->commit_hash,
             'required_paths' => ['composer.json', 'vendor/autoload.php'],

@@ -52,6 +52,9 @@ class RetryDeploymentService
         return DB::transaction(function () use ($deployment, $actor) {
             // Same last-pre-queue artifact resolution as DeploymentDispatcher::approve().
             $this->artifacts->attachToDeploymentIfAvailable($deployment);
+            if ($deployment->artifact_id !== null) {
+                $this->artifacts->assertPhysicalIntegrity($deployment->artifact()->firstOrFail());
+            }
 
             $now = now();
 
@@ -114,6 +117,9 @@ class RetryDeploymentService
 
         return DB::transaction(function () use ($task, $deployment, $actor) {
             $this->artifacts->attachToDeploymentIfAvailable($deployment);
+            if ($deployment->artifact_id !== null) {
+                $this->artifacts->assertPhysicalIntegrity($deployment->artifact()->firstOrFail());
+            }
 
             $task->update([
                 'status' => DeploymentTask::STATUS_QUEUED,

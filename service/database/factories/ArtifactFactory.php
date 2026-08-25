@@ -5,6 +5,7 @@ namespace Database\Factories;
 use App\Models\Artifact;
 use App\Models\Project;
 use Illuminate\Database\Eloquent\Factories\Factory;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 class ArtifactFactory extends Factory
@@ -25,5 +26,17 @@ class ArtifactFactory extends Factory
             'uploaded_by' => 'dev-machine',
             'expires_at' => now()->addDays(14),
         ];
+    }
+
+    /** Build a test Artifact whose available metadata has real matching bytes. */
+    public function physicallyAvailable(string $contents = 'verified-artifact-contents'): static
+    {
+        return $this->state(fn () => [
+            'status' => Artifact::STATUS_AVAILABLE,
+            'checksum_sha256' => hash('sha256', $contents),
+            'size_bytes' => strlen($contents),
+        ])->afterCreating(function (Artifact $artifact) use ($contents): void {
+            Storage::disk('artifacts')->put($artifact->disk_path, $contents);
+        });
     }
 }

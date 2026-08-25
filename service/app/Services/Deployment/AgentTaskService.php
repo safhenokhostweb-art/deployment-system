@@ -10,6 +10,7 @@ use App\Models\DeploymentTask;
 use App\Models\Deployment;
 use App\Models\Server;
 use App\Services\Deployment\Artifact\ArtifactService;
+use App\Services\Deployment\Artifact\ArtifactPhysicalIntegrityException;
 use App\Services\Security\JobPayloadSigner;
 use App\Services\Security\SecretRedactor;
 use Illuminate\Support\Facades\DB;
@@ -74,6 +75,16 @@ class AgentTaskService
                 // live-directory git pipeline.
                 $this->artifacts->attachToDeploymentIfAvailable($task->deployment);
                 $task->load('deployment.artifact');
+
+                if ($task->deployment->artifact !== null) {
+                    try {
+                        $task->deployment->setRelation('artifact', $this->artifacts->assertPhysicalIntegrity($task->deployment->artifact));
+                    } catch (ArtifactPhysicalIntegrityException $e) {
+                        $this->rejectArtifactIntegrityTask($task, $e);
+
+                        continue;
+                    }
+                }
 
                 // Root-cause fix (Laravel release completeness): never
                 // dispatch an artifact-based task to a Server Agent too old to
@@ -281,6 +292,30 @@ class AgentTaskService
             subjectType: DeploymentTask::class,
             subjectId: $task->id,
             metadata: ['project_key' => $task->deployment->project->project_key, 'commit_hash' => $task->deployment->commit_hash],
+        );
+    }
+
+    /** Rejects before task running state or AgentJob creation. */
+    private function rejectArtifactIntegrityTask(DeploymentTask $task, ArtifactPhysicalIntegrityException $exception): void
+    {
+        $task->update([
+            'status' => DeploymentTask::STATUS_FAILED,
+            'failure_code' => Deployment::FAILURE_CODE_ARTIFACT_INTEGRITY_FAILED,
+            'failure_message' => $exception->getMessage(),
+        ]);
+        $task->deployment->update([
+            'failure_code' => Deployment::FAILURE_CODE_ARTIFACT_INTEGRITY_FAILED,
+            'failure_message' => $exception->getMessage(),
+        ]);
+        $this->aggregator->recalculate($task->deployment);
+
+        AuditLogEntry::record(
+            actorType: AuditLogEntry::ACTOR_SYSTEM,
+            actorIdentifier: null,
+            action: 'deployment_task.rejected_artifact_integrity',
+            subjectType: DeploymentTask::class,
+            subjectId: $task->id,
+            metadata: ['artifact_id' => $task->deployment->artifact_id, 'reason' => $exception->reason],
         );
     }
 

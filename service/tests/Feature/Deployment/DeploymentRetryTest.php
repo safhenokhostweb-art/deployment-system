@@ -10,6 +10,7 @@ use App\Models\Environment;
 use App\Models\Project;
 use App\Services\Deployment\RetryDeploymentService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 /**
@@ -29,6 +30,12 @@ class DeploymentRetryTest extends TestCase
 
     private const CURRENT_AGENT = '1.2.0';
     private const OLD_AGENT = '1.1.0';
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        Storage::fake('artifacts');
+    }
 
     private function retryService(): RetryDeploymentService
     {
@@ -146,7 +153,7 @@ class DeploymentRetryTest extends TestCase
     {
         $ctx = $this->makeLegacyFailedDeployment();
         $ctx['agent']->update(['agent_version' => self::OLD_AGENT]);
-        $artifact = Artifact::factory()->create([
+        $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $ctx['project']->id,
             'commit_hash' => $ctx['deployment']->commit_hash,
         ]);
@@ -171,7 +178,7 @@ class DeploymentRetryTest extends TestCase
     {
         // Exact #110 timeline: agent was 1.1.0 at failure, now reports 1.2.0.
         $ctx = $this->makeLegacyFailedDeployment();
-        $artifact = Artifact::factory()->create([
+        $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $ctx['project']->id,
             'commit_hash' => $ctx['deployment']->commit_hash,
         ]);
@@ -228,7 +235,7 @@ class DeploymentRetryTest extends TestCase
         $ctx = $this->makeLegacyFailedDeployment();
         // No agent row at all on the server -> version unknown -> incompatible.
         $ctx['agent']->delete();
-        $artifact = Artifact::factory()->create([
+        $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $ctx['project']->id,
             'commit_hash' => $ctx['deployment']->commit_hash,
         ]);
