@@ -334,6 +334,8 @@ $failedNormalizationMarker = $workspace . '/application-after-failed-normalizati
 $normalizationShouldFail = true;
 $normalizationCalls = [];
 $normalizationFailureSiteDir = $workspace . '/normalization-failure-site';
+mkdir($normalizationFailureSiteDir, 0777, true);
+file_put_contents($normalizationFailureSiteDir . '/previous-release.txt', 'must-survive');
 $normalizationFailureFixtureZip = buildFixtureZip($workspace, 'normalization-failure-artifact');
 registerManifestEntry($hub['manifestPath'], 'artifact-normalization-failure', $normalizationFailureFixtureZip['path']);
 $jobWithFailedNormalization = [
@@ -351,8 +353,11 @@ $jobWithFailedNormalization = [
 $normalizationPipelineExecutor->execute($jobWithFailedNormalization, ['working_directory' => $normalizationFailureSiteDir], 30);
 
 check('failed immediate normalization: no application command ran', !is_file($failedNormalizationMarker), $failures, $passCount);
+check('failed immediate normalization: previous release is restored', (string) @file_get_contents($normalizationFailureSiteDir . '/previous-release.txt') === 'must-survive' && !is_file($normalizationFailureSiteDir . '/index.php'), $failures, $passCount);
 $normalizationFailureStatuses = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-with-failed-normalization/status' ? ($e['body']['status'] ?? null) : null, readHubLog($hub['logPath']))));
 check('failed immediate normalization: reports running then failed', $normalizationFailureStatuses === ['running', 'failed'], $failures, $passCount);
+$normalizationFailureStatusPayloads = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-with-failed-normalization/status' ? $e['body'] : null, readHubLog($hub['logPath']))));
+check('failed immediate normalization: reports the runtime permission failure code', (end($normalizationFailureStatusPayloads)['failure_code'] ?? null) === 'runtime_permissions_failed', $failures, $passCount);
 $normalizationFailureLogs = array_values(array_filter(readHubLog($hub['logPath']), static fn ($e) => $e['path'] === '/api/agent/jobs/job-with-failed-normalization/log'));
 check('failed immediate normalization: logs activation and failed normalization only', array_map(static fn ($e) => $e['body']['step_name'] ?? null, $normalizationFailureLogs) === ['deploy artifact', 'runtime permissions (post-artifact)'], $failures, $passCount);
 check('failed immediate normalization: normalizer was still invoked exactly once', count($normalizationCalls) === 1, $failures, $passCount);

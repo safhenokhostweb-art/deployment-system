@@ -240,7 +240,13 @@ final class PipelineExecutor
             }
 
             // PHASE 2 — ACTIVATE: atomic swap of the prepared staging.
-            $artifactResult = $this->artifactManager->activate($workingDirectory, $prepared['stagingPath'], (int) ($projectConfig['artifact_retention_count'] ?? 3));
+            $artifactResult = $this->artifactManager->activate(
+                $workingDirectory,
+                $prepared['stagingPath'],
+                (int) ($projectConfig['artifact_retention_count'] ?? 3),
+                $persistentPaths,
+                $persistentRoot,
+            );
 
             $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
                 'sequence' => $sequence,
@@ -272,9 +278,11 @@ final class PipelineExecutor
             // project's fixed, sudoers-constrained normalizer immediately
             // after that activation, before *any* application pipeline
             // command (migrate, Artisan, cache, etc.) can touch the new tree.
-            // The typed step remains the opt-in contract: projects without it
-            // keep their artifact behavior unchanged.
-            if (self::hasRuntimePermissionsStep($job['pipeline'] ?? [])) {
+            // A typed step remains the opt-in contract for legacy preserve
+            // projects. Signed persistence always requires the post-swap run:
+            // its release-visible symlinks and writable paths do not exist at
+            // the live path until activation has completed.
+            if ($persistentPaths !== [] || self::hasRuntimePermissionsStep($job['pipeline'] ?? [])) {
                 $sequence++;
                 $command = 'sudo -n /usr/local/sbin/deployment-runtime-permissions ' . $job['project_key'];
                 $result = $this->runRuntimePermissions($job['project_key'], $workingDirectory, $stepTimeout);
@@ -310,10 +318,16 @@ final class PipelineExecutor
                 ]);
 
                 if ($result['exitCode'] !== 0) {
-                    $message = 'Artifact activated, but immediate runtime permission normalization failed. No application pipeline steps were run.';
+                    $rollbackError = $this->artifactManager->rollback($workingDirectory);
+                    $this->runMaintenanceCleanup($job, $sequence, $workingDirectory, $projectConfig, $stepTimeout, $maintenanceEnabled);
+                    $message = 'Artifact activated, but immediate runtime permission normalization failed. No application pipeline steps were run. '
+                        . ($rollbackError === null
+                            ? 'The previous release was restored.'
+                            : "Automatic restore failed: {$rollbackError}");
                     $this->client->request('POST', "/api/agent/jobs/{$job['id']}/status", [
                         'status' => 'failed',
                         'message' => $message,
+                        'failure_code' => 'runtime_permissions_failed',
                     ]);
 
                     return;

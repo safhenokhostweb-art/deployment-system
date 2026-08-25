@@ -25,7 +25,7 @@ Supporting a different release root requires a separately implemented and
 reviewed release-layout migration.
 
 The Hub stores this mapping and sends it only in the signed deployment job.
-Server Agent 1.3.3 or newer is required. Older agents fail closed at claim time.
+Server Agent 1.3.4 or newer is required. Older agents fail closed at claim time.
 
 ## Activation lifecycle
 
@@ -41,11 +41,33 @@ Directories are `deployment-agent:www-data` mode `2775`; files below uploads
 are `deployment-agent:www-data` mode `0664`. No application source directory is
 made group-writable, and mode `777` is forbidden.
 
+After the atomic swap, that same fixed helper normalizes only Laravel's
+approved release-local writable directories and verifies effective write
+access as the PHP-FPM user `www-data`:
+
+```text
+storage/logs
+storage/framework/cache
+storage/framework/sessions
+storage/framework/views
+bootstrap/cache
+```
+
+Missing or non-writable runtime paths fail the deployment and restore the
+previous release before any application pipeline command or health success.
+The helper also scans the remaining release as `www-data` and fails when any
+unapproved source file or directory is writable by PHP-FPM.
+
 Artifact preparation then removes any staged `public/uploads` file or directory
 and creates a symlink to the real shared target. Artifact content at that path
 is discarded from staging and is never merged with runtime data. A missing
 target, invalid/escaping mapping, helper failure, or symlink failure aborts
 before the atomic swap and leaves the active release unchanged.
+
+Immediately after the swap, the Agent validates that every served persistent
+path is still a symlink to its exact configured target. Validation happens
+before backup retention and before runtime commands; failure restores the
+previous release.
 
 The existing `ArtifactManager` atomic rename activates code only. Its backups
 contain code and symlinks, not uploaded files. Rollback restores the previous
@@ -97,7 +119,7 @@ separately approved retention decision.
 
 1. Complete and reconcile the copy procedure above.
 2. Configure the Hub mapping exactly as shown under “Scope and layout”.
-3. Confirm the Server Agent heartbeat reports version 1.3.3 or newer.
+3. Confirm the Server Agent heartbeat reports version 1.3.4 or newer.
 4. Build and deploy through the normal complete-Artifact gate.
 5. Verify `readlink -f /var/www/customer-site/public/uploads`, ownership/modes, a
    known uploaded file, and the customer-facing HTTP health check.

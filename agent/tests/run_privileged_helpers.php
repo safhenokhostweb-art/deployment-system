@@ -41,7 +41,7 @@ check('saas-platform runtime permissions include storage only as an approved pat
 check('saas-platform runtime permissions include bootstrap/cache only as an approved path', str_contains($runtime, '"$ROOT/bootstrap/cache"'), $failures, $passCount);
 check('saas-platform runtime permissions include the real public/storage directory only as an approved path', str_contains($runtime, '"$ROOT/public/storage"'), $failures, $passCount);
 check('runtime helper resolves and confines every approved path below its root', str_contains($runtime, 'realpath -e -- "$path"') && str_contains($runtime, 'case "$resolved" in "$ROOT"/*)'), $failures, $passCount);
-check('runtime helper never recursively operates on the whole application root', !str_contains($runtime, 'find -P "$ROOT" '), $failures, $passCount);
+check('runtime helper never mutates the whole application root', !str_contains($runtime, 'paths=("$ROOT")') && !str_contains($runtime, 'chown "$OWNER:$GROUP" -- "$ROOT"') && !str_contains($runtime, 'chmod "$DIRECTORY_MODE" -- "$ROOT"'), $failures, $passCount);
 check('deployment-system helper normalizes the SQLite directory and primary database file', str_contains($runtime, '"$ROOT/database"') && str_contains($runtime, '"$ROOT/database/database.sqlite"'), $failures, $passCount);
 check('runtime helper normalizes runtime directories through a fixed project mode', str_contains($runtime, 'chmod "$DIRECTORY_MODE" -- "$target"'), $failures, $passCount);
 check('runtime helper normalizes runtime files through a fixed project mode', str_contains($runtime, 'chmod "$FILE_MODE" -- "$target"') && str_contains($runtime, '-type f'), $failures, $passCount);
@@ -55,6 +55,12 @@ check('runtime sudoers allows only the three literal approved arguments', str_co
 check('customer uploads root is bootstrapped idempotently outside the release', str_contains($runtime, 'PERSISTENT_ROOT=/var/www/customer-site-shared') && str_contains($runtime, 'UPLOADS_ROOT="$PERSISTENT_ROOT/uploads"') && str_contains($runtime, 'install -d'), $failures, $passCount);
 check('customer shared and uploads roots reject pre-existing symlinks', str_contains($runtime, '[ ! -L "$PERSISTENT_ROOT" ]') && str_contains($runtime, '[ ! -L "$UPLOADS_ROOT" ]'), $failures, $passCount);
 check('customer uploads use deployment-agent:www-data and setgid 2775/0664, never 777', str_contains($runtime, 'OWNER=deployment-agent') && str_contains($runtime, 'GROUP=www-data') && str_contains($runtime, 'DIRECTORY_MODE=2775') && str_contains($runtime, 'FILE_MODE=0664') && !preg_match('/\b0?777\b/', $runtime), $failures, $passCount);
+foreach (['storage/logs', 'storage/framework/cache', 'storage/framework/sessions', 'storage/framework/views', 'bootstrap/cache'] as $runtimePath) {
+    check("customer runtime permissions explicitly allow {$runtimePath}", str_contains($runtime, '"$ROOT/' . $runtimePath . '"'), $failures, $passCount);
+}
+check('customer runtime paths are verified writable as www-data', str_contains($runtime, 'runuser -u www-data -- test -w "$path"') && str_contains($runtime, "'www-data write access' 70"), $failures, $passCount);
+check('customer source tree remains outside recursive permission normalization', !str_contains($runtime, 'paths=("$ROOT")'), $failures, $passCount);
+check('customer source tree is verified non-writable by www-data outside approved runtime paths', str_contains($runtime, 'unexpected_writable=') && str_contains($runtime, 'runuser -u www-data -- find -P "$ROOT"') && str_contains($runtime, "'unapproved www-data write access' 72"), $failures, $passCount);
 check('runtime helper confines a project persistent root alongside the release root', str_contains($runtime, 'PERSISTENT_ROOT=/var/www/deployment-system/persistent') && str_contains($runtime, 'case "$resolved" in "$ROOT"/*) return 0') && str_contains($runtime, 'case "$resolved" in "$PERSISTENT_ROOT"|"$PERSISTENT_ROOT"/*) return 0'), $failures, $passCount);
 check('runtime helper normalizes the persistent root as one approved path', str_contains($runtime, '"$PERSISTENT_ROOT")'), $failures, $passCount);
 check('runtime helper never normalizes a project without persistent configuration', str_contains($runtime, 'PERSISTENT_ROOT=/var/www/deployment-system/persistent') && !str_contains($runtime, 'PERSISTENT_ROOT=/var/www/saas-platform'), $failures, $passCount);

@@ -13,6 +13,7 @@ OWNER=www-data
 GROUP=www-data
 DIRECTORY_MODE=0775
 FILE_MODE=0664
+writable_paths=()
 case "$project_key" in
   deployment-system)
     ROOT=/var/www/deployment-system/service
@@ -49,7 +50,25 @@ case "$project_key" in
     [ ! -L "$UPLOADS_ROOT" ] || fail "$project_key" validate "$UPLOADS_ROOT" 'uploads root must not be a symlink' 67
     install -d -o "$OWNER" -g "$GROUP" -m "$DIRECTORY_MODE" "$PERSISTENT_ROOT" "$UPLOADS_ROOT" \
       || fail "$project_key" prepare "$UPLOADS_ROOT" 'install persistent uploads root' 69
-    paths=("$UPLOADS_ROOT")
+    # The release is immutable except for Laravel's explicit runtime paths.
+    # Keep this list narrow: application source, vendor, and public assets are
+    # deliberately excluded. Missing entries fail closed instead of allowing
+    # a release that PHP-FPM cannot log/cache from to become healthy.
+    paths=(
+      "$UPLOADS_ROOT"
+      "$ROOT/storage/logs"
+      "$ROOT/storage/framework/cache"
+      "$ROOT/storage/framework/sessions"
+      "$ROOT/storage/framework/views"
+      "$ROOT/bootstrap/cache"
+    )
+    writable_paths=(
+      "$ROOT/storage/logs"
+      "$ROOT/storage/framework/cache"
+      "$ROOT/storage/framework/sessions"
+      "$ROOT/storage/framework/views"
+      "$ROOT/bootstrap/cache"
+    )
     files=()
     ;;
   *) fail "$project_key" validate - 'invalid project key' 65 ;;
@@ -102,6 +121,31 @@ for path in "${paths[@]}"; do
     done
   ' bash {} + || fail "$project_key" normalize "$path" 'find file' 1
 done
+
+# Verify effective access as the real PHP-FPM account after normalization,
+# not merely the mode bits observed by root. This catches missing group
+# membership, ACLs, or a read-only mount before success can be reported.
+for path in "${writable_paths[@]}"; do
+  runuser -u www-data -- test -w "$path" \
+    || fail "$project_key" verify "$path" 'www-data write access' 70
+done
+
+if [ "$project_key" = customer-site ]; then
+  # Prove the inverse side of the contract too: PHP-FPM may write only the
+  # five approved Laravel runtime trees. -P never follows public/uploads or
+  # any other symlink, and pruning excludes the approved subtrees themselves.
+  unexpected_writable="$({
+    runuser -u www-data -- find -P "$ROOT" \
+      \( -path "$ROOT/storage/logs" \
+         -o -path "$ROOT/storage/framework/cache" \
+         -o -path "$ROOT/storage/framework/sessions" \
+         -o -path "$ROOT/storage/framework/views" \
+         -o -path "$ROOT/bootstrap/cache" \) -prune \
+      -o \( -type d -o -type f \) -writable -print -quit
+  } 2>/dev/null)" || fail "$project_key" verify "$ROOT" 'source-tree write scan' 71
+  [ -z "$unexpected_writable" ] \
+    || fail "$project_key" verify "$unexpected_writable" 'unapproved www-data write access' 72
+fi
 
 for path in "${files[@]}"; do
   [ -f "$path" ] || fail "$project_key" normalize "$path" 'required database.sqlite existence check' 68

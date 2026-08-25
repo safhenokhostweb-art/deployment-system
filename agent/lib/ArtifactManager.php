@@ -50,7 +50,7 @@ final class ArtifactManager
             return ['status' => 'failed', 'message' => $prepared['message'], 'failureCode' => $prepared['failureCode']];
         }
 
-        return $this->activate($workingDirectory, $prepared['stagingPath'], $retentionCount);
+        return $this->activate($workingDirectory, $prepared['stagingPath'], $retentionCount, $persistentPaths, $persistentRoot);
     }
 
     /**
@@ -176,13 +176,31 @@ final class ArtifactManager
      *
      * @return array{status: 'succeeded'|'failed', message: ?string, failureCode: ?string}
      */
-    public function activate(string $workingDirectory, string $stagingPath, int $retentionCount): array
+    public function activate(string $workingDirectory, string $stagingPath, int $retentionCount, array $persistentPaths = [], ?string $persistentRoot = null): array
     {
         $swapResult = $this->atomicSwap($workingDirectory, $stagingPath);
         if ($swapResult !== null) {
             self::recursiveDelete($stagingPath);
 
             return ['status' => 'failed', 'message' => $swapResult, 'failureCode' => 'activation_failed'];
+        }
+
+        // Rename is atomic, but the served path is the contract that matters.
+        // Re-validate every installed reference after the swap and before old
+        // backups can be pruned. A filesystem race or altered link therefore
+        // restores the previous release rather than producing false success.
+        $persistentError = $this->validatePersistentReferences($workingDirectory, $persistentPaths, $persistentRoot);
+        if ($persistentError !== null) {
+            $rollbackError = $this->rollback($workingDirectory);
+            $rollbackSuffix = $rollbackError === null
+                ? ' The previous release was restored.'
+                : " Automatic restore failed: {$rollbackError}";
+
+            return [
+                'status' => 'failed',
+                'message' => $persistentError['message'] . $rollbackSuffix,
+                'failureCode' => $persistentError['code'],
+            ];
         }
 
         $this->cleanupOldBackups($workingDirectory, $retentionCount);
@@ -247,6 +265,49 @@ final class ArtifactManager
         }
 
         self::recursiveDelete($failedLive);
+
+        return null;
+    }
+
+    /**
+     * Verifies the release-visible side of the signed persistence contract.
+     * This performs no mutation and requires every entry to remain a symlink
+     * resolving to its exact configured target after activation.
+     *
+     * @param array<int|string, string> $persistentPaths
+     * @return array{code: string, message: string}|null
+     */
+    private function validatePersistentReferences(string $releasePath, array $persistentPaths, ?string $persistentRoot): ?array
+    {
+        if ($persistentPaths === []) {
+            return null;
+        }
+
+        if (!is_string($persistentRoot) || trim($persistentRoot) === '') {
+            return ['code' => 'artifact_persistent_root_missing', 'message' => 'Persistent root is missing during post-activation validation.'];
+        }
+
+        $rootReal = realpath(rtrim($persistentRoot, '/'));
+        if ($rootReal === false || !is_dir($rootReal)) {
+            return ['code' => 'artifact_persistent_root_missing', 'message' => "Persistent root '{$persistentRoot}' is missing during post-activation validation."];
+        }
+
+        foreach ($persistentPaths as $releaseKey => $configuredTargetPath) {
+            $relativePath = is_string($releaseKey) ? $releaseKey : $configuredTargetPath;
+            $normalized = rtrim(str_replace('\\', '/', trim($relativePath)), '/');
+            $targetNormalized = rtrim(str_replace('\\', '/', trim($configuredTargetPath)), '/');
+            $link = rtrim($releasePath, '/') . '/' . $normalized;
+            $expected = realpath(rtrim($rootReal, '/') . '/' . $targetNormalized);
+
+            if (!is_link($link)) {
+                return ['code' => 'artifact_persistent_reference_invalid', 'message' => "Activated persistent path '{$link}' is not a symlink."];
+            }
+
+            $actual = realpath($link);
+            if ($expected === false || $actual === false || $actual !== $expected) {
+                return ['code' => 'artifact_persistent_reference_invalid', 'message' => "Activated persistent path '{$link}' does not resolve to its configured target."];
+            }
+        }
 
         return null;
     }

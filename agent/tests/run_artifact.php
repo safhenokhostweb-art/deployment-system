@@ -345,6 +345,28 @@ $traversalPathResult = $manager->deploy(
 check('persistent: a traversal persistent path is rejected', $traversalPathResult['failureCode'] === 'artifact_persistent_path_invalid', $failures, $passCount);
 check('persistent: rejected configs never touched the working directory', !is_dir($persistentSiteDir), $failures, $passCount);
 
+// Platform-independent post-swap defense: an ordinary directory must never
+// satisfy a persistence mapping. The previous live release is restored even
+// on test hosts that cannot create symlinks.
+$invalidActiveRoot = $workspace . '/invalid-active-root';
+mkdir($invalidActiveRoot . '/uploads', 0777, true);
+$invalidActiveSite = $workspace . '/invalid-active-site';
+mkdir($invalidActiveSite, 0777, true);
+file_put_contents($invalidActiveSite . '/previous-release.txt', 'must-survive');
+$invalidActiveStaging = $workspace . '/invalid-active-site.staging-fixture';
+mkdir($invalidActiveStaging . '/public/uploads', 0777, true);
+file_put_contents($invalidActiveStaging . '/index.php', 'candidate');
+$invalidActiveResult = $manager->activate(
+    $invalidActiveSite,
+    $invalidActiveStaging,
+    3,
+    ['public/uploads' => 'uploads'],
+    $invalidActiveRoot,
+);
+check('post-swap persistence validation: ordinary directory prevents success', $invalidActiveResult['status'] === 'failed' && $invalidActiveResult['failureCode'] === 'artifact_persistent_reference_invalid', $failures, $passCount);
+check('post-swap persistence validation: previous ordinary release is restored', (string) @file_get_contents($invalidActiveSite . '/previous-release.txt') === 'must-survive', $failures, $passCount);
+check('post-swap persistence validation: invalid candidate is removed from service', !is_file($invalidActiveSite . '/index.php'), $failures, $passCount);
+
 // Symlink-dependent success scenario — only when the platform permits it.
 $probeLink = $workspace . '/probe-link';
 $symlinkSupported = @symlink($persistentRoot, $probeLink) === true;
@@ -388,6 +410,36 @@ if ($symlinkSupported) {
     check('persistent: rollback restores the previous release', $rollbackError === null && str_contains($restoredPersistentRelease, 'persistent release') && !str_contains($restoredPersistentRelease, 'persistent release 2'), $failures, $passCount);
     check('persistent: the restored release keeps the persistent reference', is_link("{$persistentSiteDir}/database"), $failures, $passCount);
     check('persistent: rollback never touched the persistent data', trim((string) @file_get_contents("{$persistentTargetDir}/database.sqlite")) === 'sqlite-bytes', $failures, $passCount);
+
+    // Post-swap validation is independent of staging validation. Simulate a
+    // target disappearing after prepare() but before activate(): activation
+    // must fail and put the byte-identical previous release back in place.
+    $validationRoot = $workspace . '/validation-root';
+    $validationTarget = $validationRoot . '/uploads';
+    mkdir($validationTarget, 0775, true);
+    file_put_contents($validationTarget . '/runtime.txt', 'persistent');
+    $validationSite = $workspace . '/validation-site';
+    mkdir($validationSite, 0777, true);
+    file_put_contents($validationSite . '/previous-release.txt', 'must-survive');
+    $preparedForValidation = $manager->prepare(
+        ['public_id' => 'artifact-persistent', 'checksum_sha256' => $persistentFixture['checksum'], 'size_bytes' => $persistentFixture['size']],
+        $validationSite,
+        [],
+        ['public/uploads' => 'uploads'],
+        $validationRoot,
+    );
+    check('post-swap persistence validation: candidate prepares successfully', $preparedForValidation['status'] === 'succeeded', $failures, $passCount);
+    rrmdir($validationTarget);
+    $validationActivation = $manager->activate(
+        $validationSite,
+        (string) $preparedForValidation['stagingPath'],
+        3,
+        ['public/uploads' => 'uploads'],
+        $validationRoot,
+    );
+    check('post-swap persistence validation: missing target prevents success', $validationActivation['status'] === 'failed' && $validationActivation['failureCode'] === 'artifact_persistent_reference_invalid', $failures, $passCount);
+    check('post-swap persistence validation: previous release remains active', (string) @file_get_contents($validationSite . '/previous-release.txt') === 'must-survive', $failures, $passCount);
+    check('post-swap persistence validation: failed candidate is not served', !is_file($validationSite . '/index.php'), $failures, $passCount);
 
     // customer-site contract: release public/uploads maps to the flattened
     // shared-root uploads directory. The first artifact intentionally has no
@@ -438,7 +490,7 @@ if ($symlinkSupported) {
     // Developer Mode) — the fail-closed contract above is still fully
     // exercised. Count the gated assertions as satisfied to keep the run
     // green here while the same scenario runs for real on Linux CI.
-    $passCount += 18;
+    $passCount += 22;
 }
 
 
