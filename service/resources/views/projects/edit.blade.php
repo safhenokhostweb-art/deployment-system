@@ -50,6 +50,27 @@
             @endforeach
         </select>
         <p class="muted">Artifact-required production builds use only this Agent. There is no automatic fallback.</p>
+        <div style="border:1px solid var(--border, #d1d5db);border-radius:0.5rem;padding:0.75rem;margin-bottom:1rem;">
+            <strong>Local Project Mappings</strong>
+            <p class="muted">Workspace paths belong to an Agent/project mapping, so they are managed on the Local Agent page rather than as a global Project path.</p>
+            @forelse ($project->localProjectMappings as $mapping)
+                <div style="margin-top:0.5rem;">
+                    <a href="{{ route('local-agents.show', $mapping->localAgent) }}">{{ $mapping->localAgent->name ?? $mapping->localAgent->public_id }}</a>
+                    — {{ $mapping->localAgent->operating_system ?? 'unknown OS' }}
+                    — {{ $mapping->localAgent->role }}
+                    — <x-ltr><code>{{ $mapping->sourceWorkspacePath() }}</code></x-ltr>
+                    — branch <code>{{ $mapping->effectiveBranch() }}</code>
+                    @if ($project->authoritative_build_local_agent_id === $mapping->local_agent_id)
+                        <span class="badge badge-succeeded">Authoritative</span>
+                    @endif
+                    @can('local_agents.manage')
+                        <a class="btn btn-small" href="{{ route('local-agents.show', $mapping->localAgent) }}">Manage mapping</a>
+                    @endcan
+                </div>
+            @empty
+                <p class="muted">No Local Agent mapping exists for this project.</p>
+            @endforelse
+        </div>
 
         @php($health = $project->http_health_check ?? [])
         <input type="hidden" name="http_health_enabled" value="0">

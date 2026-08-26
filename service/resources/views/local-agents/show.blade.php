@@ -184,6 +184,8 @@
 </x-card>
 
 <x-card :title="__('ui.local_agents.projects_title')">
+    @php($workspaceExample = \App\Support\Deployment\SourceWorkspacePath::exampleForOperatingSystem($localAgent->operating_system))
+    <p class="muted">Mappings are Agent-specific. This {{ $localAgent->operating_system ?? 'unknown-OS' }} Agent requires an OS-compatible absolute Source Workspace such as <x-ltr><code>{{ $workspaceExample }}</code></x-ltr>.</p>
     <table>
         <thead><tr>
             <th>{{ __('ui.common.project') }}</th>
@@ -192,7 +194,7 @@
             <th>{{ __('ui.local_agents.mapping_branch') }}</th>
             <th>{{ __('ui.local_agents.mapping_remote') }}</th>
             <th>{{ __('ui.publish.title') }}</th>
-            <th>Artifact / Commit / Version</th>
+            <th>Workspace / Artifact state</th>
             <th></th>
         </tr></thead>
         <tbody>
@@ -204,8 +206,8 @@
                     <form method="POST" action="{{ route('local-agents.mappings.update', [$localAgent, $mapping]) }}" style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap;">
                         @csrf
                         @method('PUT')
-                        <x-ltr><input type="text" name="source_workspace_path" value="{{ $mapping->sourceWorkspacePath() }}" required placeholder="/opt/deployment-agent/workspaces/project" style="min-width:18rem;" title="Source Workspace"></x-ltr>
-                        <x-ltr><input type="text" name="production_path" value="{{ $mapping->production_path }}" placeholder="/var/www/project" style="min-width:14rem;" title="Production Target (display/reference only)"></x-ltr>
+                        <x-ltr><input type="text" name="source_workspace_path" value="{{ $mapping->sourceWorkspacePath() }}" required placeholder="{{ $workspaceExample }}" style="min-width:18rem;" title="Source Workspace"></x-ltr>
+                        <x-ltr><input type="text" value="{{ $mapping->production_path }}" placeholder="No production target recorded" style="min-width:14rem;" title="Production Target (protected reference only)" readonly disabled></x-ltr>
                         <input type="text" name="git_branch" value="{{ $mapping->git_branch }}" placeholder="{{ $mapping->project->branch }}" style="max-width:8rem;">
                         <input type="text" name="remote_name" value="{{ $mapping->remote_name }}" placeholder="origin" style="max-width:8rem;">
                         <button type="submit" class="btn btn-small">{{ __('ui.local_agents.mapping_update_button') }}</button>
@@ -233,6 +235,19 @@
                     @endcan
                 </td>
                 <td>
+                    <div>Mapping #{{ $mapping->id }}</div>
+                    <div><x-ltr><code>{{ $mapping->local_head_sha ?? 'not reported' }}</code></x-ltr></div>
+                    <div>{{ $mapping->reported_branch ?? 'branch not reported' }}</div>
+                    @if ($mapping->reported_at === null)
+                        <span class="muted">State not reported</span>
+                    @elseif ($mapping->working_tree_dirty)
+                        <span style="color:#b45309;">Dirty</span>
+                    @else
+                        <span style="color:#047857;">Clean</span>
+                    @endif
+                    @if ($mapping->reported_at)
+                        <div class="muted">{{ $mapping->reported_at->diffForHumans() }}</div>
+                    @endif
                     @php($artifact = $mapping->project->artifacts->first())
                     <x-badge :status="$artifact?->status ?? 'missing'" />
                     <x-ltr><code>{{ $artifact ? substr($artifact->commit_hash, 0, 10) : '—' }}</code></x-ltr>
@@ -275,7 +290,7 @@
         </div>
         <div>
             <label>Source Workspace</label>
-            <input type="text" name="source_workspace_path" required placeholder="/opt/deployment-agent/workspaces/project">
+            <input type="text" name="source_workspace_path" required placeholder="{{ $workspaceExample }}">
         </div>
         <div>
             <label>Production Target</label>
@@ -312,7 +327,7 @@
                     <tr>
                         <td><input type="checkbox" name="enabled[{{ $project->id }}]" value="1"></td>
                         <td>{{ $project->name }}</td>
-                        <td><x-ltr><input type="text" name="source_workspace_path[{{ $project->id }}]" value="/opt/deployment-agent/workspaces/{{ $project->project_key }}"></x-ltr></td>
+                        <td><x-ltr><input type="text" name="source_workspace_path[{{ $project->id }}]" value="{{ \App\Support\Deployment\SourceWorkspacePath::exampleForOperatingSystem($localAgent->operating_system, $project->project_key) }}"></x-ltr></td>
                         <td><x-ltr><input type="text" name="production_path[{{ $project->id }}]" value="/var/www/{{ $project->project_key }}"></x-ltr></td>
                         <td><input type="text" name="git_branch[{{ $project->id }}]" placeholder="{{ $project->branch }}"></td>
                         <td><input type="text" name="remote_name[{{ $project->id }}]" value="origin"></td>

@@ -3,8 +3,12 @@
 namespace Tests\Feature\Dashboard;
 
 use App\Models\LocalAgent;
+use App\Models\Artifact;
+use App\Models\Deployment;
+use App\Models\LocalAgentControlJob;
 use App\Models\LocalProjectMapping;
 use App\Models\Project;
+use App\Models\PublishJob;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -21,7 +25,7 @@ class LocalProjectMappingControllerTest extends TestCase
     public function test_admin_can_update_local_path_branch_and_remote_on_an_existing_mapping(): void
     {
         $user = User::factory()->create();
-        $agent = LocalAgent::factory()->approved()->create();
+        $agent = LocalAgent::factory()->approved()->create(['operating_system' => 'Windows']);
         $project = Project::factory()->create();
         $mapping = LocalProjectMapping::factory()->create([
             'local_agent_id' => $agent->id,
@@ -51,7 +55,7 @@ class LocalProjectMappingControllerTest extends TestCase
     public function test_production_directory_cannot_be_saved_as_source_workspace(): void
     {
         $user = User::factory()->create();
-        $agent = LocalAgent::factory()->approved()->create();
+        $agent = LocalAgent::factory()->approved()->create(['operating_system' => 'Linux']);
         $mapping = LocalProjectMapping::factory()->create(['local_agent_id' => $agent->id]);
 
         $this->actingAs($user)->put(route('local-agents.mappings.update', [$agent, $mapping]), [
@@ -78,7 +82,7 @@ class LocalProjectMappingControllerTest extends TestCase
     public function test_source_workspace_and_production_target_are_stored_separately(): void
     {
         $user = User::factory()->create();
-        $agent = LocalAgent::factory()->approved()->create();
+        $agent = LocalAgent::factory()->approved()->create(['operating_system' => 'Linux']);
         $project = Project::factory()->create(['project_key' => 'customer-site']);
 
         $this->actingAs($user)->post(route('local-agents.mappings.store', $agent), [
@@ -92,6 +96,99 @@ class LocalProjectMappingControllerTest extends TestCase
             'source_workspace_path' => '/opt/deployment-agent/workspaces/customer-site',
             'production_path' => '/var/www/customer-site',
         ]);
+    }
+
+    public function test_windows_agent_rejects_a_linux_or_relative_source_workspace(): void
+    {
+        $user = User::factory()->create();
+        $agent = LocalAgent::factory()->approved()->create(['operating_system' => 'Windows']);
+        $mapping = LocalProjectMapping::factory()->create(['local_agent_id' => $agent->id]);
+
+        $this->actingAs($user)->from(route('local-agents.show', $agent))
+            ->put(route('local-agents.mappings.update', [$agent, $mapping]), [
+                'source_workspace_path' => '/opt/deployment-agent/workspaces/saas-platform',
+            ])->assertSessionHasErrors('source_workspace_path');
+
+        $this->actingAs($user)->from(route('local-agents.show', $agent))
+            ->put(route('local-agents.mappings.update', [$agent, $mapping]), [
+                'source_workspace_path' => 'deployment-workspaces\\saas-platform',
+            ])->assertSessionHasErrors('source_workspace_path');
+    }
+
+    public function test_linux_agent_accepts_a_non_production_absolute_workspace(): void
+    {
+        $user = User::factory()->create();
+        $agent = LocalAgent::factory()->approved()->create(['operating_system' => 'Linux']);
+        $mapping = LocalProjectMapping::factory()->create(['local_agent_id' => $agent->id]);
+
+        $this->actingAs($user)->put(route('local-agents.mappings.update', [$agent, $mapping]), [
+            'source_workspace_path' => '/opt/deployment-agent/workspaces/saas-platform',
+            'git_branch' => 'main',
+            'remote_name' => 'origin',
+        ])->assertRedirect(route('local-agents.show', $agent));
+
+        $this->assertSame('/opt/deployment-agent/workspaces/saas-platform', $mapping->fresh()->source_workspace_path);
+    }
+
+    public function test_mapping_rejects_branch_names_the_agent_cannot_check_out(): void
+    {
+        $user = User::factory()->create();
+        $agent = LocalAgent::factory()->approved()->create(['operating_system' => 'Linux']);
+        $mapping = LocalProjectMapping::factory()->create(['local_agent_id' => $agent->id]);
+
+        foreach (['feature..broken', 'feature@{broken', 'feature/', 'feature.'] as $branch) {
+            $this->actingAs($user)->from(route('local-agents.show', $agent))
+                ->put(route('local-agents.mappings.update', [$agent, $mapping]), [
+                    'source_workspace_path' => '/opt/deployment-agent/workspaces/saas-platform',
+                    'git_branch' => $branch,
+                    'remote_name' => 'origin',
+                ])->assertSessionHasErrors('git_branch');
+        }
+    }
+
+    public function test_mapping_update_preserves_production_target_and_has_no_operational_side_effects(): void
+    {
+        $user = User::factory()->create();
+        $agent = LocalAgent::factory()->approved()->create(['operating_system' => 'Windows']);
+        $mapping = LocalProjectMapping::factory()->create([
+            'local_agent_id' => $agent->id,
+            'production_path' => '/var/www/saas-platform',
+        ]);
+
+        $this->actingAs($user)->put(route('local-agents.mappings.update', [$agent, $mapping]), [
+            'source_workspace_path' => 'C:\\deployment-workspaces\\saas-platform',
+            'production_path' => '/var/www/tampered',
+            'git_branch' => 'main',
+            'remote_name' => 'origin',
+        ])->assertRedirect(route('local-agents.show', $agent));
+
+        $fresh = $mapping->fresh();
+        $this->assertSame('/var/www/saas-platform', $fresh->production_path);
+        $this->assertSame('C:\\deployment-workspaces\\saas-platform', $fresh->source_workspace_path);
+        $this->assertSame(0, Artifact::count());
+        $this->assertSame(0, Deployment::count());
+        $this->assertSame(0, PublishJob::count());
+        $this->assertSame(0, LocalAgentControlJob::count());
+    }
+
+    public function test_mapping_ui_shows_agent_specific_path_guidance_and_reported_state(): void
+    {
+        $user = User::factory()->create();
+        $agent = LocalAgent::factory()->approved()->create(['operating_system' => 'Windows']);
+        LocalProjectMapping::factory()->create([
+            'local_agent_id' => $agent->id,
+            'local_head_sha' => str_repeat('d', 40),
+            'reported_branch' => 'main',
+            'working_tree_dirty' => false,
+            'reported_at' => now(),
+        ]);
+
+        $this->actingAs($user)->get(route('local-agents.show', $agent))
+            ->assertOk()
+            ->assertSee('C:\\deployment-workspaces\\project')
+            ->assertSee(str_repeat('d', 40))
+            ->assertSee('Clean')
+            ->assertSee('protected reference only');
     }
 
     public function test_cannot_update_a_mapping_belonging_to_a_different_agent(): void

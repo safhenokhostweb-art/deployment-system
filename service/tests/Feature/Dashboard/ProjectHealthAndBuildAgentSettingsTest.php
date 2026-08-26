@@ -73,6 +73,31 @@ class ProjectHealthAndBuildAgentSettingsTest extends TestCase
             ->assertSee('http_health_expected_status', false);
     }
 
+    public function test_edit_page_explains_and_links_agent_owned_mapping_management(): void
+    {
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
+        $project = Project::factory()->create();
+        $builder = LocalAgent::factory()->productionBuild()->create([
+            'name' => 'FASTCREATE-SAAS-LINUX',
+            'operating_system' => 'Linux',
+        ]);
+        LocalProjectMapping::factory()->create([
+            'project_id' => $project->id,
+            'local_agent_id' => $builder->id,
+            'source_workspace_path' => '/opt/deployment-agent/workspaces/saas-platform',
+            'git_branch' => 'main',
+        ]);
+        $project->update(['authoritative_build_local_agent_id' => $builder->id]);
+
+        $this->actingAs($admin)->get(route('projects.edit', $project))
+            ->assertOk()
+            ->assertSee('Local Project Mappings')
+            ->assertSee('FASTCREATE-SAAS-LINUX')
+            ->assertSee('/opt/deployment-agent/workspaces/saas-platform')
+            ->assertSee('Authoritative')
+            ->assertSee(route('local-agents.show', $builder), false);
+    }
+
     /** @return array<string, mixed> */
     private function payload(Project $project, array $overrides = []): array
     {
