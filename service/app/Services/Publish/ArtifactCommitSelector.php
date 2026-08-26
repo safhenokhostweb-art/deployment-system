@@ -52,7 +52,7 @@ final class ArtifactCommitSelector
                 'reported_at_human' => $mapping->reported_at?->diffForHumans(),
                 'workspace_state' => $state,
                 'is_verified' => $state === 'clean',
-                'is_build_ready' => $state === 'clean' && $remoteSha !== null,
+                'is_build_ready' => $this->isEligibleForExactRemoteBuild($state) && $remoteSha !== null,
                 'github_sha' => $githubSha,
                 'github_short_sha' => $githubSha === null ? null : substr($githubSha, 0, 12),
                 'remote_sha' => $remoteSha,
@@ -74,12 +74,38 @@ final class ArtifactCommitSelector
             return $selectedCommit;
         }
 
-        abort_unless($this->workspaceState($mapping, $mapping->project->branch) === 'clean', 422, 'The source workspace does not currently have a clean, verified state for the production branch. Wait for Local Agent sync.');
+        abort_unless($this->isEligibleForExactRemoteBuild($this->workspaceState($mapping, $mapping->project->branch)), 422, 'The source workspace does not currently have a valid, verified state for the production branch. Wait for Local Agent sync.');
 
         $remoteCommit = $this->latestRemoteCommit($mapping, $latestRemoteCommit);
         abort_unless($remoteCommit !== null, 422, 'The latest remote production-branch commit is not available. Wait for Local Agent sync or restore GitHub access.');
 
         return $remoteCommit;
+    }
+
+    /**
+     * Root-cause fix (dirty persistent workspace incorrectly blocking a
+     * safe exact-remote build): an exact-commit Artifact build never reads
+     * the persistent workspace's WORKING TREE content — Agent-side,
+     * WorkspaceSourcePreparer::prepareRemoteCommit() fetches the production
+     * branch and checks out the exact requested commit inside a completely
+     * separate, freshly `git init`'d isolated BuildWorkspace. The persistent
+     * workspace is consulted only for its trusted remote URL/branch and, via
+     * committed history (`merge-base --is-ancestor`), whether it has
+     * diverged — never for its uncommitted or untracked files. A developer's
+     * unrelated local WIP sitting in that workspace (e.g. a separate,
+     * deliberately-uncommitted change) has zero bearing on that safety, so
+     * 'dirty' must not block eligibility here — only a source path that
+     * can't even be trusted/located ('invalid_source'), a workspace that has
+     * never reported at all ('not_reported'), or one reporting the wrong
+     * branch ('branch_mismatch') still does, since those mean this class
+     * cannot establish a trustworthy remote to fetch from at all. Working-
+     * tree cleanliness remains required exactly where it still matters:
+     * the no-source-change publish flow (PublishJobService), which builds
+     * and pushes from the live working tree, not an isolated exact commit.
+     */
+    private function isEligibleForExactRemoteBuild(string $state): bool
+    {
+        return in_array($state, ['clean', 'dirty'], true);
     }
 
     /** Resolve the exact remote branch HEAD without falling back to workspace HEAD. */

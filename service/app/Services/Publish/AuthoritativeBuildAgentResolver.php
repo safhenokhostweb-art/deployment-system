@@ -52,8 +52,16 @@ final class AuthoritativeBuildAgentResolver
         );
         abort_if($mapping->reported_at === null || $mapping->reported_at->lt(now()->subSeconds((int) config('deployment.artifact_workspace_report_max_age_seconds'))), 409, 'گزارش workspace عامل رسمی stale است؛ پیش از ساخت منتظر project sync بمانید.');
         abort_if($mapping->local_head_sha === null || $mapping->reported_branch !== $mapping->effectiveBranch(), 409, 'عامل رسمی HEAD معتبر برای branch تنظیم‌شده گزارش نکرده است.');
-        abort_if($mapping->working_tree_dirty, 409, 'source workspace عامل رسمی dirty است؛ ساخت Artifact مسدود شد.');
 
+        // Root-cause fix: an exact-commit Artifact build (WorkspaceSourcePreparer::
+        // prepareRemoteCommit(), the only path agent.php ever builds an artifact
+        // through) never reads this workspace's working-tree content — it fetches
+        // the production branch and checks the requested commit out inside an
+        // isolated BuildWorkspace. Working-tree dirtiness here is unrelated local
+        // WIP, not build input, so it must never block resolving the authoritative
+        // Agent. It remains enforced separately, and correctly, wherever a build
+        // DOES read live working-tree content (see PublishJobService's
+        // no-source-change publish evidence checks).
         return $mapping;
     }
 }

@@ -113,6 +113,69 @@ class SmartArtifactCommitSelectionTest extends TestCase
     }
 
     /**
+     * Reproduces the EXACT production failure this time: the prior stale-
+     * workspace-HEAD test above passed even before the fix, because
+     * verifiedProject() reports a clean working tree — that never matched
+     * the real production Agent workspace, which had (correctly) reported
+     * `working_tree_dirty = true` due to unrelated local WIP sitting in the
+     * same persistent checkout. That dirtiness was incorrectly wired into
+     * Build Artifact eligibility even though the exact-remote-commit build
+     * never reads the workspace's working-tree content at all (it fetches
+     * and checks the exact requested commit out into an isolated
+     * BuildWorkspace) — only its trusted remote URL/branch and committed,
+     * non-diverged history. Every other production fact is reproduced
+     * simultaneously: stale workspace HEAD, a fresh remote-tracking SHA,
+     * an otherwise-safe/reported/branch-matching source workspace, and no
+     * exact Artifact yet for the new remote commit.
+     */
+    public function test_deployment_system_dirty_persistent_workspace_never_blocks_the_exact_remote_build(): void
+    {
+        $oldHead = str_repeat('1', 40);
+        $freshRemote = str_repeat('2', 40);
+        [$user, $project, $mapping] = $this->verifiedProject('deployment-system', $oldHead);
+        $mapping->update(['remote_tracking_sha' => $freshRemote, 'working_tree_dirty' => true]);
+
+        $response = $this->actingAs($user)->get(route('projects.show', $project));
+
+        $response->assertOk()->assertSee($freshRemote);
+        $this->assertSelectorTargets($response->getContent(), $freshRemote);
+        $this->assertBuildButtonEnabled($response->getContent());
+        $this->assertDatabaseCount('publish_jobs', 0);
+
+        $this->actingAs($user)->post(route('projects.publish', $project), [
+            'local_project_mapping_id' => $mapping->id,
+            'commit_selection_mode' => 'latest',
+        ])->assertRedirect();
+
+        $job = PublishJob::sole();
+        $this->assertSame($freshRemote, $job->reviewed_head_sha, 'The queued build must target the exact remote HEAD.');
+        $this->assertTrue((bool) $mapping->fresh()->working_tree_dirty, 'The reported dirty flag itself must never be silently cleared/faked by the Hub.');
+        $this->assertSame($oldHead, $mapping->fresh()->local_head_sha, 'Queuing a build must never rewrite or reset the persistent workspace mapping.');
+    }
+
+    /**
+     * A workspace that has never reported at all, is on the wrong branch, or
+     * whose source path can't be trusted/located still correctly blocks —
+     * only plain working-tree dirtiness was over-strict. This is the
+     * negative case proving the fix didn't just delete the safety gate.
+     */
+    public function test_deployment_system_untrusted_source_still_blocks_despite_a_fresh_remote_commit(): void
+    {
+        [$user, $project, $mapping] = $this->verifiedProject('deployment-system', str_repeat('1', 40));
+        $mapping->update(['remote_tracking_sha' => str_repeat('2', 40), 'reported_branch' => 'some-other-branch']);
+
+        $response = $this->actingAs($user)->get(route('projects.show', $project));
+
+        $this->assertBuildButtonDisabled($response->getContent());
+
+        $this->actingAs($user)->post(route('projects.publish', $project), [
+            'local_project_mapping_id' => $mapping->id,
+            'commit_selection_mode' => 'latest',
+        ])->assertStatus(409);
+        $this->assertDatabaseCount('publish_jobs', 0);
+    }
+
+    /**
      * Two build requests for the exact same project+commit (a double click,
      * or a webhook auto-build racing an operator's manual click) must never
      * queue two separate isolated builds for an identical commit.
