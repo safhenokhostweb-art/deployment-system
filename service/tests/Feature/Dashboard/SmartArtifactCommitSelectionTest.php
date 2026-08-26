@@ -182,17 +182,8 @@ class SmartArtifactCommitSelectionTest extends TestCase
             'artifact_action' => 'use_existing',
         ]);
 
-        $deployment = Deployment::sole();
-        $response->assertRedirect(route('deployments.show', $deployment))
-            ->assertSessionHas('status', __('ui.publish.deployment_created_from_artifact', [
-                'deployment' => $deployment->id,
-                'artifact' => $artifact->id,
-                'status' => Deployment::STATUS_QUEUED,
-            ]));
-        $this->assertSame($artifact->id, $deployment->artifact_id);
-        $this->assertSame(str_repeat('c', 40), $deployment->commit_hash);
-        $this->assertSame('main', $deployment->branch);
-        $this->assertSame(Deployment::STATUS_QUEUED, $deployment->status);
+        $response->assertRedirect(route('projects.deploy-latest.show', $project));
+        $this->assertDatabaseCount('deployments', 0);
         $this->assertDatabaseCount('publish_jobs', 0);
     }
 
@@ -224,11 +215,9 @@ class SmartArtifactCommitSelectionTest extends TestCase
             'artifact_action' => 'use_existing',
         ])->assertRedirect();
 
-        $created = Deployment::where('id', '!=', $historical->id)->sole();
-        $this->assertSame($artifact->id, $created->artifact_id);
         $this->assertSame(Deployment::STATUS_FAILED, $historical->fresh()->status);
         $this->assertNull($historical->fresh()->artifact_id);
-        $this->assertDatabaseCount('deployments', 2);
+        $this->assertDatabaseCount('deployments', 1);
         $this->assertDatabaseCount('publish_jobs', 0);
     }
 
@@ -290,7 +279,7 @@ class SmartArtifactCommitSelectionTest extends TestCase
         $this->actingAs($user)->get(route('projects.deploy-latest.show', $project))
             ->assertOk()
             ->assertSee(str_repeat('b', 40))
-            ->assertSee('Build an Artifact first.');
+            ->assertSee('NOT READY');
 
         $this->assertDatabaseCount('deployments', 0);
         $this->assertDatabaseCount('publish_jobs', 0);
@@ -432,7 +421,9 @@ class SmartArtifactCommitSelectionTest extends TestCase
 
     private function assertDeployLatestDisabled(string $html): void
     {
-        $this->assertButtonDisabledState($html, 'artifact-deploy-latest', true);
+        // Readiness review remains available while an Artifact is missing;
+        // only the confirmation action on that page is disabled.
+        $this->assertMatchesRegularExpression('/<a[^>]*id="artifact-deploy-latest"[^>]*>/', $html);
     }
 
     private function assertButtonDisabledState(string $html, string $id, bool $disabled): void
@@ -461,7 +452,7 @@ class SmartArtifactCommitSelectionTest extends TestCase
             'artifact_action' => 'use_existing',
         ])->assertRedirect();
 
-        $this->assertSame($artifact->id, Deployment::sole()->artifact_id);
+        $this->assertDatabaseCount('deployments', 0);
         $this->assertDatabaseCount('publish_jobs', 0);
     }
 }

@@ -4,7 +4,12 @@ namespace App\Jobs;
 
 use App\Models\AuditLogEntry;
 use App\Models\Project;
-use App\Services\Deployment\DeploymentDispatcher;
+use App\Models\PublishJob;
+use App\Models\Release;
+use App\Services\Publish\AuthoritativeBuildAgentResolver;
+use App\Services\Publish\PublishJobService;
+use App\Services\Releases\ReleaseOrchestrator;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -40,9 +45,50 @@ class ProcessGitHubWebhookPush implements ShouldQueue
     ) {
     }
 
-    public function handle(DeploymentDispatcher $dispatcher): void
+    public function handle(
+        ReleaseOrchestrator $releases,
+        AuthoritativeBuildAgentResolver $buildAgents,
+        PublishJobService $publishJobs,
+    ): void
     {
-        $dispatcher->createFromWebhook($this->project, $this->commitHash, $this->branch, $this->pusher);
+        // A branch advance prepares a Release; it never creates a production
+        // Deployment. Deployment remains an explicit operator-confirmed act.
+        $release = $releases->createForCommit(
+            $this->project,
+            strtolower($this->commitHash),
+            $this->branch,
+            'webhook',
+            ['pusher' => $this->pusher],
+        );
+        if ($release->status !== Release::STATUS_AWAITING_ARTIFACT || ! $this->project->requires_complete_artifact) {
+            return;
+        }
+        $existingBuild = PublishJob::query()
+            ->where('project_id', $this->project->id)
+            ->where('action', PublishJob::ACTION_BUILD_ARTIFACT)
+            ->where('reviewed_head_sha', strtolower($this->commitHash))
+            ->whereNotIn('status', [PublishJob::STATUS_FAILED, PublishJob::STATUS_TIMED_OUT, PublishJob::STATUS_ABANDONED])
+            ->first();
+        if ($existingBuild !== null) {
+            $existingBuild->update(['release_id' => $release->id]);
+            $releases->markArtifactBuilding($release);
+            return;
+        }
+        try {
+            $mapping = $buildAgents->resolve($this->project, $this->branch);
+            $job = $publishJobs->queueArtifactBuild(
+                $mapping->localAgent,
+                $this->project,
+                strtolower($this->commitHash),
+                $this->branch,
+                'system:release-orchestrator',
+            );
+            $job->update(['release_id' => $release->id]);
+            $releases->markArtifactBuilding($release);
+        } catch (HttpExceptionInterface) {
+            // No valid build agent is a visible awaiting_artifact state. The
+            // dashboard offers remediation; it never falls back to a random agent.
+        }
     }
 
     public function failed(Throwable $exception): void
@@ -50,7 +96,7 @@ class ProcessGitHubWebhookPush implements ShouldQueue
         AuditLogEntry::record(
             actorType: AuditLogEntry::ACTOR_SYSTEM,
             actorIdentifier: null,
-            action: 'webhook.deployment_dispatch_failed',
+            action: 'webhook.release_preparation_failed',
             subjectType: Project::class,
             subjectId: $this->project->id,
             metadata: [

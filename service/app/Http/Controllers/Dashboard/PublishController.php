@@ -12,6 +12,7 @@ use App\Services\Deployment\Artifact\ArtifactService;
 use App\Services\Publish\ArtifactCommitSelector;
 use App\Services\Publish\AuthoritativeBuildAgentResolver;
 use App\Services\Publish\PublishJobService;
+use App\Services\Releases\ReleaseReadiness;
 use App\Services\GitHub\GitHubAppClient;
 use App\Services\GitHub\GitHubApiException;
 use Illuminate\Http\RedirectResponse;
@@ -34,6 +35,7 @@ class PublishController extends Controller
         private readonly AuthoritativeBuildAgentResolver $buildAgents,
         private readonly ArtifactService $artifacts,
         private readonly GitHubAppClient $github,
+        private readonly ReleaseReadiness $releaseReadiness,
     ) {
     }
 
@@ -42,9 +44,10 @@ class PublishController extends Controller
     {
         Gate::authorize('deployments.create');
         Gate::authorize('deploy', $project);
-        [$latestRemoteCommit, $artifact] = $this->latestRemoteArtifact($project);
+        [$latestRemoteCommit, $artifact, $release] = $this->latestRemoteArtifact($project);
+        $readiness = $this->releaseReadiness->for($latestRemoteCommit, $release, $artifact);
 
-        return view('publish.deploy-latest', compact('project', 'artifact', 'latestRemoteCommit'));
+        return view('publish.deploy-latest', compact('project', 'artifact', 'release', 'readiness', 'latestRemoteCommit'));
     }
 
     /** Create a deployment only after the operator explicitly confirms. */
@@ -52,11 +55,13 @@ class PublishController extends Controller
     {
         Gate::authorize('deployments.create');
         Gate::authorize('deploy', $project);
-        [$latestRemoteCommit, $artifact] = $this->latestRemoteArtifact($project);
+        [$latestRemoteCommit, $artifact, $release] = $this->latestRemoteArtifact($project);
+        $readiness = $this->releaseReadiness->for($latestRemoteCommit, $release, $artifact);
         abort_unless($latestRemoteCommit !== null, 409, 'The latest remote production-branch commit is unavailable.');
-        abort_unless($artifact !== null, 409, 'No physically valid available Artifact exists for the latest remote production-branch commit.');
+        abort_unless($readiness['deployable'] && $artifact !== null && $release !== null, 409, $readiness['message']);
 
         $deployment = $this->deployments->createFromExistingArtifact($project, $artifact, $request->user()->email);
+        $deployment->update(['release_id' => $release->id]);
 
         return redirect()->route('deployments.show', $deployment)
             ->with('status', __('ui.publish.deployment_created_from_artifact', [
@@ -89,22 +94,10 @@ class PublishController extends Controller
 
             if (($validated['artifact_action'] ?? 'build') === 'use_existing') {
                 abort_unless($existingArtifact !== null, 409, 'No available Artifact exists for the selected project, commit, and branch.');
+                abort_unless($selectionMode === ArtifactCommitSelector::MODE_LATEST, 409, 'Advanced commits cannot bypass latest-release review.');
 
-                Gate::authorize('deployments.create');
-                Gate::authorize('deploy', $project);
-
-                $deployment = $this->deployments->createFromExistingArtifact(
-                    $project,
-                    $existingArtifact,
-                    $request->user()->email,
-                );
-
-                return redirect()->route('deployments.show', $deployment)
-                    ->with('status', __('ui.publish.deployment_created_from_artifact', [
-                        'deployment' => $deployment->id,
-                        'artifact' => $existingArtifact->id,
-                        'status' => $deployment->status,
-                    ]));
+                return redirect()->route('projects.deploy-latest.show', $project)
+                    ->with('status', 'Artifact found. Review release readiness and explicitly confirm deployment.');
             }
 
             if ($existingArtifact !== null) {
@@ -312,7 +305,7 @@ class PublishController extends Controller
         }
     }
 
-    /** @return array{0: string|null, 1: \App\Models\Artifact|null} */
+    /** @return array{0: string|null, 1: \App\Models\Artifact|null, 2: \App\Models\Release|null} */
     private function latestRemoteArtifact(Project $project): array
     {
         $mapping = LocalProjectMapping::query()
@@ -328,7 +321,10 @@ class PublishController extends Controller
         $artifact = $latestRemoteCommit === null
             ? null
             : $this->artifactCommits->findAvailableArtifact($project, $latestRemoteCommit, $project->branch);
+        $release = $latestRemoteCommit === null
+            ? null
+            : $project->releases()->where('commit_hash', $latestRemoteCommit)->where('branch', $project->branch)->first();
 
-        return [$latestRemoteCommit, $artifact];
+        return [$latestRemoteCommit, $artifact, $release];
     }
 }

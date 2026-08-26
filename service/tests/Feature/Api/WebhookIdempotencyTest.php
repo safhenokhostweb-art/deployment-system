@@ -2,8 +2,8 @@
 
 namespace Tests\Feature\Api;
 
-use App\Models\Deployment;
 use App\Models\Project;
+use App\Models\Release;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -19,7 +19,7 @@ class WebhookIdempotencyTest extends TestCase
         return 'sha256=' . hash_hmac('sha256', $body, $secret);
     }
 
-    public function test_same_delivery_id_creates_exactly_one_deployment(): void
+    public function test_same_delivery_id_creates_exactly_one_release(): void
     {
         $project = Project::factory()->autoDeploy()->create(['branch' => 'main', 'github_webhook_secret' => 'topsecret']);
 
@@ -36,11 +36,12 @@ class WebhookIdempotencyTest extends TestCase
         $response = $this->postJson("/api/webhooks/github/{$project->project_key}", $payload, $headers);
 
         $response->assertOk();
-        $this->assertSame(1, Deployment::where('project_id', $project->id)->count());
+        $this->assertSame(1, Release::where('project_id', $project->id)->count());
+        $this->assertDatabaseCount('deployments', 0);
         $this->assertDatabaseHas('audit_log_entries', ['action' => 'webhook.duplicate_delivery_rejected']);
     }
 
-    public function test_different_delivery_ids_create_separate_deployments(): void
+    public function test_different_delivery_ids_create_separate_releases(): void
     {
         $project = Project::factory()->autoDeploy()->create(['branch' => 'main', 'github_webhook_secret' => 'topsecret']);
 
@@ -56,7 +57,8 @@ class WebhookIdempotencyTest extends TestCase
             $this->postJson("/api/webhooks/github/{$project->project_key}", $payload, $headers)->assertAccepted();
         }
 
-        $this->assertSame(2, Deployment::where('project_id', $project->id)->count());
+        $this->assertSame(2, Release::where('project_id', $project->id)->count());
+        $this->assertDatabaseCount('deployments', 0);
     }
 
     public function test_missing_delivery_header_still_processes_normally(): void
@@ -73,7 +75,8 @@ class WebhookIdempotencyTest extends TestCase
             'X-Hub-Signature-256' => $this->sign($body, 'topsecret'),
         ])->assertAccepted();
 
-        $this->assertSame(1, Deployment::where('project_id', $project->id)->count());
+        $this->assertSame(1, Release::where('project_id', $project->id)->count());
+        $this->assertDatabaseCount('deployments', 0);
         $this->assertDatabaseCount('webhook_deliveries', 0);
     }
 }

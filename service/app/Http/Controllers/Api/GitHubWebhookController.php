@@ -128,7 +128,7 @@ class GitHubWebhookController extends Controller
         ProcessGitHubWebhookPush::dispatch($project, $commitHash, $branch, $pusher);
 
         return response()->json([
-            'message' => 'Push accepted, deployment is being created',
+            'message' => 'Push accepted, release readiness is being prepared',
         ], Response::HTTP_ACCEPTED);
     }
 

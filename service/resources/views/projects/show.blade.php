@@ -393,13 +393,7 @@
             <button type="submit" name="artifact_action" value="build" id="artifact-build-button" class="btn btn-primary" @if($project->requires_complete_artifact && ($project->authoritative_build_local_agent_id === null || empty($defaultArtifactCommit['is_build_ready']) || !empty($defaultArtifactCommit['existing_artifact_id']))) disabled @endif>{{ $project->requires_complete_artifact ? __('ui.publish.artifact_button') : __('ui.publish.button') }}</button>
             @if ($project->requires_complete_artifact)
                 <button type="submit" name="artifact_action" value="use_existing" id="artifact-use-existing" class="btn" style="display:{{ !empty($defaultArtifactCommit['existing_artifact_id']) ? 'inline-flex' : 'none' }};">{{ __('ui.publish.use_existing_artifact') }}</button>
-                @if($project->requires_complete_artifact)
-                    @if(!empty($defaultArtifactCommit['existing_artifact_id']))
-                        <a class="btn" id="artifact-deploy-latest" href="{{ route('projects.deploy-latest.show', $project) }}">Deploy latest release</a>
-                    @else
-                        <button class="btn" id="artifact-deploy-latest" type="button" disabled>Deploy latest release</button>
-                    @endif
-                @endif
+                <a class="btn" id="artifact-deploy-latest" href="{{ route('projects.deploy-latest.show', $project) }}">Review &amp; Deploy Latest</a>
             @endif
         </form>
 

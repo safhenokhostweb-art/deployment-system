@@ -9,6 +9,7 @@ use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use App\Services\Deployment\Artifact\ArtifactService;
 use App\Services\Deployment\Artifact\ArtifactValidationException;
+use App\Services\Releases\ReleaseOrchestrator;
 use Illuminate\Http\Request;
 
 /**
@@ -27,6 +28,7 @@ class LocalAgentArtifactController extends Controller
 {
     public function __construct(
         private readonly ArtifactService $artifacts,
+        private readonly ReleaseOrchestrator $releases,
     ) {
     }
 
@@ -98,6 +100,12 @@ class LocalAgentArtifactController extends Controller
             // _BUILD instead of a generic "upload failed" when that's
             // what actually happened.
             return response()->json(['message' => $e->getMessage(), 'reason' => $e->reason], 422);
+        }
+
+        $release = $finalized->release
+            ?? $finalized->project->releases()->where('commit_hash', $finalized->commit_hash)->first();
+        if ($release !== null) {
+            $this->releases->syncArtifactState($release);
         }
 
         return response()->json(['status' => 'ok', 'artifact_id' => $finalized->public_id, 'size_bytes' => $finalized->size_bytes]);

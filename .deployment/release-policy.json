@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "project_key": "deployment-system",
+  "production_branch": "master",
+  "remote": "origin",
+  "allowed_release_paths": [".deployment/**", "deployment/**", "agent/**", "deployment-bootstrap/**", "deployment-local-agent/**", "docs/**", "local-agent/**", "service/**", "tools/**", ".gitignore", "README.md"],
+  "excluded_runtime_paths": ["service/.env", "service/storage/**", "service/bootstrap/cache/**", "service/vendor/**", "service/node_modules/**", "**/*.log"],
+  "required_clean_state": {
+    "no_unresolved_merge": true,
+    "no_pre_staged_changes": true,
+    "tracked_excluded_paths_must_be_clean": true,
+    "unknown_untracked_files": "block"
+  },
+  "checks": [
+    {"name": "release-tool-tests", "type": "test", "command": "php deployment/tests/run.php"},
+    {"name": "release-hub-tests", "type": "test", "working_directory": "service", "command": "php artisan test tests/Feature/Releases tests/Feature/Api/GitHubWebhookTest.php tests/Feature/Api/WebhookIdempotencyTest.php tests/Feature/Jobs/ProcessGitHubWebhookPushTest.php tests/Feature/Dashboard/SmartArtifactCommitSelectionTest.php"}
+  ],
+  "migration_policy": {
+    "paths": ["service/database/migrations/**"],
+    "review_required_patterns": ["dropColumn\\s*\\(", "dropIfExists\\s*\\(", "Schema::drop\\s*\\(", "->change\\s*\\(", "DB::statement\\s*\\("]
+  },
+  "dependency_rules": [
+    {"when": "service/composer.json", "requires": "service/composer.lock"},
+    {"when": "service/package.json", "requires": "service/package-lock.json"}
+  ],
+  "git_dependencies": [],
+  "build": {"required": true, "artifact": "server-managed-exact-commit"},
+  "health": {"required": true, "endpoint_source": "deployment-system project http_health_check"},
+  "metadata": {"local_directory": ".git/deployment/releases"}
+}

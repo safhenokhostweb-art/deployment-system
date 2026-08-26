@@ -9,6 +9,33 @@ use Illuminate\Support\Facades\DB;
 
 class ReleaseOrchestrator
 {
+    /** @param array<string, mixed> $metadata */
+    public function recordMetadata(Project $project, array $metadata): Release
+    {
+        return DB::transaction(function () use ($project, $metadata): Release {
+            $release = Release::query()->firstOrCreate(
+                ['project_id' => $project->id, 'commit_hash' => $metadata['commit_sha']],
+                [
+                    'branch' => $metadata['branch'],
+                    'status' => Release::STATUS_SOURCE_RECEIVED,
+                    'source' => 'project_contract',
+                    'source_received_at' => now(),
+                ],
+            );
+            if ($release->branch !== null && $release->branch !== $metadata['branch']) {
+                abort(409, 'Release metadata branch does not match the recorded release.');
+            }
+            if (isset($release->metadata['base_sha']) && $release->metadata['base_sha'] !== $metadata['base_sha']) {
+                abort(409, 'RELEASE METADATA MISMATCH: base SHA changed for an existing release.');
+            }
+            $release->forceFill(['branch' => $metadata['branch'], 'metadata' => $metadata])->save();
+            if ($metadata['release_ready'] !== true) {
+                return $this->markFailed($release, 'contract_not_ready', 'Project release gates did not pass.');
+            }
+            return $this->syncArtifactState($release);
+        });
+    }
+
     public function createForCommit(
         Project $project,
         string $commitHash,

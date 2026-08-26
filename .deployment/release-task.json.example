@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "task_id": "ticket-or-change-id",
+  "summary": "Short operator-facing release summary",
+  "base_sha": "40-character baseline commit SHA",
+  "owned_paths": ["path/to/exact-file.php", "path/to/owned-directory/**"],
+  "risk_flags": []
+}

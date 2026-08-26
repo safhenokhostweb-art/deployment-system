@@ -19,7 +19,7 @@ class GitHubWebhookTest extends TestCase
         return 'sha256=' . hash_hmac('sha256', $body, $secret);
     }
 
-    public function test_valid_push_to_tracked_branch_creates_pending_deployment(): void
+    public function test_valid_push_to_tracked_branch_creates_release_without_deployment(): void
     {
         $project = Project::factory()->create(['branch' => 'main', 'github_webhook_secret' => 'topsecret']);
 
@@ -40,14 +40,14 @@ class GitHubWebhookTest extends TestCase
         );
 
         $response->assertAccepted();
-        $this->assertDatabaseHas('deployments', [
+        $this->assertDatabaseHas('releases', [
             'project_id' => $project->id,
             'commit_hash' => str_repeat('a', 40),
-            'status' => Deployment::STATUS_PENDING_APPROVAL,
         ]);
+        $this->assertDatabaseCount('deployments', 0);
     }
 
-    public function test_auto_deploy_project_skips_approval(): void
+    public function test_auto_deploy_setting_cannot_bypass_release_confirmation(): void
     {
         $project = Project::factory()->autoDeploy()->create(['branch' => 'main', 'github_webhook_secret' => 'topsecret']);
 
@@ -59,10 +59,10 @@ class GitHubWebhookTest extends TestCase
             'X-Hub-Signature-256' => $this->sign($body, 'topsecret'),
         ])->assertAccepted();
 
-        $this->assertDatabaseHas('deployments', [
+        $this->assertDatabaseHas('releases', [
             'project_id' => $project->id,
-            'status' => Deployment::STATUS_QUEUED,
         ]);
+        $this->assertDatabaseCount('deployments', 0);
     }
 
     public function test_webhook_defers_artifact_required_deployment_until_artifact_build_succeeds(): void

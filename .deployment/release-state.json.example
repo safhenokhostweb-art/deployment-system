@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "project_key": "example-project",
+  "commit_sha": "40-character release commit SHA",
+  "base_sha": "40-character baseline commit SHA",
+  "branch": "main",
+  "changed_files": [],
+  "migration_files": [],
+  "test_results": [],
+  "build_result": {"required": true, "status": "pending"},
+  "risk_flags": [],
+  "created_timestamp": "2026-01-01T00:00:00Z",
+  "release_ready": true
+}

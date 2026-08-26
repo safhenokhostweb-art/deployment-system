@@ -102,23 +102,21 @@ class ReleaseOrchestratorTest extends TestCase
         $this->assertNull($artifact->fresh()->release_id);
     }
 
-    public function test_current_deployment_creation_is_unchanged_and_does_not_require_a_release(): void
+    public function test_webhook_release_preparation_does_not_create_a_deployment(): void
     {
-        $project = Project::factory()->create(['auto_deploy' => true]);
+        $project = Project::factory()->create(['auto_deploy' => true, 'requires_complete_artifact' => false]);
         $commitHash = str_repeat('f', 40);
 
-        $deployment = app(DeploymentDispatcher::class)->createFromWebhook(
-            $project,
-            $commitHash,
-            'main',
-            'dev@example.test'
+        (new \App\Jobs\ProcessGitHubWebhookPush($project, $commitHash, 'main', 'dev@example.test'))->handle(
+            app(ReleaseOrchestrator::class),
+            app(\App\Services\Publish\AuthoritativeBuildAgentResolver::class),
+            app(\App\Services\Publish\PublishJobService::class),
         );
 
-        $this->assertSame(Deployment::STATUS_QUEUED, $deployment->status);
-        $this->assertNull($deployment->release_id);
-        $this->assertDatabaseMissing('releases', [
+        $this->assertDatabaseHas('releases', [
             'project_id' => $project->id,
             'commit_hash' => $commitHash,
         ]);
+        $this->assertDatabaseCount('deployments', 0);
     }
 }

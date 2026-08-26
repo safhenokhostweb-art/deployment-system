@@ -12,12 +12,16 @@ use App\Http\Controllers\Api\LocalAgentControlJobController;
 use App\Http\Controllers\Api\LocalAgentJobController;
 use App\Http\Controllers\Api\LocalAgentProjectSyncController;
 use App\Http\Controllers\Api\LocalAgentRegistrationController;
+use App\Http\Controllers\Api\ProjectReleaseController;
 use Illuminate\Support\Facades\Route;
 
 // GitHub -> Deployment Service. Authenticated by per-project HMAC signature
 // (X-Hub-Signature-256), not by session/token, so no auth middleware here.
 Route::post('/webhooks/github/{projectKey}', [GitHubWebhookController::class, 'handle'])
     ->name('webhooks.github');
+Route::post('/projects/{projectKey}/releases', [ProjectReleaseController::class, 'store'])
+    ->middleware('throttle:30,1')
+    ->name('projects.releases.store');
 
 // A pending agent has no signing_secret yet, so this cannot sit behind
 // 'agent.signed' — it verifies its own, narrower scheme keyed by the

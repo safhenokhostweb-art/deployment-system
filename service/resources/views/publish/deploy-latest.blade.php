@@ -5,7 +5,23 @@
 @section('content')
 <x-card title="Deploy latest release">
     <p>Review the release below before creating a deployment.</p>
-    @if($artifact)
+    <p><strong>Release readiness:</strong> {{ $readiness['code'] }}</p>
+    <p>{{ $readiness['message'] }}</p>
+    @if($release && is_array($release->metadata))
+        @php($metadata = $release->metadata)
+        <dl class="definition-list">
+            <dt>Release summary</dt><dd>{{ $metadata['summary'] ?? '—' }}</dd>
+            <dt>Files changed</dt><dd>{{ count($metadata['changed_files'] ?? []) }}</dd>
+            <dt>Tests</dt><dd>{{ collect($metadata['test_results'] ?? [])->every(fn ($test) => ($test['exit_code'] ?? 1) === 0) ? 'Passed' : 'Failed' }}</dd>
+            <dt>Migration verdict</dt><dd>{{ empty($metadata['migration_files']) ? 'No migrations' : 'Safe by project policy' }}</dd>
+            <dt>Risk flags</dt><dd>{{ empty($metadata['risk_flags']) ? 'None' : implode(', ', $metadata['risk_flags']) }}</dd>
+            <dt>Health contract</dt><dd>{{ ($metadata['health_contract']['required'] ?? false) ? 'Required after deployment' : 'Not required' }}</dd>
+        </dl>
+        @if(!empty($metadata['changed_files']))
+            <details><summary>Review changes</summary><ul>@foreach($metadata['changed_files'] as $file)<li dir="ltr">{{ $file }}</li>@endforeach</ul></details>
+        @endif
+    @endif
+    @if($artifact && $readiness['deployable'])
         <dl class="definition-list">
             <dt>Project</dt><dd>{{ $project->name ?? $project->project_key }}</dd>
             <dt>Branch</dt><dd dir="ltr">{{ $artifact->branch }}</dd>
@@ -19,7 +35,7 @@
             <a class="btn" href="{{ route('projects.show', $project) }}">Cancel</a>
         </form>
     @else
-        <p class="alert alert-warning">No physically valid available Artifact exists for the latest remote production-branch commit{{ $latestRemoteCommit ? ' '.$latestRemoteCommit : '' }}. Build an Artifact first.</p>
+        <p class="alert alert-warning">{{ $readiness['code'] }}{{ $latestRemoteCommit ? ' — '.$latestRemoteCommit : '' }}</p>
         <a class="btn" href="{{ route('projects.show', $project) }}">Back to project</a>
     @endif
 </x-card>
