@@ -236,13 +236,45 @@ class ArtifactService
 
     public function findMatching(Project $project, string $commitHash, string $branch): ?Artifact
     {
-        $artifact = Artifact::where('project_id', $project->id)
+        $candidates = Artifact::where('project_id', $project->id)
             ->where('commit_hash', $commitHash)
             ->where('branch', $branch)
             ->where('status', Artifact::STATUS_AVAILABLE)
-            ->first();
+            ->latest('id')
+            ->get();
 
-        return $artifact === null ? null : $this->assertPhysicalIntegrity($artifact);
+        foreach ($candidates as $candidate) {
+            try {
+                return $this->assertPhysicalIntegrity($candidate);
+            } catch (ArtifactPhysicalIntegrityException) {
+                // A stale/missing copy must never shadow a newer valid
+                // Artifact for the same exact release identity.
+                continue;
+            }
+        }
+
+        return null;
+    }
+
+    /** Return the newest physically valid available Artifact for a project. */
+    public function findLatestValid(Project $project, ?string $branch = null): ?Artifact
+    {
+        $query = Artifact::where('project_id', $project->id)
+            ->where('status', Artifact::STATUS_AVAILABLE)
+            ->latest('id');
+        if ($branch !== null) {
+            $query->where('branch', $branch);
+        }
+
+        foreach ($query->get() as $candidate) {
+            try {
+                return $this->assertPhysicalIntegrity($candidate);
+            } catch (ArtifactPhysicalIntegrityException) {
+                continue;
+            }
+        }
+
+        return null;
     }
 
     /**

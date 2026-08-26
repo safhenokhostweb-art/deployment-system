@@ -5,10 +5,14 @@ namespace App\Services\Publish;
 use App\Models\Artifact;
 use App\Models\LocalProjectMapping;
 use App\Models\Project;
+use App\Services\Deployment\Artifact\ArtifactService;
 use App\Support\Deployment\SourceWorkspacePath;
 
 final class ArtifactCommitSelector
 {
+    public function __construct(private readonly ArtifactService $artifacts)
+    {
+    }
     public const MODE_LATEST = 'latest';
 
     public const MODE_ADVANCED = 'advanced';
@@ -75,13 +79,7 @@ final class ArtifactCommitSelector
 
     public function findAvailableArtifact(Project $project, string $commitHash, string $branch): ?Artifact
     {
-        return Artifact::query()
-            ->where('project_id', $project->id)
-            ->where('commit_hash', $commitHash)
-            ->where('branch', $branch)
-            ->where('status', Artifact::STATUS_AVAILABLE)
-            ->latest('id')
-            ->first();
+        return $this->artifacts->findMatching($project, $commitHash, $branch);
     }
 
     private function workspaceState(LocalProjectMapping $mapping): string

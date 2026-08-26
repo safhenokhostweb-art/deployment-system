@@ -8,6 +8,7 @@ use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use App\Models\PublishJob;
 use App\Services\Deployment\DeploymentDispatcher;
+use App\Services\Deployment\Artifact\ArtifactService;
 use App\Services\Publish\ArtifactCommitSelector;
 use App\Services\Publish\AuthoritativeBuildAgentResolver;
 use App\Services\Publish\PublishJobService;
@@ -29,7 +30,36 @@ class PublishController extends Controller
         private readonly ArtifactCommitSelector $artifactCommits,
         private readonly DeploymentDispatcher $deployments,
         private readonly AuthoritativeBuildAgentResolver $buildAgents,
+        private readonly ArtifactService $artifacts,
     ) {
+    }
+
+    /** Side-effect-free confirmation page for the newest valid release. */
+    public function deployLatestConfirmation(Project $project)
+    {
+        Gate::authorize('deployments.create');
+        Gate::authorize('deploy', $project);
+        $artifact = $this->artifacts->findLatestValid($project, $project->branch);
+
+        return view('publish.deploy-latest', compact('project', 'artifact'));
+    }
+
+    /** Create a deployment only after the operator explicitly confirms. */
+    public function deployLatest(Request $request, Project $project): RedirectResponse
+    {
+        Gate::authorize('deployments.create');
+        Gate::authorize('deploy', $project);
+        $artifact = $this->artifacts->findLatestValid($project, $project->branch);
+        abort_unless($artifact !== null, 409, 'No physically valid available Artifact exists for the configured branch.');
+
+        $deployment = $this->deployments->createFromExistingArtifact($project, $artifact, $request->user()->email);
+
+        return redirect()->route('deployments.show', $deployment)
+            ->with('status', __('ui.publish.deployment_created_from_artifact', [
+                'deployment' => $deployment->id,
+                'artifact' => $artifact->id,
+                'status' => $deployment->status,
+            ]));
     }
 
     public function store(Request $request, Project $project): RedirectResponse
