@@ -17,6 +17,7 @@ use App\Http\Controllers\Dashboard\OperationController;
 use App\Http\Controllers\Dashboard\ProjectController;
 use App\Http\Controllers\Dashboard\ProjectMemberController;
 use App\Http\Controllers\Dashboard\PublishController;
+use App\Http\Controllers\Dashboard\QueueReconciliationController;
 use App\Http\Controllers\Dashboard\PublishRecoveryController;
 use App\Http\Controllers\Dashboard\ReadinessController;
 use App\Http\Controllers\Dashboard\ServerController;
@@ -91,6 +92,8 @@ Route::middleware('auth')->group(function () {
     Route::post('/projects/{project}/connect-github', [ProjectController::class, 'connectGithub'])->name('projects.connect-github');
 
     Route::get('/publish-history', [PublishController::class, 'history'])->name('publish.history');
+    Route::get('/operations/queue-reconciliation', [QueueReconciliationController::class, 'index'])->name('operations.queue-reconciliation');
+    Route::post('/operations/queue-reconciliation', [QueueReconciliationController::class, 'reconcile'])->name('operations.queue-reconciliation.reconcile');
     // Root-cause fix, section 7: "بازیابی انتشارهای معلق" — global (not
     // per-agent), reuses StalePublishJobRecoveryService, same
     // 'local_agents.manage' gate as every other Local Agent admin action.
