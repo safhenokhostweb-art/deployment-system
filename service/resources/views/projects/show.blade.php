@@ -369,7 +369,7 @@
                 @php($defaultArtifactCommit = $artifactCommitOptions[0] ?? [])
                 @php($workspaceStateLabels = ['clean' => '✓ '.__('ui.publish.workspace_clean'), 'dirty' => __('ui.publish.workspace_dirty'), 'not_reported' => __('ui.publish.workspace_not_reported'), 'branch_mismatch' => __('ui.publish.workspace_branch_mismatch'), 'invalid_source' => 'مسیر source workspace نامعتبر یا production-like است'])
                 <input type="hidden" name="commit_selection_mode" id="commit-selection-mode" value="latest">
-                <input type="hidden" name="commit_hash" id="commit-hash" value="{{ $defaultArtifactCommit['workspace_sha'] ?? '' }}">
+                <input type="hidden" name="commit_hash" id="commit-hash" value="{{ $defaultArtifactCommit['remote_sha'] ?? '' }}">
                 <div id="artifact-commit-selector" style="flex-basis:100%;border:1px solid var(--border, #d1d5db);border-radius:0.5rem;padding:0.8rem;">
                     <strong>{{ __('ui.publish.latest_verified_commit') }}</strong>
                     <dl style="display:grid;grid-template-columns:max-content 1fr;gap:0.35rem 0.8rem;margin:0.65rem 0;">
@@ -378,9 +378,9 @@
                         <dt>{{ __('ui.publish.workspace_head') }}</dt><dd id="artifact-workspace-head" dir="ltr" style="margin:0;">{{ isset($defaultArtifactCommit['workspace_sha']) ? ($defaultArtifactCommit['workspace_short_sha'].' ('.$defaultArtifactCommit['workspace_sha'].')') : '—' }}</dd>
                         <dt>{{ __('ui.publish.last_sync') }}</dt><dd id="artifact-last-sync" style="margin:0;">{{ $defaultArtifactCommit['reported_at_human'] ?? $defaultArtifactCommit['reported_at'] ?? '—' }}</dd>
                         <dt>{{ __('ui.publish.workspace_status') }}</dt><dd id="artifact-workspace-status" style="margin:0;">{{ $workspaceStateLabels[$defaultArtifactCommit['workspace_state'] ?? ''] ?? '—' }}</dd>
-                        <dt>{{ __('ui.publish.github_head') }}</dt><dd id="artifact-github-head" dir="ltr" style="margin:0;">{{ isset($defaultArtifactCommit['github_sha']) ? ($defaultArtifactCommit['github_short_sha'].' ('.$defaultArtifactCommit['github_sha'].')') : __('ui.publish.github_unavailable') }}</dd>
+                        <dt>{{ __('ui.publish.github_head') }}</dt><dd id="artifact-github-head" dir="ltr" style="margin:0;">{{ isset($defaultArtifactCommit['remote_sha']) ? ($defaultArtifactCommit['remote_short_sha'].' ('.$defaultArtifactCommit['remote_sha'].')') : __('ui.publish.github_unavailable') }}</dd>
                     </dl>
-                    <p id="artifact-github-warning" class="muted" style="display:{{ ($defaultArtifactCommit['github_matches_workspace'] ?? null) === false ? 'block' : 'none' }};color:#b45309;">{{ __('ui.publish.github_workspace_mismatch') }}</p>
+                    <p id="artifact-github-warning" class="muted" style="display:{{ ($defaultArtifactCommit['remote_matches_workspace'] ?? null) === false ? 'block' : 'none' }};color:#b45309;">{{ __('ui.publish.github_workspace_mismatch') }}</p>
                     <p id="artifact-existing" style="display:{{ !empty($defaultArtifactCommit['existing_artifact_id']) ? 'block' : 'none' }};color:#047857;">{{ __('ui.publish.artifact_already_exists') }}</p>
                     <details id="artifact-advanced" style="margin-top:0.65rem;">
                         <summary>{{ __('ui.publish.advanced_choose_commit') }}</summary>
@@ -390,11 +390,15 @@
                     </details>
                 </div>
             @endif
-            <button type="submit" name="artifact_action" value="build" id="artifact-build-button" class="btn btn-primary" @if($project->requires_complete_artifact && ($project->authoritative_build_local_agent_id === null || empty($defaultArtifactCommit['is_verified']) || !empty($defaultArtifactCommit['existing_artifact_id']))) disabled @endif>{{ $project->requires_complete_artifact ? __('ui.publish.artifact_button') : __('ui.publish.button') }}</button>
+            <button type="submit" name="artifact_action" value="build" id="artifact-build-button" class="btn btn-primary" @if($project->requires_complete_artifact && ($project->authoritative_build_local_agent_id === null || empty($defaultArtifactCommit['is_build_ready']) || !empty($defaultArtifactCommit['existing_artifact_id']))) disabled @endif>{{ $project->requires_complete_artifact ? __('ui.publish.artifact_button') : __('ui.publish.button') }}</button>
             @if ($project->requires_complete_artifact)
                 <button type="submit" name="artifact_action" value="use_existing" id="artifact-use-existing" class="btn" style="display:{{ !empty($defaultArtifactCommit['existing_artifact_id']) ? 'inline-flex' : 'none' }};">{{ __('ui.publish.use_existing_artifact') }}</button>
                 @if($project->requires_complete_artifact)
-                    <a class="btn" href="{{ route('projects.deploy-latest.show', $project) }}">Deploy latest release</a>
+                    @if(!empty($defaultArtifactCommit['existing_artifact_id']))
+                        <a class="btn" id="artifact-deploy-latest" href="{{ route('projects.deploy-latest.show', $project) }}">Deploy latest release</a>
+                    @else
+                        <button class="btn" id="artifact-deploy-latest" type="button" disabled>Deploy latest release</button>
+                    @endif
                 @endif
             @endif
         </form>
@@ -427,14 +431,14 @@
                         text('artifact-workspace-head', option.workspace_sha ? `${option.workspace_short_sha} (${option.workspace_sha})` : null);
                         text('artifact-last-sync', option.reported_at_human || option.reported_at);
                         text('artifact-workspace-status', workspaceStateLabels[option.workspace_state]);
-                        text('artifact-github-head', option.github_sha ? `${option.github_short_sha} (${option.github_sha})` : '{{ __('ui.publish.github_unavailable') }}');
-                        document.getElementById('artifact-github-warning').style.display = option.github_matches_workspace === false ? 'block' : 'none';
+                        text('artifact-github-head', option.remote_sha ? `${option.remote_short_sha} (${option.remote_sha})` : '{{ __('ui.publish.github_unavailable') }}');
+                        document.getElementById('artifact-github-warning').style.display = option.remote_matches_workspace === false ? 'block' : 'none';
                         document.getElementById('artifact-existing').style.display = option.existing_artifact_id ? 'block' : 'none';
 
                         if (!advanced.open) {
                             mode.value = 'latest';
-                            commit.value = option.workspace_sha || '';
-                            build.disabled = !authoritativeConfigured || !option.is_verified || Boolean(option.existing_artifact_id);
+                            commit.value = option.remote_sha || '';
+                            build.disabled = !authoritativeConfigured || !option.is_build_ready || Boolean(option.existing_artifact_id);
                             reuse.style.display = option.existing_artifact_id ? 'inline-flex' : 'none';
                         }
                     }

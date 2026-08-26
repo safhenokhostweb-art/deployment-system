@@ -286,12 +286,14 @@ class ProjectController extends Controller
 
         try {
             $token = $this->github->createInstallationToken($project->githubAccount->installation_id)['token'];
-            $heads = [];
-            foreach ($project->localProjectMappings->map->effectiveBranch()->unique() as $branch) {
-                $heads[$branch] = $this->github->getBranchHead($token, $repositoryParts[0], $repositoryParts[1], $branch);
-            }
-
-            return $heads;
+            return [
+                $project->branch => $this->github->getBranchHead(
+                    $token,
+                    $repositoryParts[0],
+                    $repositoryParts[1],
+                    $project->branch,
+                ),
+            ];
         } catch (GitHubApiException) {
             return [];
         }

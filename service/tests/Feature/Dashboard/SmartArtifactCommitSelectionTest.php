@@ -46,18 +46,88 @@ class SmartArtifactCommitSelectionTest extends TestCase
         $this->assertSame(str_repeat('a', 40), PublishJob::sole()->reviewed_head_sha);
     }
 
-    public function test_stale_latest_sha_is_rejected(): void
+    public function test_latest_mode_ignores_submitted_sha_and_targets_reported_remote_head(): void
     {
         [$user, $project, $mapping] = $this->verifiedProject('customer-site', str_repeat('a', 40));
+        $mapping->update(['remote_tracking_sha' => str_repeat('c', 40)]);
 
         $this->actingAs($user)->post(route('projects.publish', $project), [
             'local_project_mapping_id' => $mapping->id,
             'commit_selection_mode' => 'latest',
             'commit_hash' => str_repeat('b', 40),
-        ])->assertStatus(422)
-            ->assertSee('The selected commit is not the current verified source workspace commit.');
+        ])->assertRedirect();
 
+        $this->assertSame(str_repeat('c', 40), PublishJob::sole()->reviewed_head_sha);
+    }
+
+    public function test_remote_main_newer_than_workspace_without_exact_artifact_enables_build(): void
+    {
+        [$user, $project, $mapping] = $this->verifiedProject('customer-site', str_repeat('a', 40));
+        $remote = str_repeat('b', 40);
+        $mapping->update(['remote_tracking_sha' => $remote]);
+
+        $response = $this->actingAs($user)->get(route('projects.show', $project));
+
+        $response->assertOk()->assertSee($remote);
+        $this->assertSelectorTargets($response->getContent(), $remote);
+        $this->assertBuildButtonEnabled($response->getContent());
+        $this->assertDeployLatestDisabled($response->getContent());
         $this->assertDatabaseCount('publish_jobs', 0);
+        $this->assertDatabaseCount('deployments', 0);
+    }
+
+    public function test_valid_artifact_for_older_commit_does_not_shadow_new_remote_head(): void
+    {
+        [$user, $project, $mapping] = $this->verifiedProject('customer-site', str_repeat('a', 40));
+        $remote = str_repeat('b', 40);
+        $mapping->update(['remote_tracking_sha' => $remote]);
+        $olderArtifact = Artifact::factory()->physicallyAvailable()->create([
+            'project_id' => $project->id,
+            'commit_hash' => str_repeat('a', 40),
+            'branch' => 'main',
+            'status' => Artifact::STATUS_AVAILABLE,
+        ]);
+        Deployment::factory()->create([
+            'project_id' => $project->id,
+            'server_id' => $project->server_id,
+            'commit_hash' => str_repeat('a', 40),
+            'branch' => 'main',
+            'status' => Deployment::STATUS_SUCCEEDED,
+            'artifact_id' => $olderArtifact->id,
+        ]);
+        PublishJob::factory()->create([
+            'project_id' => $project->id,
+            'local_agent_id' => $mapping->local_agent_id,
+            'action' => PublishJob::ACTION_BUILD_ARTIFACT,
+            'status' => PublishJob::STATUS_SUCCEEDED,
+            'reviewed_head_sha' => str_repeat('a', 40),
+            'result_commit_hash' => str_repeat('a', 40),
+        ]);
+
+        $response = $this->actingAs($user)->get(route('projects.show', $project));
+
+        $this->assertSelectorTargets($response->getContent(), $remote);
+        $this->assertBuildButtonEnabled($response->getContent());
+        $this->assertExistingArtifactIndicatorHidden($response->getContent());
+        $this->assertDatabaseCount('deployments', 1);
+        $this->assertDatabaseCount('publish_jobs', 1);
+    }
+
+    public function test_missing_physical_file_for_exact_artifact_keeps_build_enabled(): void
+    {
+        [$user, $project] = $this->verifiedProject('customer-site', str_repeat('a', 40));
+        Artifact::factory()->create([
+            'project_id' => $project->id,
+            'commit_hash' => str_repeat('a', 40),
+            'branch' => 'main',
+            'status' => Artifact::STATUS_AVAILABLE,
+        ]);
+
+        $response = $this->actingAs($user)->get(route('projects.show', $project));
+
+        $this->assertBuildButtonEnabled($response->getContent());
+        $this->assertDeployLatestDisabled($response->getContent());
+        $this->assertExistingArtifactIndicatorHidden($response->getContent());
     }
 
     public function test_github_branch_head_is_compared_with_workspace_head(): void
@@ -72,10 +142,13 @@ class SmartArtifactCommitSelectionTest extends TestCase
             $mock->shouldReceive('getBranchHead')->once()->with('test-token', 'acme', 'customer-site', 'main')->andReturn(str_repeat('b', 40));
         });
 
-        $this->actingAs($user)->get(route('projects.show', $project))
+        $response = $this->actingAs($user)->get(route('projects.show', $project))
             ->assertOk()
             ->assertSee(str_repeat('b', 40))
             ->assertSee(__('ui.publish.github_workspace_mismatch'));
+
+        $this->assertSelectorTargets($response->getContent(), str_repeat('b', 40));
+        $this->assertBuildButtonEnabled($response->getContent());
     }
 
     public function test_existing_available_artifact_creates_a_new_deployment_with_the_artifact_and_no_build_job(): void
@@ -91,6 +164,16 @@ class SmartArtifactCommitSelectionTest extends TestCase
         $this->actingAs($user)->get(route('projects.show', $project))
             ->assertSee(__('ui.publish.artifact_already_exists'))
             ->assertSee(__('ui.publish.use_existing_artifact'));
+
+        $response = $this->actingAs($user)->get(route('projects.show', $project));
+        $this->assertBuildButtonDisabled($response->getContent());
+        $this->assertDeployLatestEnabled($response->getContent());
+
+        $this->actingAs($user)->get(route('projects.deploy-latest.show', $project))
+            ->assertOk()
+            ->assertSee(str_repeat('c', 40))
+            ->assertSee('#'.$artifact->id);
+        $this->assertDatabaseCount('deployments', 0);
 
         $response = $this->actingAs($user)->post(route('projects.publish', $project), [
             'local_project_mapping_id' => $mapping->id,
@@ -177,6 +260,43 @@ class SmartArtifactCommitSelectionTest extends TestCase
         $job = PublishJob::sole();
         $this->assertSame(PublishJob::ACTION_BUILD_ARTIFACT, $job->action);
         $this->assertSame(str_repeat('e', 40), $job->reviewed_head_sha);
+    }
+
+    public function test_customer_site_and_saas_platform_share_remote_head_selection_logic(): void
+    {
+        foreach (['customer-site', 'saas-platform'] as $projectKey) {
+            [, $project, $mapping] = $this->verifiedProject($projectKey, str_repeat('a', 40));
+            $mapping->update(['remote_tracking_sha' => str_repeat('b', 40)]);
+
+            $option = app(\App\Services\Publish\ArtifactCommitSelector::class)->options($project->fresh()->load('localProjectMappings.localAgent'))[0];
+
+            $this->assertSame(str_repeat('b', 40), $option['remote_sha']);
+            $this->assertTrue($option['is_build_ready']);
+            $this->assertNull($option['existing_artifact_id']);
+        }
+    }
+
+    public function test_deploy_latest_rejects_older_artifact_and_get_is_side_effect_free(): void
+    {
+        [$user, $project, $mapping] = $this->verifiedProject('customer-site', str_repeat('a', 40));
+        $mapping->update(['remote_tracking_sha' => str_repeat('b', 40)]);
+        Artifact::factory()->physicallyAvailable()->create([
+            'project_id' => $project->id,
+            'commit_hash' => str_repeat('a', 40),
+            'branch' => 'main',
+            'status' => Artifact::STATUS_AVAILABLE,
+        ]);
+
+        $this->actingAs($user)->get(route('projects.deploy-latest.show', $project))
+            ->assertOk()
+            ->assertSee(str_repeat('b', 40))
+            ->assertSee('Build an Artifact first.');
+
+        $this->assertDatabaseCount('deployments', 0);
+        $this->assertDatabaseCount('publish_jobs', 0);
+
+        $this->actingAs($user)->post(route('projects.deploy-latest', $project))->assertStatus(409);
+        $this->assertDatabaseCount('deployments', 0);
     }
 
     public function test_customer_site_uses_its_isolated_workspace_in_commit_selector(): void
@@ -283,6 +403,45 @@ class SmartArtifactCommitSelectionTest extends TestCase
         $end = strpos($html, '</form>', $start);
 
         return substr($html, $start, $end - $start);
+    }
+
+    private function assertSelectorTargets(string $html, string $sha): void
+    {
+        $this->assertStringContainsString('id="commit-hash" value="'.$sha.'"', $html);
+    }
+
+    private function assertExistingArtifactIndicatorHidden(string $html): void
+    {
+        $this->assertMatchesRegularExpression('/<p[^>]*id="artifact-existing"[^>]*style="[^"]*display:none[^"]*"/', $html);
+    }
+
+    private function assertBuildButtonEnabled(string $html): void
+    {
+        $this->assertButtonDisabledState($html, 'artifact-build-button', false);
+    }
+
+    private function assertBuildButtonDisabled(string $html): void
+    {
+        $this->assertButtonDisabledState($html, 'artifact-build-button', true);
+    }
+
+    private function assertDeployLatestEnabled(string $html): void
+    {
+        $this->assertMatchesRegularExpression('/<a[^>]*id="artifact-deploy-latest"[^>]*>/', $html);
+    }
+
+    private function assertDeployLatestDisabled(string $html): void
+    {
+        $this->assertButtonDisabledState($html, 'artifact-deploy-latest', true);
+    }
+
+    private function assertButtonDisabledState(string $html, string $id, bool $disabled): void
+    {
+        $matched = preg_match('/<button[^>]*id="'.preg_quote($id, '/').'"[^>]*>/', $html, $matches);
+        $this->assertSame(1, $matched, "Button {$id} was not rendered.");
+        $disabled
+            ? $this->assertStringContainsString('disabled', $matches[0])
+            : $this->assertStringNotContainsString('disabled', $matches[0]);
     }
 
     private function assertExistingArtifactDeploymentFor(string $projectKey, string $sha, string $productionPath): void

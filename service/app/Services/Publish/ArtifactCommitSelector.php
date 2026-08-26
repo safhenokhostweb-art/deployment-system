@@ -18,9 +18,10 @@ final class ArtifactCommitSelector
     public const MODE_ADVANCED = 'advanced';
 
     /**
-     * Build the read model used by the Artifact commit selector. The Local
-     * Agent heartbeat is authoritative for the workspace state; GitHub HEAD
-     * is comparison-only and never silently replaces the workspace commit.
+     * Build the read model used by the Artifact commit selector. Normal
+     * latest-release builds target the exact remote production-branch HEAD.
+     * The workspace HEAD remains health/evidence only and must never shadow
+     * a newer remote commit.
      *
      * @param  array<string, string|null>  $githubHeadsByBranch
      * @return array<int, array<string, mixed>>
@@ -32,12 +33,13 @@ final class ArtifactCommitSelector
             : $project->localProjectMappings;
 
         return $mappings->map(function (LocalProjectMapping $mapping) use ($project, $githubHeadsByBranch): array {
-            $branch = $mapping->effectiveBranch();
+            $branch = $project->branch;
             $workspaceSha = $this->validSha($mapping->local_head_sha) ? $mapping->local_head_sha : null;
             $githubSha = $githubHeadsByBranch[$branch] ?? null;
-            $state = $this->workspaceState($mapping);
+            $remoteSha = $this->latestRemoteCommit($mapping, $githubSha);
+            $state = $this->workspaceState($mapping, $branch);
             $reportedSource = $this->reportedSourcePath($mapping);
-            $artifact = $workspaceSha === null ? null : $this->findAvailableArtifact($project, $workspaceSha, $branch);
+            $artifact = $remoteSha === null ? null : $this->findAvailableArtifact($project, $remoteSha, $branch);
 
             return [
                 'mapping_id' => $mapping->id,
@@ -50,9 +52,13 @@ final class ArtifactCommitSelector
                 'reported_at_human' => $mapping->reported_at?->diffForHumans(),
                 'workspace_state' => $state,
                 'is_verified' => $state === 'clean',
+                'is_build_ready' => $state === 'clean' && $remoteSha !== null,
                 'github_sha' => $githubSha,
                 'github_short_sha' => $githubSha === null ? null : substr($githubSha, 0, 12),
-                'github_matches_workspace' => $githubSha === null || $workspaceSha === null ? null : hash_equals($githubSha, $workspaceSha),
+                'remote_sha' => $remoteSha,
+                'remote_short_sha' => $remoteSha === null ? null : substr($remoteSha, 0, 12),
+                'remote_source' => $this->validSha($githubSha) ? 'github' : ($remoteSha === null ? null : 'agent'),
+                'remote_matches_workspace' => $remoteSha === null || $workspaceSha === null ? null : hash_equals($remoteSha, $workspaceSha),
                 'existing_artifact_id' => $artifact?->id,
             ];
         })->values()->all();
@@ -68,18 +74,28 @@ final class ArtifactCommitSelector
             return $selectedCommit;
         }
 
-        if ($latestRemoteCommit !== null) {
-            abort_unless($this->validSha($latestRemoteCommit), 422, 'The configured remote branch returned an invalid commit SHA.');
-            return strtolower($latestRemoteCommit);
+        abort_unless($this->workspaceState($mapping, $mapping->project->branch) === 'clean', 422, 'The source workspace does not currently have a clean, verified state for the production branch. Wait for Local Agent sync.');
+
+        $remoteCommit = $this->latestRemoteCommit($mapping, $latestRemoteCommit);
+        abort_unless($remoteCommit !== null, 422, 'The latest remote production-branch commit is not available. Wait for Local Agent sync or restore GitHub access.');
+
+        return $remoteCommit;
+    }
+
+    /** Resolve the exact remote branch HEAD without falling back to workspace HEAD. */
+    public function latestRemoteCommit(LocalProjectMapping $mapping, ?string $githubCommit = null): ?string
+    {
+        if ($githubCommit !== null) {
+            return $this->validSha($githubCommit) ? strtolower($githubCommit) : null;
         }
 
-        $currentCommit = $mapping->local_head_sha;
-        abort_unless($this->workspaceState($mapping) === 'clean' && $this->validSha($currentCommit), 422, 'The source workspace does not currently have a clean, verified commit. Wait for Local Agent sync.');
+        if ($mapping->effectiveBranch() !== $mapping->project->branch
+            || $mapping->reported_branch !== $mapping->project->branch
+            || ! $this->validSha($mapping->remote_tracking_sha)) {
+            return null;
+        }
 
-        $selectedCommit ??= $currentCommit;
-        abort_unless($this->validSha($selectedCommit) && hash_equals($currentCommit, $selectedCommit), 422, 'The selected commit is not the current verified source workspace commit.');
-
-        return $selectedCommit;
+        return strtolower($mapping->remote_tracking_sha);
     }
 
     public function findAvailableArtifact(Project $project, string $commitHash, string $branch): ?Artifact
@@ -87,7 +103,7 @@ final class ArtifactCommitSelector
         return $this->artifacts->findMatching($project, $commitHash, $branch);
     }
 
-    private function workspaceState(LocalProjectMapping $mapping): string
+    private function workspaceState(LocalProjectMapping $mapping, ?string $expectedBranch = null): string
     {
         $source = $this->reportedSourcePath($mapping);
         if ($source === '' || SourceWorkspacePath::isProductionLike($source)) {
@@ -98,7 +114,8 @@ final class ArtifactCommitSelector
             return 'not_reported';
         }
 
-        if ($mapping->reported_branch !== $mapping->effectiveBranch()) {
+        if ($mapping->effectiveBranch() !== ($expectedBranch ?? $mapping->effectiveBranch())
+            || $mapping->reported_branch !== ($expectedBranch ?? $mapping->effectiveBranch())) {
             return 'branch_mismatch';
         }
 

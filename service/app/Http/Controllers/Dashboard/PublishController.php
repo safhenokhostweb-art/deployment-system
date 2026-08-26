@@ -42,9 +42,9 @@ class PublishController extends Controller
     {
         Gate::authorize('deployments.create');
         Gate::authorize('deploy', $project);
-        $artifact = $this->artifacts->findLatestValid($project, $project->branch);
+        [$latestRemoteCommit, $artifact] = $this->latestRemoteArtifact($project);
 
-        return view('publish.deploy-latest', compact('project', 'artifact'));
+        return view('publish.deploy-latest', compact('project', 'artifact', 'latestRemoteCommit'));
     }
 
     /** Create a deployment only after the operator explicitly confirms. */
@@ -52,8 +52,9 @@ class PublishController extends Controller
     {
         Gate::authorize('deployments.create');
         Gate::authorize('deploy', $project);
-        $artifact = $this->artifacts->findLatestValid($project, $project->branch);
-        abort_unless($artifact !== null, 409, 'No physically valid available Artifact exists for the configured branch.');
+        [$latestRemoteCommit, $artifact] = $this->latestRemoteArtifact($project);
+        abort_unless($latestRemoteCommit !== null, 409, 'The latest remote production-branch commit is unavailable.');
+        abort_unless($artifact !== null, 409, 'No physically valid available Artifact exists for the latest remote production-branch commit.');
 
         $deployment = $this->deployments->createFromExistingArtifact($project, $artifact, $request->user()->email);
 
@@ -309,5 +310,25 @@ class PublishController extends Controller
         } catch (GitHubApiException $e) {
             abort(502, 'Unable to resolve the configured remote branch HEAD.');
         }
+    }
+
+    /** @return array{0: string|null, 1: \App\Models\Artifact|null} */
+    private function latestRemoteArtifact(Project $project): array
+    {
+        $mapping = LocalProjectMapping::query()
+            ->where('project_id', $project->id)
+            ->where('local_agent_id', $project->authoritative_build_local_agent_id)
+            ->with('project')
+            ->first();
+
+        $githubCommit = $this->remoteBranchHead($project, $project->branch);
+        $latestRemoteCommit = $mapping === null
+            ? $githubCommit
+            : $this->artifactCommits->latestRemoteCommit($mapping, $githubCommit);
+        $artifact = $latestRemoteCommit === null
+            ? null
+            : $this->artifactCommits->findAvailableArtifact($project, $latestRemoteCommit, $project->branch);
+
+        return [$latestRemoteCommit, $artifact];
     }
 }

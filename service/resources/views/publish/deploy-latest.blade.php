@@ -19,7 +19,7 @@
             <a class="btn" href="{{ route('projects.show', $project) }}">Cancel</a>
         </form>
     @else
-        <p class="alert alert-warning">No physically valid available Artifact exists for this branch. Build an Artifact first.</p>
+        <p class="alert alert-warning">No physically valid available Artifact exists for the latest remote production-branch commit{{ $latestRemoteCommit ? ' '.$latestRemoteCommit : '' }}. Build an Artifact first.</p>
         <a class="btn" href="{{ route('projects.show', $project) }}">Back to project</a>
     @endif
 </x-card>
