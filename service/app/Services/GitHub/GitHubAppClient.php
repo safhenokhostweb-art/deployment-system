@@ -140,6 +140,60 @@ class GitHubAppClient
     }
 
     /**
+     * The SHA of $sha's own first parent, or null for a root commit with
+     * none. Used to derive an authoritative base_sha for exact-commit
+     * release metadata — never trusted from operator/browser input, since
+     * that would let an admin fabricate an arbitrary base for a release.
+     */
+    public function getCommitParent(string $installationToken, string $owner, string $repo, string $sha): ?string
+    {
+        $response = Http::withToken($installationToken)
+            ->withHeaders(['Accept' => 'application/vnd.github+json', 'X-GitHub-Api-Version' => '2022-11-28'])
+            ->get(self::API_BASE . "/repos/{$owner}/{$repo}/commits/" . rawurlencode($sha));
+
+        if ($response->failed()) {
+            throw new GitHubApiException('Failed to look up commit: ' . $this->summarizeError($response));
+        }
+
+        $parentSha = $response->json('parents.0.sha');
+        if ($parentSha === null) {
+            return null;
+        }
+        if (!is_string($parentSha) || preg_match('/^[0-9a-f]{40}$/', $parentSha) !== 1) {
+            throw new GitHubApiException('GitHub returned an invalid parent commit SHA.');
+        }
+
+        return $parentSha;
+    }
+
+    /**
+     * The authoritative changed-file list between two commits, sorted,
+     * exactly as GitHub's own compare view reports them. This is the one
+     * source release metadata backfill ever uses for `changed_files` —
+     * never an operator-submitted list, so it can never be fabricated.
+     *
+     * @return array<int, string>
+     */
+    public function compareCommits(string $installationToken, string $owner, string $repo, string $base, string $head): array
+    {
+        $response = Http::withToken($installationToken)
+            ->withHeaders(['Accept' => 'application/vnd.github+json', 'X-GitHub-Api-Version' => '2022-11-28'])
+            ->get(self::API_BASE . "/repos/{$owner}/{$repo}/compare/" . rawurlencode($base) . '...' . rawurlencode($head));
+
+        if ($response->failed()) {
+            throw new GitHubApiException('Failed to compare commits: ' . $this->summarizeError($response));
+        }
+
+        $files = array_map(
+            static fn (array $file): string => (string) $file['filename'],
+            $response->json('files', []),
+        );
+        sort($files, SORT_STRING);
+
+        return $files;
+    }
+
+    /**
      * Registers the project's existing per-project webhook (URL + secret
      * are unchanged — see App\Http\Controllers\Api\GitHubWebhookController)
      * on the repository via the API, instead of asking the operator to

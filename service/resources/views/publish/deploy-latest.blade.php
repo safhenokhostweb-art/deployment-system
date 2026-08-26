@@ -37,6 +37,11 @@
     @else
         <p class="alert alert-warning">{{ $readiness['code'] }}{{ $latestRemoteCommit ? ' — '.$latestRemoteCommit : '' }}</p>
         <a class="btn" href="{{ route('projects.show', $project) }}">Back to project</a>
+        @can('releases.backfill')
+            @if($artifact)
+                <a class="btn" href="{{ route('projects.release-backfill.show', $project) }}">Backfill release metadata</a>
+            @endif
+        @endcan
     @endif
 </x-card>
 @endsection

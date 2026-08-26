@@ -20,6 +20,7 @@ use App\Http\Controllers\Dashboard\PublishController;
 use App\Http\Controllers\Dashboard\QueueReconciliationController;
 use App\Http\Controllers\Dashboard\PublishRecoveryController;
 use App\Http\Controllers\Dashboard\ReadinessController;
+use App\Http\Controllers\Dashboard\ReleaseBackfillController;
 use App\Http\Controllers\Dashboard\ServerController;
 use App\Http\Controllers\Dashboard\UserController;
 use Illuminate\Support\Facades\Route;
@@ -107,6 +108,8 @@ Route::middleware('auth')->group(function () {
     Route::post('/projects/{project}/publish', [PublishController::class, 'store'])->name('projects.publish');
     Route::get('/projects/{project}/deploy-latest', [PublishController::class, 'deployLatestConfirmation'])->name('projects.deploy-latest.show');
     Route::post('/projects/{project}/deploy-latest', [PublishController::class, 'deployLatest'])->name('projects.deploy-latest');
+    Route::get('/projects/{project}/release-backfill', [ReleaseBackfillController::class, 'show'])->name('projects.release-backfill.show');
+    Route::post('/projects/{project}/release-backfill', [ReleaseBackfillController::class, 'store'])->name('projects.release-backfill.store');
     Route::post('/projects/{project}/publish/{publishJob}/approve', [PublishController::class, 'approve'])->name('projects.publish.approve');
     Route::post('/projects/{project}/publish/{publishJob}/refresh-review-evidence', [PublishController::class, 'refreshReviewEvidence'])->name('projects.publish.refresh-review-evidence');
     Route::post('/projects/{project}/publish/{publishJob}/retry', [PublishController::class, 'retry'])->name('projects.publish.retry');
