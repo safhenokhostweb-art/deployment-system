@@ -3,6 +3,7 @@
 return [
 
     'common' => [
+        'skip_to_content' => 'Skip to main content',
         'name' => 'Name',
         'status' => 'Status',
         'project' => 'Project',

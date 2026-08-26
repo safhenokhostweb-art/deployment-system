@@ -36,6 +36,18 @@ class OperationsCommandCenterTest extends TestCase
             ->assertForbidden();
     }
 
+    public function test_admin_can_discover_queue_reconciliation_from_operations(): void
+    {
+        $response = $this->actingAs($this->admin())->get(route('operations.index'));
+        $response->assertOk()->assertSee(route('operations.queue-reconciliation'), false)->assertSee(__('nav.queue_reconciliation'));
+    }
+
+    public function test_non_manager_does_not_see_queue_reconciliation_link(): void
+    {
+        $response = $this->actingAs(User::factory()->create(['role' => User::ROLE_VIEWER]))->get(route('operations.index'));
+        $response->assertOk()->assertDontSee(route('operations.queue-reconciliation'), false);
+    }
+
     public function test_operator_can_execute_a_server_group_operation(): void
     {
         $operator = User::factory()->create(['role' => User::ROLE_OPERATOR]);

@@ -6,6 +6,10 @@
 <h1>{{ __('ui.operations.title') }}</h1>
 <p class="muted" style="margin-top:-0.6rem;">{{ __('ui.operations.intro') }}</p>
 
+@can('local_agents.manage')
+    <p style="margin:0 0 1rem;"><a class="btn btn-small" href="{{ route('operations.queue-reconciliation') }}">{{ __('nav.queue_reconciliation') }}</a></p>
+@endcan
+
 @forelse ($servers as $row)
     @php
         $server = $row['server'];

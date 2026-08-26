@@ -49,6 +49,16 @@ return [
     'yes' => 'Yes',
     'no' => 'No',
 
+    // Semantic UI presentation states (no backend status changes)
+    'transferring' => 'Transferring',
+    'verified' => 'Verified',
+    'uploading' => 'Uploading',
+    'available' => 'Available',
+    'expired' => 'Expired',
+    'missing' => 'Missing',
+    'outdated' => 'Outdated',
+    'unhealthy' => 'Unhealthy',
+
     // Phase 4-L Readiness page
     'connected' => 'Connected',
     'not_connected' => 'Not connected',

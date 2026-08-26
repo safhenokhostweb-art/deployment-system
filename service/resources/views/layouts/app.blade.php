@@ -49,15 +49,15 @@
 
         :root { color-scheme: light dark; }
         * { box-sizing: border-box; }
-        html, body { font-family: 'Vazirmatn', Tahoma, "Segoe UI", Arial, sans-serif; }
+        html, body { font-family: var(--ui-font-sans, 'Vazirmatn', Tahoma, "Segoe UI", Arial, sans-serif); }
         /* Form controls don't inherit body's font in every browser's UA
            stylesheet by default — stated explicitly rather than relying on
            inheritance, per Task 2's own list (button/input/textarea/select/table). */
         button, input, textarea, select, table { font-family: inherit; }
-        body { margin: 0; background: #f5f6f8; color: #1c1e21; }
+        body { margin: 0; background: var(--ui-canvas, #f5f6f8); color: var(--ui-text, #1c1e21); }
         .ltr-inline { unicode-bidi: isolate; direction: ltr; display: inline-block; }
 
-        header.topbar { background: #1c2733; color: #fff; padding: 0.9rem 1.5rem; display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+        header.topbar { background: var(--ui-brand, #1c2733); color: #fff; padding: 0.9rem 1.5rem; display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
         header.topbar a { color: #fff; text-decoration: none; font-weight: 600; }
         .topbar-user { display: flex; align-items: center; gap: 0.9rem; font-size: 0.85rem; color: #cfd8e3; }
         .system-status { font-size: 0.8rem; color: #cfd8e3; }
@@ -66,17 +66,17 @@
         .app-shell { display: flex; align-items: flex-start; max-width: 1300px; margin: 0 auto; }
         nav.sidebar { width: 210px; flex-shrink: 0; padding: 1.25rem 0.75rem; }
         nav.sidebar a, nav.sidebar span.disabled { display: block; padding: 0.55rem 0.8rem; margin-bottom: 0.2rem; border-radius: 6px; color: #33404d; text-decoration: none; font-size: 0.9rem; }
-        nav.sidebar a:hover { background: #e9edf2; }
+        nav.sidebar a:hover { background: var(--ui-neutral-bg, #e9edf2); }
         nav.sidebar span.disabled { color: #9aa4af; display: flex; justify-content: space-between; align-items: center; }
         nav.sidebar .soon-badge { font-size: 0.68rem; background: #eee; color: #888; border-radius: 999px; padding: 0.1rem 0.5rem; }
 
         main { flex: 1; min-width: 0; margin: 1.5rem; padding: 0 0.5rem; }
         main.guest-main { max-width: 380px; margin: 3rem auto; }
 
-        .card { background: #fff; border: 1px solid #e1e4e8; border-radius: 8px; padding: 1.25rem; margin-bottom: 1.25rem; }
+        .card { background: var(--ui-surface, #fff); border: 1px solid var(--ui-border, #e1e4e8); border-radius: var(--ui-radius-md, 8px); padding: var(--ui-space-5, 1.25rem); margin-bottom: var(--ui-space-5, 1.25rem); }
         table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-        th, td { text-align: start; padding: 0.5rem 0.6rem; border-bottom: 1px solid #eee; vertical-align: top; }
-        th { color: #57606a; font-weight: 600; font-size: 0.8rem; text-transform: uppercase; }
+        th, td { text-align: start; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--ui-border, #eee); vertical-align: top; }
+        th { color: var(--ui-text-muted, #57606a); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; }
         .badge { display: inline-block; padding: 0.15rem 0.55rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
         .badge-pending_approval { background: #fff3cd; color: #7a5b00; }
         .badge-queued { background: #dbe4ff; color: #2b3a8f; }
@@ -157,18 +157,18 @@
         .live-status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 0.6rem; }
         .live-status-grid .live-stat { background: #f7f8fa; border-radius: 6px; padding: 0.6rem 0.8rem; }
         .live-status-grid .live-stat .label { display: block; font-size: 0.75rem; color: #6a737d; margin-bottom: 0.2rem; }
-        .btn { display: inline-block; padding: 0.45rem 0.9rem; border-radius: 6px; border: 1px solid #d0d7de; background: #fff; cursor: pointer; font-size: 0.85rem; text-decoration: none; color: #1c1e21; }
-        .btn-primary { background: #1c2733; color: #fff; border-color: #1c2733; }
+        .btn { display: inline-block; padding: 0.45rem 0.9rem; border-radius: var(--ui-radius-sm, 6px); border: 1px solid var(--ui-border, #d0d7de); background: var(--ui-surface, #fff); cursor: pointer; font-size: 0.85rem; text-decoration: none; color: var(--ui-text, #1c1e21); }
+        .btn-primary { background: var(--ui-brand, #1c2733); color: #fff; border-color: var(--ui-brand, #1c2733); }
         .btn-danger { background: #a41e1e; color: #fff; border-color: #a41e1e; }
         .btn-small { padding: 0.25rem 0.6rem; font-size: 0.78rem; }
-        input[type=text], input[type=email], input[type=password], textarea, select { width: 100%; padding: 0.5rem; border: 1px solid #d0d7de; border-radius: 6px; box-sizing: border-box; }
+        input[type=text], input[type=email], input[type=password], textarea, select { width: 100%; padding: 0.5rem; border: 1px solid var(--ui-border, #d0d7de); border-radius: var(--ui-radius-sm, 6px); box-sizing: border-box; }
         label { display: block; font-weight: 600; font-size: 0.85rem; margin-bottom: 0.3rem; margin-top: 0.9rem; }
         .status-msg { background: #d4f7dc; color: #14622e; padding: 0.6rem 1rem; border-radius: 6px; margin-bottom: 1rem; }
         .error-msg { background: #ffd7d7; color: #8a1f1f; padding: 0.6rem 1rem; border-radius: 6px; margin-bottom: 1rem; }
         .secret-box { background: #1c2733; color: #d4f7dc; font-family: "Courier New", monospace; direction: ltr; text-align: left; padding: 0.9rem; border-radius: 6px; word-break: break-all; margin-bottom: 0.6rem; }
         pre { background: #0d1117; color: #e6edf3; padding: 0.9rem; border-radius: 6px; overflow-x: auto; font-size: 0.82rem; direction: ltr; text-align: left; }
         code { direction: ltr; unicode-bidi: isolate; }
-        .muted { color: #6a737d; font-size: 0.85rem; }
+        .muted { color: var(--ui-text-muted, #6a737d); font-size: 0.85rem; }
 
         .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1.25rem; margin-bottom: 1.25rem; }
         .summary-grid .card { margin-bottom: 0; }
@@ -221,16 +221,25 @@
             .live-status-grid { grid-template-columns: 1fr; }
             .pipeline-steps { gap: 0.35rem; }
         }
+
+        @include('layouts.partials.ui-foundation')
     </style>
 </head>
 <body>
+<a class="ui-skip-link" href="#main-content">{{ __('ui.common.skip_to_content') }}</a>
 @auth
 <header class="topbar">
-    <a href="{{ route('dashboard.index') }}">{{ __('nav.brand') }}</a>
+    <a href="{{ route('dashboard.index') }}" class="topbar-brand">
+        <span class="topbar-brand__mark" aria-hidden="true">D</span>
+        <span>{{ __('nav.brand') }}</span>
+    </a>
     <div class="topbar-user">
         @php
             $onlineServers = \App\Models\Server::with('agents')->get()->filter->isOnline()->count();
             $totalServers = \App\Models\Server::count();
+            $systemHealthState = $totalServers === 0
+                ? 'neutral'
+                : ($onlineServers === $totalServers ? 'healthy' : 'degraded');
             // Task 6: single indexed COUNT — same (user_id, read_at) index
             // the notifications list itself relies on — computed once per
             // page load, never a user's own notifications leaking anyone
@@ -252,10 +261,13 @@
                     ->filterVisible(auth()->user(), auth()->user()->notifications()->take(20)->get())
                     ->take(5);
         @endphp
-        <span class="system-status"><span class="dot"></span>{{ __('nav.servers_online', ['online' => $onlineServers, 'total' => $totalServers]) }}</span>
+        <span class="system-status system-status--{{ $systemHealthState }}" role="status">
+            <span class="dot" aria-hidden="true"></span>
+            <span>{{ __('nav.servers_online', ['online' => $onlineServers, 'total' => $totalServers]) }}</span>
+        </span>
         <details class="notification-bell-wrap">
-            <summary class="notification-bell" title="{{ __('nav.notifications') }}">
-                🔔
+            <summary class="notification-bell" title="{{ __('nav.notifications') }}" aria-label="{{ __('nav.notifications') }}">
+                <span aria-hidden="true">&#128276;</span>
                 @if ($unreadNotificationsCount > 0)
                     <span class="bell-count">{{ $unreadNotificationsCount > 99 ? '99+' : $unreadNotificationsCount }}</span>
                 @endif
@@ -287,47 +299,47 @@
     </div>
 </header>
 <div class="app-shell">
-    <nav class="sidebar">
-        <a href="{{ route('dashboard.index') }}">{{ __('nav.dashboard') }}</a>
+    <nav class="sidebar" aria-label="{{ __('nav.primary_navigation') }}">
+        <a href="{{ route('dashboard.index') }}" @if(request()->routeIs('dashboard.index')) aria-current="page" @endif>{{ __('nav.dashboard') }}</a>
         @can('projects.view')
-        <a href="{{ route('projects.index') }}">{{ __('nav.projects') }}</a>
+        <a href="{{ route('projects.index') }}" @if(request()->routeIs('projects.index', 'projects.create', 'projects.show', 'projects.edit', 'projects.changes.*')) aria-current="page" @endif>{{ __('nav.projects') }}</a>
         @endcan
         @can('servers.view')
-        <a href="{{ route('servers.index') }}">{{ __('nav.servers') }}</a>
+        <a href="{{ route('servers.index') }}" @if(request()->routeIs('servers.*')) aria-current="page" @endif>{{ __('nav.servers') }}</a>
         @endcan
         @can('agents.view')
-        <a href="{{ route('agents.index') }}">{{ __('nav.agents') }}</a>
+        <a href="{{ route('agents.index') }}" @if(request()->routeIs('agents.*')) aria-current="page" @endif>{{ __('nav.agents') }}</a>
         @endcan
         @can('local_agents.view')
-        <a href="{{ route('local-agents.index') }}">{{ __('nav.local_agents') }}</a>
-        <a href="{{ route('publish.history') }}">{{ __('nav.publish_history') }}</a>
+        <a href="{{ route('local-agents.index') }}" @if(request()->routeIs('local-agents.index', 'local-agents.pending', 'local-agents.show')) aria-current="page" @endif>{{ __('nav.local_agents') }}</a>
+        <a href="{{ route('publish.history') }}" @if(request()->routeIs('publish.history', 'projects.publish.show')) aria-current="page" @endif>{{ __('nav.publish_history') }}</a>
         @endcan
         @can('local_agents.manage')
-        <a href="{{ route('local-agents.setup') }}">{{ __('nav.local_agent_setup') }}</a>
+        <a href="{{ route('local-agents.setup') }}" @if(request()->routeIs('local-agents.setup')) aria-current="page" @endif>{{ __('nav.local_agent_setup') }}</a>
         @endcan
         @can('github.view')
-        <a href="{{ route('github.accounts.index') }}">{{ __('nav.github') }}</a>
+        <a href="{{ route('github.accounts.index') }}" @if(request()->routeIs('github.*')) aria-current="page" @endif>{{ __('nav.github') }}</a>
         @endcan
         @can('deployments.view')
-        <a href="{{ route('dashboard.index') }}#recent-deployments">{{ __('nav.deployments') }}</a>
+        <a href="{{ route('dashboard.index') }}#recent-deployments" @if(request()->routeIs('deployments.*', 'deployment-tasks.*')) aria-current="page" @endif>{{ __('nav.deployments') }}</a>
         @endcan
         @can('operations.view')
-        <a href="{{ route('operations.index') }}">{{ __('nav.operations') }}</a>
+        <a href="{{ route('operations.index') }}" @if(request()->routeIs('operations.*')) aria-current="page" @endif>{{ __('nav.operations') }}</a>
         @endcan
         @can('projects.view')
-        <a href="{{ route('readiness.index') }}">{{ __('nav.readiness') }}</a>
+        <a href="{{ route('readiness.index') }}" @if(request()->routeIs('readiness.*')) aria-current="page" @endif>{{ __('nav.readiness') }}</a>
         @endcan
         @can('users.manage')
-        <a href="{{ route('users.index') }}">{{ __('nav.users') }}</a>
+        <a href="{{ route('users.index') }}" @if(request()->routeIs('users.*')) aria-current="page" @endif>{{ __('nav.users') }}</a>
         @endcan
         {{-- Task 6: no @can wrapper — a personal inbox every authenticated
              user has, same as the Dashboard link above it, not a
              role/resource-gated section. --}}
-        <a href="{{ route('notifications.index') }}">{{ __('nav.notifications') }}</a>
+        <a href="{{ route('notifications.index') }}" @if(request()->routeIs('notifications.*')) aria-current="page" @endif>{{ __('nav.notifications') }}</a>
         <span class="disabled">{{ __('nav.reports') }} <span class="soon-badge">{{ __('nav.coming_soon') }}</span></span>
         <span class="disabled">{{ __('nav.settings') }} <span class="soon-badge">{{ __('nav.coming_soon') }}</span></span>
     </nav>
-    <main>
+    <main id="main-content" tabindex="-1">
         @if (session('status'))
             <x-alert type="success">{{ session('status') }}</x-alert>
         @endif
@@ -345,7 +357,7 @@
 </div>
 @endauth
 @guest
-<main class="guest-main">
+<main id="main-content" class="guest-main" tabindex="-1">
     @if ($errors->any())
         <x-alert type="error">
             <ul style="margin:0;padding-inline-start:1.1rem;">

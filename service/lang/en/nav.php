@@ -1,6 +1,7 @@
 <?php
 
 return [
+    'primary_navigation' => 'Primary navigation',
     'brand' => 'Deployment Service',
     'dashboard' => 'Dashboard',
     'projects' => 'Projects',
@@ -14,6 +15,7 @@ return [
     'deployments' => 'Deployments',
     'notifications' => 'Notifications',
     'operations' => 'Operations',
+    'queue_reconciliation' => 'Queue reconciliation',
     'readiness' => 'Readiness',
     'reports' => 'Reports',
     'settings' => 'Settings',

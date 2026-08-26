@@ -44,6 +44,16 @@ return [
     'yes' => 'بله',
     'no' => 'خیر',
 
+    // Semantic UI presentation states (no backend status changes)
+    'transferring' => 'در حال انتقال',
+    'verified' => 'تأیید شده',
+    'uploading' => 'در حال بارگذاری',
+    'available' => 'در دسترس',
+    'expired' => 'منقضی شده',
+    'missing' => 'موجود نیست',
+    'outdated' => 'نیازمند به‌روزرسانی',
+    'unhealthy' => 'ناسالم',
+
     // Phase 4-L Readiness page
     'connected' => 'متصل',
     'not_connected' => 'متصل نیست',

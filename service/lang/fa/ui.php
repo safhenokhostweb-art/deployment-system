@@ -3,6 +3,7 @@
 return [
 
     'common' => [
+        'skip_to_content' => 'رفتن به محتوای اصلی',
         'name' => 'نام',
         'status' => 'وضعیت',
         'project' => 'پروژه',

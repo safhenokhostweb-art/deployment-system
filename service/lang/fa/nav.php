@@ -1,6 +1,7 @@
 <?php
 
 return [
+    'primary_navigation' => 'پیمایش اصلی',
     'brand' => 'سرویس استقرار',
     'dashboard' => 'داشبورد',
     'projects' => 'پروژه‌ها',
@@ -14,6 +15,7 @@ return [
     'deployments' => 'استقرارها',
     'notifications' => 'اعلان‌ها',
     'operations' => 'عملیات',
+    'queue_reconciliation' => 'بازبینی صف عملیات',
     'readiness' => 'آمادگی',
     'reports' => 'گزارش‌ها',
     'settings' => 'تنظیمات',

@@ -1,256 +1,282 @@
 @extends('layouts.app')
 
-@section('title', __('ui.dashboard.title'))
+@section('title', __('dashboard_ui.title'))
 
 @section('content')
-<h1>{{ __('ui.dashboard.title') }}</h1>
-<p class="muted" style="margin-top:-0.6rem;">{{ __('ui.dashboard.subtitle') }}</p>
+@php
+    $visibleAgentCount = $agents->count();
+    $onlineAgents = $agents->filter(fn ($agent) => $agent->status === \App\Models\Agent::STATUS_APPROVED && $agent->isOnline());
+    $offlineAgents = $agents->filter(fn ($agent) => $agent->status === \App\Models\Agent::STATUS_APPROVED && ! $agent->isOnline());
+    $minimumArtifactAgentVersion = (string) config('deployment.min_server_agent_version_for_artifact');
+    $outdatedAgents = $agents->filter(fn ($agent) => $agent->status === \App\Models\Agent::STATUS_APPROVED
+        && (! $agent->agent_version || version_compare($agent->agent_version, $minimumArtifactAgentVersion, '<')));
 
-{{-- Task 2: Summary Cards --}}
-<div class="summary-grid">
-    <x-card :title="__('ui.dashboard.card_servers')">
-        <div class="stat-row"><span>{{ __('ui.dashboard.servers_total') }}</span><strong>{{ $summary['servers']['total'] }}</strong></div>
-        <div class="stat-row"><span>{{ __('ui.dashboard.servers_online') }}</span><strong class="stat-good">{{ $summary['servers']['online'] }}</strong></div>
-        <div class="stat-row"><span>{{ __('ui.dashboard.servers_offline') }}</span><strong class="stat-bad">{{ $summary['servers']['offline'] }}</strong></div>
-    </x-card>
+    $visibleToday = $recentDeployments->filter(fn ($deployment) => $deployment->created_at->isToday());
+    $recentDurations = $recentDeployments
+        ->map(fn ($deployment) => $deployment->durationSeconds())
+        ->filter(fn ($seconds) => $seconds !== null);
+    $averageRecentDuration = $recentDurations->isNotEmpty()
+        ? gmdate('H:i:s', (int) round($recentDurations->average()))
+        : null;
 
-    <x-card :title="__('ui.dashboard.card_agents')">
-        <div class="stat-row"><span>{{ __('ui.dashboard.agents_total') }}</span><strong>{{ $summary['agents']['total'] }}</strong></div>
-        <div class="stat-row"><span>{{ __('ui.dashboard.agents_approved') }}</span><strong class="stat-good">{{ $summary['agents']['approved'] }}</strong></div>
-        <div class="stat-row"><span>{{ __('ui.dashboard.agents_pending') }}</span><strong class="stat-warn">{{ $summary['agents']['pending_approval'] }}</strong></div>
-        <div class="stat-row"><span>{{ __('ui.dashboard.agents_disabled') }}</span><strong class="stat-bad">{{ $summary['agents']['disabled'] }}</strong></div>
-    </x-card>
+    $recentHealthFailures = $health['recentErrors']->filter(
+        fn ($deployment) => $deployment->failure_code === \App\Models\Deployment::FAILURE_CODE_HEALTH_CHECK_FAILED
+    );
+    $recentArtifactLinked = $recentDeployments->whereNotNull('artifact_id');
+    $recentArtifactMissing = $recentDeployments->filter(
+        fn ($deployment) => $deployment->project->requires_complete_artifact && ! $deployment->artifact_id
+    );
 
-    <x-card :title="__('ui.dashboard.card_projects')">
-        <div class="stat-row"><span>{{ __('ui.dashboard.projects_total') }}</span><strong>{{ $summary['projects']['total'] }}</strong></div>
-        <div class="stat-row"><span>{{ __('ui.dashboard.projects_active') }}</span><strong class="stat-good">{{ $summary['projects']['active'] }}</strong></div>
-    </x-card>
+    $attentionCount = $health['problemAgents']->count()
+        + $health['problemDeployments']->count()
+        + $recentArtifactMissing->count();
+    $hasCriticalSignal = $health['problemDeployments']->isNotEmpty()
+        || $recentHealthFailures->isNotEmpty()
+        || $offlineAgents->isNotEmpty()
+        || $recentArtifactMissing->isNotEmpty();
+    $platformSignal = $hasCriticalSignal ? 'failed' : ($attentionCount > 0 ? 'pending' : 'verified');
+@endphp
 
-    <x-card :title="__('ui.dashboard.card_deployments')">
-        <div class="stat-row"><span>{{ __('ui.dashboard.deployments_total') }}</span><strong>{{ $summary['deployments']['total'] }}</strong></div>
-        <div class="stat-row"><span>{{ __('ui.dashboard.deployments_succeeded') }}</span><strong class="stat-good">{{ $summary['deployments']['succeeded'] }}</strong></div>
-        <div class="stat-row"><span>{{ __('ui.dashboard.deployments_failed') }}</span><strong class="stat-bad">{{ $summary['deployments']['failed'] }}</strong></div>
-        <div class="stat-row"><span>{{ __('ui.dashboard.deployments_running') }}</span><strong class="stat-info">{{ $summary['deployments']['running'] }}</strong></div>
-    </x-card>
-</div>
-
-{{-- Task 7: Quick Actions --}}
-<x-card :title="__('ui.dashboard.quick_actions_title')">
-    <div class="quick-actions">
+<x-ui.page-header
+    :eyebrow="__('dashboard_ui.eyebrow')"
+    :title="__('dashboard_ui.title')"
+    :description="__('dashboard_ui.description')"
+>
+    <x-slot:actions>
         @can('projects.create')
-        <a href="{{ route('projects.create') }}" class="btn btn-primary">{{ __('ui.dashboard.quick_action_new_project') }}</a>
+            <a href="{{ route('projects.create') }}" class="btn btn-primary">{{ __('ui.dashboard.quick_action_new_project') }}</a>
         @endcan
         @can('servers.create')
-        <a href="{{ route('servers.create') }}" class="btn">{{ __('ui.dashboard.quick_action_add_server') }}</a>
-        @endcan
-        @can('deployments.view')
-        <a href="#recent-deployments" class="btn">{{ __('ui.dashboard.quick_action_view_deployments') }}</a>
+            <a href="{{ route('servers.create') }}" class="btn">{{ __('ui.dashboard.quick_action_add_server') }}</a>
         @endcan
         @can('agents.approve')
-        <a href="{{ route('agents.pending') }}" class="btn">{{ __('ui.dashboard.quick_action_view_pending_agents') }}</a>
+            <a href="{{ route('agents.pending') }}" class="btn">{{ __('ui.dashboard.quick_action_view_pending_agents') }}</a>
         @endcan
+        @can('deployments.view')
+            <a href="#recent-deployments" class="btn">{{ __('ui.dashboard.quick_action_view_deployments') }}</a>
+        @endcan
+    </x-slot:actions>
+</x-ui.page-header>
+
+<section class="ui-platform-verdict ui-platform-verdict--{{ $hasCriticalSignal ? 'danger' : ($attentionCount > 0 ? 'warning' : 'success') }}" aria-labelledby="platform-health-title">
+    <div>
+        <x-ui.health-indicator
+            :status="$platformSignal"
+            :label="$attentionCount > 0 ? __('dashboard_ui.health_attention') : __('dashboard_ui.health_clear')"
+            :detail="__('dashboard_ui.health_scope_note')"
+        />
+        <h2 id="platform-health-title">{{ $attentionCount > 0 ? __('dashboard_ui.verdict_attention', ['count' => $attentionCount]) : __('dashboard_ui.verdict_clear') }}</h2>
+        <p>{{ $attentionCount > 0 ? __('dashboard_ui.verdict_attention_description') : __('dashboard_ui.verdict_clear_description') }}</p>
     </div>
-</x-card>
+    <div class="ui-platform-verdict__actions">
+        <a href="#attention-required" class="btn">{{ __('dashboard_ui.review_attention') }}</a>
+    </div>
+</section>
 
-{{-- Task 3: System Health Overview --}}
-<x-card :title="__('ui.dashboard.health_title')">
-    @if ($health['problemAgents']->isEmpty() && $health['problemDeployments']->isEmpty() && $health['recentErrors']->isEmpty())
-        <x-alert type="success">{{ __('ui.dashboard.health_all_clear') }}</x-alert>
-    @else
-        @if ($health['problemAgents']->isNotEmpty())
-        <h4>{{ __('ui.dashboard.health_problem_agents_title') }}</h4>
-        <table>
-            <thead><tr>
-                <th>{{ __('ui.common.name') }}</th>
-                <th>{{ __('ui.common.server') }}</th>
-                <th>{{ __('ui.common.status') }}</th>
-            </tr></thead>
-            <tbody>
-            @foreach ($health['problemAgents'] as $row)
-                <tr>
-                    <td><a href="{{ route('agents.show', $row['agent']) }}">{{ $row['agent']->name ?? $row['agent']->public_id }}</a></td>
-                    <td>{{ $row['agent']->server->name }}</td>
-                    <td>{{ $row['reason'] === 'pending_approval' ? __('status.pending_approval') : __('status.offline') }}</td>
-                </tr>
-            @endforeach
-            </tbody>
-        </table>
-        @endif
-
-        @if ($health['problemDeployments']->isNotEmpty())
-        <h4 style="margin-top:1.2rem;">{{ __('ui.dashboard.health_problem_deployments_title') }}</h4>
-        <table>
-            <thead><tr>
-                <th>{{ __('ui.common.project') }}</th>
-                <th>{{ __('ui.common.status') }}</th>
-                <th>{{ __('ui.common.created') }}</th>
-            </tr></thead>
-            <tbody>
-            @foreach ($health['problemDeployments'] as $row)
-                <tr>
-                    <td><a href="{{ route('deployments.show', $row['deployment']) }}">{{ $row['deployment']->project->name }}</a></td>
-                    <td>
-                        @if ($row['reason'] === 'failed')
-                            <x-badge status="failed" />
-                        @elseif ($row['reason'] === 'stalled')
-                            <span class="badge badge-failed">{{ __('ui.dashboard.reason_stalled') }}</span>
-                        @else
-                            <span class="badge badge-partial_success">{{ __('ui.dashboard.reason_long_running') }}</span>
-                        @endif
-                    </td>
-                    <td>{{ $row['deployment']->created_at->diffForHumans() }}</td>
-                </tr>
-            @endforeach
-            </tbody>
-        </table>
-        @endif
-
-        @if ($health['recentErrors']->isNotEmpty())
-        <h4 style="margin-top:1.2rem;">{{ __('ui.dashboard.health_recent_errors_title') }}</h4>
-        <table>
-            <thead><tr>
-                <th>{{ __('ui.dashboard.error_type') }}</th>
-                <th>{{ __('ui.common.project') }}</th>
-                <th>{{ __('ui.common.created') }}</th>
-                <th>{{ __('ui.common.status') }}</th>
-            </tr></thead>
-            <tbody>
-            @foreach ($health['recentErrors'] as $deployment)
-                <tr>
-                    <td>{{ $deployment->action }}</td>
-                    <td><a href="{{ route('deployments.show', $deployment) }}">{{ $deployment->project->name }}</a></td>
-                    <td>{{ $deployment->finished_at?->diffForHumans() ?? $deployment->created_at->diffForHumans() }}</td>
-                    <td><x-badge :status="$deployment->status" /></td>
-                </tr>
-            @endforeach
-            </tbody>
-        </table>
-        @endif
+<x-ui.info-card
+    :title="__('dashboard_ui.system_health_title')"
+    :description="__('dashboard_ui.system_health_description')"
+    class="ui-dashboard-section"
+>
+    <div class="ui-signal-grid">
+        <div class="ui-signal">
+            <span class="ui-signal__label">{{ __('dashboard_ui.hub_status') }}</span>
+            <x-ui.health-indicator status="not_configured" :label="__('dashboard_ui.not_exposed')" :detail="__('dashboard_ui.hub_status_note')" />
+        </div>
+        <div class="ui-signal">
+            <span class="ui-signal__label">{{ __('dashboard_ui.agent_availability') }}</span>
+            <x-ui.health-indicator
+                :status="$offlineAgents->isEmpty() ? 'verified' : 'failed'"
+                :label="__('dashboard_ui.online_of_visible', ['online' => $onlineAgents->count(), 'visible' => $visibleAgentCount])"
+                :detail="__('dashboard_ui.visible_agent_scope')"
+            />
+        </div>
+        <div class="ui-signal">
+            <span class="ui-signal__label">{{ __('dashboard_ui.queue_status') }}</span>
+            <x-ui.health-indicator status="not_configured" :label="__('dashboard_ui.not_exposed')" :detail="__('dashboard_ui.queue_status_note')" />
+        </div>
+        <div class="ui-signal">
+            <span class="ui-signal__label">{{ __('dashboard_ui.failed_jobs') }}</span>
+            <x-ui.health-indicator status="not_configured" :label="__('dashboard_ui.not_exposed')" :detail="__('dashboard_ui.failed_jobs_note')" />
+        </div>
+        <div class="ui-signal">
+            <span class="ui-signal__label">{{ __('dashboard_ui.recent_health_failures') }}</span>
+            <x-ui.health-indicator
+                :status="$recentHealthFailures->isEmpty() ? 'verified' : 'failed'"
+                :label="$recentHealthFailures->count()"
+                :detail="__('dashboard_ui.latest_failed_sample', ['count' => $health['recentErrors']->count()])"
+            />
+        </div>
+        <div class="ui-signal">
+            <span class="ui-signal__label">{{ __('dashboard_ui.server_availability') }}</span>
+            <x-ui.health-indicator
+                :status="$summary['servers']['offline'] === 0 ? 'verified' : 'failed'"
+                :label="__('dashboard_ui.online_of_total', ['online' => $summary['servers']['online'], 'total' => $summary['servers']['total']])"
+                :detail="__('dashboard_ui.authoritative_server_count')"
+            />
+        </div>
+    </div>
+    @if ($summary['servers']['total'] === 0)
+        <x-ui.empty-state :title="__('ui.dashboard.no_servers')" />
     @endif
-</x-card>
+</x-ui.info-card>
 
-{{-- Phase 4-I Task 9: Recent Releases Widget --}}
-<x-card :title="__('ui.dashboard.recent_releases_title')">
-    <table>
-        <thead><tr>
-            <th>{{ __('ui.deployments.release_label') }}</th>
-            <th>{{ __('ui.common.project') }}</th>
-            <th>{{ __('ui.projects.history_user') }}</th>
-            <th>{{ __('ui.common.created') }}</th>
-        </tr></thead>
-        <tbody>
-        @forelse ($recentReleases as $release)
-            <tr>
-                <td><a href="{{ route('deployments.show', $release) }}"><span class="release-tag">{{ $release->displayLabel() }}</span></a></td>
-                <td>{{ $release->project->name }}</td>
-                <td>{{ $release->triggered_by ?? $release->trigger }}</td>
-                <td>{{ $release->finished_at?->diffForHumans() ?? $release->created_at->diffForHumans() }}</td>
-            </tr>
-        @empty
-            <tr><td colspan="4"><x-empty-state>{{ __('ui.dashboard.no_releases') }}</x-empty-state></td></tr>
-        @endforelse
-        </tbody>
-    </table>
-</x-card>
+<section class="ui-dashboard-section" aria-labelledby="deployment-overview-title">
+    <div class="ui-section-heading">
+        <div>
+            <h2 id="deployment-overview-title">{{ __('dashboard_ui.deployment_overview_title') }}</h2>
+            <p>{{ __('dashboard_ui.deployment_overview_description') }}</p>
+        </div>
+    </div>
+    <div class="ui-dashboard-stat-grid">
+        <x-ui.stat-card
+            :label="__('dashboard_ui.deployments_today_visible')"
+            :value="$visibleToday->count()"
+            :context="__('dashboard_ui.latest_deployment_scope', ['count' => $recentDeployments->count()])"
+            level="info"
+        />
+        <x-ui.stat-card :label="__('ui.dashboard.deployments_succeeded')" :value="$summary['deployments']['succeeded']" :context="__('dashboard_ui.all_time')" level="success" />
+        <x-ui.stat-card :label="__('ui.dashboard.deployments_failed')" :value="$summary['deployments']['failed']" :context="__('dashboard_ui.all_time')" :level="$summary['deployments']['failed'] > 0 ? 'danger' : 'neutral'" />
+        <x-ui.stat-card :label="__('ui.dashboard.deployments_running')" :value="$summary['deployments']['running']" :context="__('dashboard_ui.current_status_count')" level="info" />
+        <x-ui.stat-card :label="__('dashboard_ui.average_duration')" :value="$averageRecentDuration ?? '—'" :context="__('dashboard_ui.average_duration_scope', ['count' => $recentDurations->count()])" />
+    </div>
+    <div class="ui-recent-release-strip">
+        <h3>{{ __('ui.dashboard.recent_releases_title') }}</h3>
+        @if ($recentReleases->isEmpty())
+            <span class="muted">{{ __('ui.dashboard.no_releases') }}</span>
+        @else
+            <div>
+                @foreach ($recentReleases as $release)
+                    <a href="{{ route('deployments.show', $release) }}" class="ui-release-link">
+                        <span class="release-tag">{{ $release->displayLabel() }}</span>
+                        <span>{{ $release->project->name }}</span>
+                    </a>
+                @endforeach
+            </div>
+        @endif
+    </div>
+</section>
 
-{{-- Task 4: Recent Deployments Widget --}}
-<x-card :title="__('ui.dashboard.recent_deployments_title')" id="recent-deployments">
-    <table>
-        <thead><tr>
-            <th>{{ __('ui.common.project') }}</th>
-            <th>{{ __('ui.common.environment') }}</th>
-            <th>{{ __('ui.dashboard.target') }}</th>
-            <th>{{ __('ui.common.status') }}</th>
-            <th>{{ __('ui.common.created') }}</th>
-            <th>{{ __('ui.dashboard.error_result') }}</th>
-        </tr></thead>
-        <tbody>
-        @forelse ($recentDeployments as $deployment)
-            @php
-                $firstTask = $deployment->tasks->first();
-                $environmentName = $firstTask?->deploymentTarget?->environment?->name ?? $deployment->project->environment;
-                $target = $deployment->tasks->count() > 1
-                    ? __('ui.dashboard.multiple_targets', ['count' => $deployment->tasks->count()])
-                    : ($firstTask?->deploymentTarget?->name ?? $deployment->server->name);
-            @endphp
-            <tr>
-                <td><a href="{{ route('deployments.show', $deployment) }}">{{ $deployment->project->name }}</a></td>
-                <td>{{ $environmentName }}</td>
-                <td>{{ $target }}</td>
-                <td><x-badge :status="$deployment->status" /></td>
-                <td>{{ $deployment->created_at->diffForHumans() }}</td>
-                <td>{{ $deployment->status === 'failed' && $deployment->failure_message ? \Illuminate\Support\Str::limit($deployment->failure_message, 40) : __('ui.dashboard.no_result') }}</td>
-            </tr>
-        @empty
-            <tr><td colspan="6"><x-empty-state>{{ __('ui.dashboard.no_deployments') }}</x-empty-state></td></tr>
-        @endforelse
-        </tbody>
-    </table>
-</x-card>
+<div class="ui-ops-grid ui-dashboard-section">
+    <x-ui.info-card
+        :title="__('dashboard_ui.agent_fleet_title')"
+        :description="__('dashboard_ui.agent_fleet_description', ['count' => $visibleAgentCount])"
+    >
+        <dl class="ui-meta-grid ui-dashboard-metrics">
+            <div><dt>{{ __('ui.dashboard.agents_total') }}</dt><dd>{{ $summary['agents']['total'] }}</dd></div>
+            <div><dt>{{ __('dashboard_ui.online_visible') }}</dt><dd class="stat-good">{{ $onlineAgents->count() }}</dd></div>
+            <div><dt>{{ __('dashboard_ui.offline_visible') }}</dt><dd class="{{ $offlineAgents->isNotEmpty() ? 'stat-bad' : '' }}">{{ $offlineAgents->count() }}</dd></div>
+            <div><dt>{{ __('dashboard_ui.outdated_artifact_agents') }}</dt><dd class="{{ $outdatedAgents->isNotEmpty() ? 'stat-warn' : '' }}">{{ $outdatedAgents->count() }}</dd></div>
+            <div class="ui-meta-grid__full"><dt>{{ __('dashboard_ui.production_build_agents') }}</dt><dd>— <span class="muted">{{ __('dashboard_ui.production_build_agents_unavailable') }}</span></dd></div>
+        </dl>
+        @if ($agents->isEmpty())
+            <x-ui.empty-state :title="__('ui.dashboard.no_agents')" />
+        @else
+            <div class="ui-agent-card-grid">
+                @foreach ($agents->take(6) as $agent)
+                    <x-ui.agent-status-card :agent="$agent" />
+                @endforeach
+            </div>
+        @endif
+    </x-ui.info-card>
 
-{{-- Task 5: Agent Status Widget --}}
-<x-card :title="__('ui.dashboard.agent_widget_title')">
-    <table>
-        <thead><tr>
-            <th>{{ __('ui.common.name') }}</th>
-            <th>{{ __('ui.common.server') }}</th>
-            <th>{{ __('ui.common.status') }}</th>
-            <th>{{ __('ui.common.version') }}</th>
-            <th>{{ __('ui.common.last_heartbeat') }}</th>
-        </tr></thead>
-        <tbody>
-        @forelse ($agents as $agent)
-            <tr>
-                <td><a href="{{ route('agents.show', $agent) }}">{{ $agent->name ?? $agent->public_id }}</a></td>
-                <td><a href="{{ route('servers.show', $agent->server) }}">{{ $agent->server->name }}</a></td>
-                <td>
-                    @if ($agent->status === 'approved')
-                        @if ($agent->isOnline())
-                            <x-badge status="online" />
-                        @else
-                            <x-badge status="offline" />
-                        @endif
-                    @else
-                        <x-badge :status="$agent->status" />
-                    @endif
-                </td>
-                <td>{{ $agent->agent_version ?? '—' }}</td>
-                <td>{{ $agent->last_seen_at?->diffForHumans() ?? __('status.never') }}</td>
-            </tr>
-        @empty
-            <tr><td colspan="5"><x-empty-state>{{ __('ui.dashboard.no_agents') }}</x-empty-state></td></tr>
-        @endforelse
-        </tbody>
-    </table>
-</x-card>
+    <x-ui.info-card
+        :title="__('dashboard_ui.artifact_overview_title')"
+        :description="__('dashboard_ui.artifact_overview_description')"
+    >
+        <dl class="ui-meta-grid ui-dashboard-metrics">
+            <div><dt>{{ __('dashboard_ui.available_artifacts') }}</dt><dd>— <span class="muted">{{ __('dashboard_ui.not_exposed') }}</span></dd></div>
+            <div><dt>{{ __('dashboard_ui.failed_artifacts') }}</dt><dd>— <span class="muted">{{ __('dashboard_ui.not_exposed') }}</span></dd></div>
+            <div><dt>{{ __('dashboard_ui.linked_recent_artifacts') }}</dt><dd>{{ $recentArtifactLinked->count() }}</dd></div>
+            <div><dt>{{ __('dashboard_ui.missing_required_artifacts') }}</dt><dd class="{{ $recentArtifactMissing->isNotEmpty() ? 'stat-bad' : '' }}">{{ $recentArtifactMissing->count() }}</dd></div>
+        </dl>
+        <x-ui.alert-panel level="neutral" :title="__('dashboard_ui.artifact_inventory_unavailable_title')">
+            {{ __('dashboard_ui.artifact_inventory_unavailable_description', ['count' => $recentDeployments->count()]) }}
+        </x-ui.alert-panel>
+    </x-ui.info-card>
+</div>
 
-{{-- Task 6: Server Overview Widget --}}
-<x-card :title="__('ui.dashboard.server_widget_title')">
-    <table>
-        <thead><tr>
-            <th>{{ __('ui.common.name') }}</th>
-            <th>{{ __('ui.dashboard.server_type') }}</th>
-            <th>{{ __('ui.dashboard.connected_agent') }}</th>
-            <th>{{ __('ui.common.status') }}</th>
-        </tr></thead>
-        <tbody>
-        @forelse ($serverOverview as $row)
-            <tr>
-                <td><a href="{{ route('servers.show', $row['server']) }}">{{ $row['server']->name }}</a></td>
-                <td>{{ $row['type'] === 'agent_based' ? __('ui.dashboard.server_type_agent_based') : __('ui.dashboard.server_type_legacy') }}</td>
-                <td>{{ $row['connectedAgent']?->name ?? $row['connectedAgent']?->public_id ?? __('ui.dashboard.no_connected_agent') }}</td>
-                <td>
-                    @if ($row['isOnline'])
-                        <x-badge status="online" />
-                    @else
-                        <x-badge status="offline" />
-                    @endif
-                </td>
-            </tr>
-        @empty
-            <tr><td colspan="4"><x-empty-state>{{ __('ui.dashboard.no_servers') }}</x-empty-state></td></tr>
-        @endforelse
-        </tbody>
-    </table>
-</x-card>
+<x-ui.info-card
+    id="attention-required"
+    :title="__('dashboard_ui.attention_title')"
+    :description="__('dashboard_ui.attention_description')"
+    class="ui-dashboard-section"
+>
+    @if ($attentionCount === 0)
+        <x-ui.alert-panel level="success" :title="__('ui.dashboard.health_all_clear')">
+            {{ __('dashboard_ui.attention_clear_scope') }}
+        </x-ui.alert-panel>
+    @else
+        <div class="ui-attention-list">
+            @foreach ($health['problemAgents'] as $row)
+                <a class="ui-attention-item" href="{{ route('agents.show', $row['agent']) }}">
+                    <x-ui.status-badge domain="agent" :status="$row['reason'] === 'offline' ? 'offline' : 'pending'" size="small" />
+                    <span><strong>{{ $row['agent']->name ?? $row['agent']->public_id }}</strong><small>{{ $row['agent']->server->name }}</small></span>
+                    <span class="ui-attention-item__action">{{ __('dashboard_ui.review') }}</span>
+                </a>
+            @endforeach
+            @foreach ($health['problemDeployments'] as $row)
+                <a class="ui-attention-item" href="{{ route('deployments.show', $row['deployment']) }}">
+                    <x-ui.status-badge
+                        domain="deployment"
+                        :status="$row['deployment']->status"
+                        :label="$row['reason'] === 'stalled' ? __('ui.dashboard.reason_stalled') : ($row['reason'] === 'long_running' ? __('ui.dashboard.reason_long_running') : null)"
+                        size="small"
+                    />
+                    <span>
+                        <strong>{{ $row['deployment']->project->name }}</strong>
+                        <small>{{ $row['deployment']->failure_message ? \Illuminate\Support\Str::limit($row['deployment']->failure_message, 90) : $row['deployment']->created_at->diffForHumans() }}</small>
+                    </span>
+                    <span class="ui-attention-item__action">{{ __('dashboard_ui.review') }}</span>
+                </a>
+            @endforeach
+            @foreach ($recentArtifactMissing as $deployment)
+                <a class="ui-attention-item" href="{{ route('deployments.show', $deployment) }}">
+                    <x-ui.status-badge domain="artifact" status="missing" size="small" />
+                    <span><strong>{{ $deployment->project->name }}</strong><small>{{ __('dashboard_ui.required_artifact_not_linked') }}</small></span>
+                    <span class="ui-attention-item__action">{{ __('dashboard_ui.review') }}</span>
+                </a>
+            @endforeach
+        </div>
+    @endif
+</x-ui.info-card>
+
+<x-ui.info-card
+    id="recent-deployments"
+    :title="__('dashboard_ui.recent_timeline_title')"
+    :description="__('dashboard_ui.recent_timeline_description', ['count' => $recentDeployments->count()])"
+    class="ui-dashboard-section"
+>
+    @if ($recentDeployments->isEmpty())
+        <x-ui.empty-state :title="__('ui.dashboard.no_deployments')" />
+    @else
+        <x-ui.timeline :label="__('dashboard_ui.recent_timeline_title')" class="ui-dashboard-timeline">
+            @foreach ($recentDeployments as $deployment)
+                @php
+                    $deploymentPresentation = \App\Support\Ui\StatusRegistry::resolve('deployment', $deployment->status);
+                    $firstTask = $deployment->tasks->first();
+                    $targetName = $deployment->tasks->count() > 1
+                        ? __('ui.dashboard.multiple_targets', ['count' => $deployment->tasks->count()])
+                        : ($firstTask?->deploymentTarget?->name ?? $deployment->server->name);
+                    $healthStatus = ! $deployment->hasHttpHealthCheck()
+                        ? 'not_configured'
+                        : ($deployment->http_health_status === \App\Models\Deployment::HTTP_HEALTH_VERIFIED
+                            ? 'verified'
+                            : ($deployment->http_health_status === \App\Models\Deployment::HTTP_HEALTH_FAILED ? 'failed' : 'pending'));
+                @endphp
+                <li class="ui-timeline__item--{{ $deploymentPresentation['level'] }}">
+                    <span class="ui-timeline__time">{{ $deployment->finished_at?->diffForHumans() ?? $deployment->created_at->diffForHumans() }}</span>
+                    <span class="ui-timeline__event ui-dashboard-timeline__event">
+                        <a class="ui-timeline__title" href="{{ route('deployments.show', $deployment) }}">{{ $deployment->project->name }}</a>
+                        <x-ui.status-badge domain="deployment" :status="$deployment->status" size="small" />
+                        <span class="muted">{{ $targetName }}</span>
+                        <span class="muted ui-code-wrap">{{ $deployment->status === \App\Models\Deployment::STATUS_SUCCEEDED ? $deployment->displayLabel() : substr($deployment->commit_hash, 0, 10) }}</span>
+                        <span class="muted">{{ __('dashboard_ui.duration_value', ['duration' => $deployment->durationSeconds() !== null ? gmdate('H:i:s', $deployment->durationSeconds()) : '—']) }}</span>
+                        <x-ui.health-indicator :status="$healthStatus" :label="__('dashboard_ui.health_short')" />
+                    </span>
+                </li>
+            @endforeach
+        </x-ui.timeline>
+    @endif
+</x-ui.info-card>
 @endsection

@@ -1,6 +1,6 @@
 @extends('layouts.app')
 
-@section('title', 'Deployment ' . $deployment->public_id)
+@section('title', __('deployment_ui.page_eyebrow') . ' ' . $deployment->public_id)
 
 @section('content')
 @php
@@ -9,315 +9,494 @@
     $targetName = $deployment->tasks->count() > 1
         ? __('ui.dashboard.multiple_targets', ['count' => $deployment->tasks->count()])
         : ($firstTask?->deploymentTarget?->name ?? $deployment->server->name);
+    $verdict = \App\Support\Ui\StatusRegistry::resolve('deployment', $deployment->status);
+    $displayTime = fn ($time, $empty) => $time
+        ? __('deployment_ui.exact_time', ['relative' => $time->diffForHumans(), 'exact' => $time->format('Y-m-d H:i:s T')])
+        : $empty;
+    $duration = $deployment->durationSeconds() !== null
+        ? gmdate('H:i:s', $deployment->durationSeconds())
+        : '—';
+
+    $rollbackDeployment = \App\Models\Deployment::where('rollback_of_deployment_id', $deployment->id)->latest()->first();
+    $failedLog = $deployment->logEntries->last(fn ($entry) => $entry->status === 'failed' || ($entry->exit_code !== null && $entry->exit_code !== 0) || $entry->timed_out);
+    $failedTask = $deployment->tasks->first(fn ($task) => $task->status === 'failed');
+    $failureCode = $deployment->failure_code ?? $failedTask?->failure_code ?? $failedLog?->failure_code;
+    $failureMessage = $deployment->failure_message ?? $failedTask?->failure_message;
+    $failedStage = $failedLog?->step_name ?? $failedTask?->deploymentTarget?->name ?? $currentStep['name'] ?? null;
+    $guidance = $failureCode
+        ? \App\Support\Deployment\FailureCodeGuidance::forCode($failureCode)
+        : __('deployment_ui.generic_guidance');
+
+    $artifactIntegrityFailed = in_array($failureCode, [
+        \App\Models\Deployment::FAILURE_CODE_ARTIFACT_CHECKSUM_MISMATCH,
+        \App\Models\Deployment::FAILURE_CODE_ARTIFACT_INTEGRITY_FAILED,
+    ], true);
+    $artifactUiStatus = null;
+    if ($deployment->artifact) {
+        $artifactUiStatus = match (true) {
+            $artifactIntegrityFailed => 'failed',
+            $deployment->artifact->expires_at?->isPast() => 'expired',
+            in_array($deployment->artifact->status, ['uploading', 'available', 'failed'], true) => $deployment->artifact->status,
+            default => 'missing',
+        };
+    } elseif ($deployment->artifact_id || $deployment->project->requires_complete_artifact) {
+        $artifactUiStatus = 'missing';
+    }
+
+    $healthUiStatus = match (true) {
+        ! $deployment->hasHttpHealthCheck() => 'not_configured',
+        $deployment->http_health_status === \App\Models\Deployment::HTTP_HEALTH_VERIFIED => 'verified',
+        $deployment->http_health_status === \App\Models\Deployment::HTTP_HEALTH_FAILED => 'failed',
+        default => 'pending',
+    };
+    $healthDetails = $deployment->http_health_details ?? [];
+    $healthConfig = $deployment->http_health_config ?? [];
 @endphp
-<h1><span class="release-tag">{{ $deployment->displayLabel() }}</span> — {{ $deployment->project->name }} <x-badge :status="$deployment->status" /></h1>
 
-{{-- Task 3: Overview --}}
-<x-card :title="__('ui.deployments.overview_title')">
-    <table>
-        <tr><th>{{ __('ui.common.project') }}</th><td><a href="{{ route('projects.show', $deployment->project) }}">{{ $deployment->project->name }}</a></td></tr>
-        <tr><th>{{ __('ui.common.environment') }}</th><td>{{ $environmentName }}</td></tr>
-        <tr><th>{{ __('ui.dashboard.target') }}</th><td>{{ $targetName }}</td></tr>
-        <tr><th>{{ __('ui.common.commit') }}</th><td><x-ltr><code>{{ $deployment->commit_hash }}</code></x-ltr></td></tr>
-        <tr><th>{{ __('ui.common.branch') }}</th><td><x-ltr>{{ $deployment->branch }}</x-ltr></td></tr>
-        <tr><th>{{ __('ui.deployments.triggered_by') }}</th><td>{{ $deployment->trigger }} @if($deployment->triggered_by) {{ __('ui.common.by', ['who' => $deployment->triggered_by]) }} @endif</td></tr>
-        <tr><th>{{ __('ui.common.status') }}</th><td><x-badge :status="$deployment->status" /></td></tr>
-        <tr>
-            <th>اعتبارسنجی Artifact</th>
-            <td>
-                @if ($deployment->artifact?->isAvailable())
-                    <span class="badge badge-succeeded">معتبر</span> Artifact #{{ $deployment->artifact->id }}
-                @elseif ($deployment->artifact_id)
-                    <span class="badge badge-failed">نامعتبر/در دسترس نیست</span>
-                @else
-                    <span class="muted">Artifact استفاده نشده است</span>
-                @endif
-            </td>
-        </tr>
-        <tr><th>اجرای استقرار</th><td><x-badge :status="$deployment->execution_status" /> @if($deployment->execution_finished_at) {{ $deployment->execution_finished_at->diffForHumans() }} @endif</td></tr>
-        <tr>
-            <th>سلامت HTTP</th>
-            <td>
-                @if ($deployment->http_health_status === \App\Models\Deployment::HTTP_HEALTH_VERIFIED)
-                    <span class="badge badge-succeeded">تأیید شد</span> {{ $deployment->http_health_verified_at?->diffForHumans() }}
-                @elseif ($deployment->http_health_status === \App\Models\Deployment::HTTP_HEALTH_FAILED)
-                    <span class="badge badge-failed">ناموفق</span>
-                    <x-ltr>{{ $deployment->http_health_details['output'] ?? $deployment->failure_message }}</x-ltr>
-                @elseif ($deployment->http_health_status === \App\Models\Deployment::HTTP_HEALTH_PENDING)
-                    <span class="badge badge-pending">در انتظار بررسی</span>
-                @else
-                    <span class="muted">بررسی HTTP انجام نشده است</span>
-                @endif
-            </td>
-        </tr>
-        @if ($deployment->release_notes)
-        <tr><th>{{ __('ui.deployments.release_notes_field') }}</th><td>{{ $deployment->release_notes }}</td></tr>
-        @endif
-        <tr><th>{{ __('ui.deployments.duration') }}</th><td>@if($deployment->durationSeconds() !== null)<x-ltr>{{ gmdate('H:i:s', $deployment->durationSeconds()) }}</x-ltr>@else — @endif</td></tr>
-        <tr><th>{{ __('ui.deployments.deployment_id') }}</th><td><x-ltr><code>{{ $deployment->public_id }}</code></x-ltr></td></tr>
-        @if ($deployment->previous_commit_hash)
-        <tr><th>{{ __('ui.deployments.previous_commit') }}</th><td><x-ltr><code>{{ $deployment->previous_commit_hash }}</code></x-ltr></td></tr>
-        @endif
-        @if ($deployment->rollbackOf)
-        <tr><th>{{ __('ui.deployments.rollback_of') }}</th><td><a href="{{ route('deployments.show', $deployment->rollbackOf) }}">{{ __('ui.deployments.rollback_of_value', ['id' => $deployment->rollbackOf->public_id]) }}</a></td></tr>
-        @endif
-        @php $rollbackDeployment = \App\Models\Deployment::where('rollback_of_deployment_id', $deployment->id)->latest()->first(); @endphp
-        @if ($rollbackDeployment)
-        <tr><th>{{ __('ui.deployments.rollback_status') }}</th><td>{{ __('ui.deployments.rolled_back_by') }} <a href="{{ route('deployments.show', $rollbackDeployment) }}"><x-ltr>{{ $rollbackDeployment->public_id }}</x-ltr></a> (<x-badge :status="$rollbackDeployment->status" />)</td></tr>
-        @endif
-        @if ($deployment->approved_by)
-        <tr><th>{{ __('ui.deployments.approved_by') }}</th><td>{{ __('ui.deployments.approved_at', ['who' => $deployment->approved_by, 'when' => $deployment->approved_at]) }}</td></tr>
-        @endif
-        <tr><th>{{ __('ui.common.server') }}</th><td><a href="{{ route('servers.show', $deployment->server) }}">{{ $deployment->server->name }}</a></td></tr>
-        <tr><th>{{ __('ui.deployments.queued') }}</th><td>{{ $deployment->queued_at?->diffForHumans() ?? '—' }}</td></tr>
-        <tr><th>{{ __('ui.deployments.started') }}</th><td>{{ $deployment->started_at?->diffForHumans() ?? '—' }}</td></tr>
-        <tr><th>{{ __('ui.deployments.finished') }}</th><td>{{ $deployment->finished_at?->diffForHumans() ?? '—' }}</td></tr>
-        {{-- Root-cause fix (sandogh deployment overhaul, Phase 5): "the
-        agent's commands exited 0" (finished_at, above) is NOT the same
-        claim as "production is verifiably serving this release"
-        (deployed_at — set only once activation and every health check
-        this recipe defines have actually passed). Shown for every
-        deployment, not just recipe-based ones, so the distinction is
-        never silently different between the two. --}}
-        <tr>
-            <th>{{ __('ui.deployments.verified_deployed') }}</th>
-            <td>
-                @if ($deployment->isVerifiedDeployed())
-                    <span class="badge badge-succeeded">{{ __('ui.deployments.verified_deployed_yes') }}</span>
-                    {{ $deployment->deployed_at->diffForHumans() }}
-                @elseif ($deployment->finished_at)
-                    <span class="badge badge-failed">{{ __('ui.deployments.verified_deployed_no') }}</span>
-                @else
-                    —
-                @endif
-            </td>
-        </tr>
-        @if ($deployment->failure_message)
-        <tr>
-            <th>{{ __('ui.deployments.failure') }}</th>
-            <td>
-                {{ $deployment->failure_message }}
-                @if ($deployment->failure_code)
-                    <br><span class="muted">{{ __('ui.deployments.failure_code', ['code' => $deployment->failure_code]) }}</span>
-                    @php $guidance = \App\Support\Deployment\FailureCodeGuidance::forCode($deployment->failure_code); @endphp
-                    @if ($guidance)
-                        <p class="muted" style="margin-top:0.3rem;">{{ $guidance }}</p>
-                    @endif
-                @endif
-            </td>
-        </tr>
-        @endif
-    </table>
+<x-ui.page-header
+    :eyebrow="__('deployment_ui.page_eyebrow')"
+    :title="$deployment->displayLabel() . ' — ' . $deployment->project->name"
+    :description="__('deployment_ui.page_description', ['branch' => $deployment->branch, 'commit' => substr($deployment->commit_hash, 0, 12)])"
+>
+    <x-slot:actions>
+        <a href="{{ route('projects.show', $deployment->project) }}" class="btn">{{ __('ui.common.project') }}: {{ $deployment->project->name }}</a>
+    </x-slot:actions>
+</x-ui.page-header>
 
-    <div style="margin-top:1rem;display:flex;gap:0.6rem;">
-        @if ($deployment->status === 'pending_approval')
-            @can('deploy', $deployment->project)
-            <form method="POST" action="{{ route('deployments.approve', $deployment) }}">
-                @csrf
-                <button type="submit" class="btn btn-primary">{{ __('ui.deployments.approve_button') }}</button>
-            </form>
-            <form method="POST" action="{{ route('deployments.cancel', $deployment) }}">
-                @csrf
-                <button type="submit" class="btn btn-danger">{{ __('ui.deployments.cancel_button') }}</button>
-            </form>
-            @endcan
-        @elseif ($deployment->status === 'queued')
-            @can('deploy', $deployment->project)
-            <form method="POST" action="{{ route('deployments.cancel', $deployment) }}">
-                @csrf
-                <button type="submit" class="btn btn-danger">{{ __('ui.deployments.cancel_button') }}</button>
-            </form>
-            @endcan
-        @elseif ($deployment->isRetryable())
-            @can('deploy', $deployment->project)
-            <form method="POST" action="{{ route('deployments.retry', $deployment) }}" id="retry-deployment-form" style="display:inline">
-                @csrf
-            </form>
-            <button type="button" class="btn btn-primary" onclick="document.getElementById('retry-deployment-dialog').showModal()">{{ __('ui.deployments.retry_button') }}</button>
-            <x-confirm-dialog
-                id="retry-deployment-dialog"
-                form-id="retry-deployment-form"
-                :title="__('ui.deployments.retry_button')"
-                :danger="false"
-                :confirm-label="__('ui.deployments.retry_button')"
-            >
-                <p>{{ __('ui.deployments.retry_confirm', ['commit' => $deployment->displayLabel()]) }}</p>
-            </x-confirm-dialog>
-            @endcan
-        @elseif ($deployment->status === 'succeeded')
-            @can('rollback', $deployment->project)
-            <form method="POST" action="{{ route('deployments.rollback', $deployment) }}" id="rollback-deployment-form" style="display:inline">
-                @csrf
-            </form>
-            <button type="button" class="btn" onclick="document.getElementById('rollback-deployment-dialog').showModal()">{{ __('ui.deployments.rollback_button') }}</button>
-            <x-confirm-dialog
-                id="rollback-deployment-dialog"
-                form-id="rollback-deployment-form"
-                :title="__('ui.deployments.rollback_button')"
-                :danger="false"
-                :confirm-label="__('ui.deployments.rollback_button')"
-            >
-                {{-- Task 8: explicit from/to instead of a generic "roll back to this commit?" --}}
-                <p>{{ __('ui.deployments.rollback_confirm_detailed', ['from' => $currentLive?->displayLabel() ?? '—', 'to' => $deployment->displayLabel()]) }}</p>
-                <table style="margin-top:0.4rem;">
-                    <tr><th>{{ __('ui.deployments.rollback_from') }}</th><td><span class="release-tag">{{ $currentLive?->displayLabel() ?? '—' }}</span></td></tr>
-                    <tr><th>{{ __('ui.deployments.rollback_to') }}</th><td><span class="release-tag">{{ $deployment->displayLabel() }}</span></td></tr>
-                </table>
-            </x-confirm-dialog>
-            @endcan
-        @endif
+<section class="ui-deployment-verdict ui-deployment-verdict--{{ $verdict['level'] }}" aria-labelledby="deployment-verdict-title">
+    <div class="ui-deployment-verdict__summary">
+        <x-ui.status-badge domain="deployment" :status="$deployment->status" />
+        <h2 id="deployment-verdict-title">{{ __('deployment_ui.verdict.'.$deployment->status.'_title') }}</h2>
+        <p>{{ __('deployment_ui.verdict.'.$deployment->status.'_description') }}</p>
     </div>
-</x-card>
+    <dl class="ui-deployment-verdict__facts">
+        <div>
+            <dt>{{ __('deployment_ui.deployment_id') }}</dt>
+            <dd class="ui-code-wrap">{{ $deployment->public_id }}</dd>
+        </div>
+        <div>
+            <dt>{{ __('deployment_ui.environment') }}</dt>
+            <dd>{{ $environmentName }}</dd>
+        </div>
+        <div>
+            <dt>{{ __('ui.deployments.started') }}</dt>
+            <dd>{{ $displayTime($deployment->started_at, __('deployment_ui.not_started')) }}</dd>
+        </div>
+        <div>
+            <dt>{{ __('ui.deployments.finished') }}</dt>
+            <dd>{{ $displayTime($deployment->finished_at, __('deployment_ui.not_finished')) }}</dd>
+        </div>
+        <div>
+            <dt>{{ __('deployment_ui.duration') }}</dt>
+            <dd><x-ltr>{{ $duration }}</x-ltr></dd>
+        </div>
+        <div>
+            <dt>{{ __('deployment_ui.target') }}</dt>
+            <dd>{{ $targetName }}</dd>
+        </div>
+    </dl>
+</section>
 
-{{-- Task 5: Live status --}}
-@if (!$deployment->isTerminal() || $deployment->status === 'failed')
-<x-card :title="__('ui.deployments.live_status_title')">
-    <div class="live-status-grid">
-        <div class="live-stat">
-            <span class="label">{{ __('ui.deployments.current_step') }}</span>
-            <strong>{{ $currentStep['name'] ?? __('ui.deployments.no_current_step') }}</strong>
-        </div>
-        <div class="live-stat">
-            <span class="label">{{ __('ui.deployments.execution_time') }}</span>
-            <strong><x-ltr>{{ $deployment->durationSeconds() !== null ? gmdate('H:i:s', $deployment->durationSeconds()) : '—' }}</x-ltr></strong>
-        </div>
-        @if ($deployment->status === 'failed' && $deployment->failure_message)
-        <div class="live-stat">
-            <span class="label">{{ __('ui.deployments.error_message') }}</span>
-            <strong class="stat-bad">{{ \Illuminate\Support\Str::limit($deployment->failure_message, 80) }}</strong>
-        </div>
-        @endif
-    </div>
-    @php $lastEntry = $deployment->logEntries->last(); @endphp
-    @if ($lastEntry)
-        <span class="label" style="display:block;font-size:0.75rem;color:#6a737d;margin-bottom:0.2rem;">{{ __('ui.deployments.last_log_line') }}</span>
-        <p class="muted" style="margin:0;"><x-ltr><code>{{ $lastEntry->step_name }}</code></x-ltr> — {{ \Illuminate\Support\Str::limit($lastEntry->output ?? '', 120) }}</p>
+<div class="ui-action-bar" aria-label="{{ __('deployment_ui.actions') }}">
+    @if ($deployment->status === 'pending_approval')
+        @can('deploy', $deployment->project)
+        <form method="POST" action="{{ route('deployments.approve', $deployment) }}">
+            @csrf
+            <button type="submit" class="btn btn-primary">{{ __('ui.deployments.approve_button') }}</button>
+        </form>
+        <form method="POST" action="{{ route('deployments.cancel', $deployment) }}">
+            @csrf
+            <button type="submit" class="btn btn-danger">{{ __('ui.deployments.cancel_button') }}</button>
+        </form>
+        @endcan
+    @elseif ($deployment->status === 'queued')
+        @can('deploy', $deployment->project)
+        <form method="POST" action="{{ route('deployments.cancel', $deployment) }}">
+            @csrf
+            <button type="submit" class="btn btn-danger">{{ __('ui.deployments.cancel_button') }}</button>
+        </form>
+        @endcan
+    @elseif ($deployment->isRetryable())
+        @can('deploy', $deployment->project)
+        <form method="POST" action="{{ route('deployments.retry', $deployment) }}" id="retry-deployment-form">
+            @csrf
+        </form>
+        <button type="button" class="btn btn-primary" onclick="document.getElementById('retry-deployment-dialog').showModal()">{{ __('ui.deployments.retry_button') }}</button>
+        <x-confirm-dialog
+            id="retry-deployment-dialog"
+            form-id="retry-deployment-form"
+            :title="__('ui.deployments.retry_button')"
+            :danger="false"
+            :confirm-label="__('ui.deployments.retry_button')"
+        >
+            <p>{{ __('ui.deployments.retry_confirm', ['commit' => $deployment->displayLabel()]) }}</p>
+        </x-confirm-dialog>
+        @endcan
+    @elseif ($deployment->status === 'succeeded')
+        @can('rollback', $deployment->project)
+        <form method="POST" action="{{ route('deployments.rollback', $deployment) }}" id="rollback-deployment-form">
+            @csrf
+        </form>
+        <button type="button" class="btn" onclick="document.getElementById('rollback-deployment-dialog').showModal()">{{ __('ui.deployments.rollback_button') }}</button>
+        <x-confirm-dialog
+            id="rollback-deployment-dialog"
+            form-id="rollback-deployment-form"
+            :title="__('ui.deployments.rollback_button')"
+            :danger="false"
+            :confirm-label="__('ui.deployments.rollback_button')"
+        >
+            <p>{{ __('ui.deployments.rollback_confirm_detailed', ['from' => $currentLive?->displayLabel() ?? '—', 'to' => $deployment->displayLabel()]) }}</p>
+            <table style="margin-top:0.4rem;">
+                <tr><th>{{ __('ui.deployments.rollback_from') }}</th><td><span class="release-tag">{{ $currentLive?->displayLabel() ?? '—' }}</span></td></tr>
+                <tr><th>{{ __('ui.deployments.rollback_to') }}</th><td><span class="release-tag">{{ $deployment->displayLabel() }}</span></td></tr>
+            </table>
+        </x-confirm-dialog>
+        @endcan
     @endif
-</x-card>
+</div>
+
+@if (in_array($deployment->status, ['failed', 'partial_success'], true))
+<x-ui.alert-panel level="danger" :title="__('deployment_ui.failure_title')" class="ui-ops-grid__full" style="margin-bottom:var(--ui-space-5);">
+    <dl class="ui-meta-grid" style="margin-top:var(--ui-space-3);">
+        <div>
+            <dt>{{ __('deployment_ui.failure_reason') }}</dt>
+            <dd>
+                @if ($failureCode)
+                    <code class="ui-code-wrap">{{ $failureCode }}</code>
+                @else
+                    {{ __('deployment_ui.unknown_failure') }}
+                @endif
+            </dd>
+        </div>
+        <div>
+            <dt>{{ __('deployment_ui.failed_stage') }}</dt>
+            <dd>{{ $failedStage ?? __('deployment_ui.unknown_stage') }}</dd>
+        </div>
+        <div class="ui-meta-grid__full">
+            <dt>{{ __('deployment_ui.error_message') }}</dt>
+            <dd>{{ $failureMessage ?? __('deployment_ui.unknown_failure') }}</dd>
+        </div>
+        <div class="ui-meta-grid__full">
+            <dt>{{ __('deployment_ui.operator_action') }}</dt>
+            <dd>{{ $guidance }}</dd>
+        </div>
+    </dl>
+</x-ui.alert-panel>
 @endif
 
-{{-- Task 4 (Phase 4-I) / recipe-aware (sandogh Phase 4): step visualization —
-same markup either way, $steps just comes from RecipeStepPresenter instead
-of PipelineStepPresenter for a recipe-driven Project (see controller). --}}
-@if (!empty($steps))
-<x-card :title="$usesRecipe ? __('ui.deployments.recipe_steps_title') : __('ui.deployments.pipeline_steps_title')">
-    <div class="pipeline-steps">
-        @foreach ($steps as $step)
-            @php
-                $icon = match ($step['status']) {
-                    'succeeded' => '✓',
-                    'failed' => '✗',
-                    'running' => '⏳',
-                    'skipped' => '—',
-                    default => '○',
-                };
-                $title = __('status.' . $step['status']);
-                if ($step['duration_ms'] !== null) { $title .= ' — ' . $step['duration_ms'] . 'ms'; }
-                if (($step['failure_code'] ?? null) !== null) { $title .= ' — ' . __('ui.deployments.failure_code', ['code' => $step['failure_code']]); }
-            @endphp
-            <span class="pipeline-step step-{{ $step['status'] }}" title="{{ $title }}">
-                <span class="step-icon">{{ $icon }}</span> {{ $step['name'] }}
-            </span>
-        @endforeach
-    </div>
-</x-card>
-
-{{-- Task 3: Timeline --}}
-<x-card :title="__('ui.deployments.timeline_title')">
-    <ul class="timeline">
-        @if ($deployment->queued_at)
-        <li class="tl-succeeded"><span class="tl-time"><x-ltr>{{ $deployment->queued_at->format('H:i') }}</x-ltr></span> — <span class="tl-label">{{ __('ui.deployments.timeline_deployment_queued') }}</span></li>
-        @endif
-        @if ($deployment->started_at)
-        <li class="tl-succeeded"><span class="tl-time"><x-ltr>{{ $deployment->started_at->format('H:i') }}</x-ltr></span> — <span class="tl-label">{{ __('ui.deployments.timeline_deployment_started') }}</span></li>
-        @endif
-        @foreach ($steps as $step)
-            @continue($step['status'] === 'pending' || $step['status'] === 'skipped')
-            <li class="tl-{{ $step['status'] }}">
-                <span class="tl-time"><x-ltr>{{ $step['started_at']?->format('H:i') ?? '—' }}</x-ltr></span>
-                — <span class="tl-label">{{ $step['name'] }}</span>
-                <x-badge :status="$step['status']" />
-                @if ($step['duration_ms'] !== null)<span class="muted">(<x-ltr>{{ $step['duration_ms'] }}ms</x-ltr>)</span>@endif
-            </li>
-        @endforeach
-        @if ($deployment->finished_at)
-        <li class="tl-{{ $deployment->status === 'succeeded' ? 'succeeded' : 'failed' }}"><span class="tl-time"><x-ltr>{{ $deployment->finished_at->format('H:i') }}</x-ltr></span> — <span class="tl-label">{{ __('status.' . $deployment->status) }}</span></li>
-        @endif
-    </ul>
-</x-card>
-@endif
-
-@if ($deployment->tasks->isNotEmpty())
-<x-card :title="__('ui.deployments.targets_title', ['environment' => $deployment->project->environments->first()?->name ?? __('ui.common.environment')])">
-    <table>
-        <thead><tr>
-            <th>{{ __('ui.deployments.target') }}</th>
-            <th>{{ __('ui.common.server') }}</th>
-            <th>{{ __('ui.common.status') }}</th>
-            <th>{{ __('ui.deployments.agent') }}</th>
-            <th>{{ __('ui.deployments.attempts') }}</th>
-            <th></th>
-        </tr></thead>
-        <tbody>
-        @foreach ($deployment->tasks as $task)
-            <tr>
-                <td>{{ $task->deploymentTarget->name }}</td>
-                <td><a href="{{ route('servers.show', $task->deploymentTarget->server) }}">{{ $task->deploymentTarget->server->name }}</a></td>
-                <td>
-                    <x-badge :status="$task->status" />
-                    @if ($task->next_retry_at)
-                        <span class="badge badge-queued">{{ __('ui.deployments.retry_at', ['time' => $task->next_retry_at->diffForHumans()]) }}</span>
+<div class="ui-ops-grid">
+    <x-ui.info-card
+        :title="__('deployment_ui.release_provenance')"
+        :description="__('deployment_ui.release_provenance_description')"
+    >
+        <dl class="ui-meta-grid">
+            <div class="ui-meta-grid__full">
+                <dt>{{ __('deployment_ui.commit') }}</dt>
+                <dd class="ui-code-wrap">{{ $deployment->commit_hash }}</dd>
+            </div>
+            <div>
+                <dt>{{ __('deployment_ui.branch') }}</dt>
+                <dd class="ui-code-wrap">{{ $deployment->branch }}</dd>
+            </div>
+            <div>
+                <dt>{{ __('deployment_ui.trigger') }}</dt>
+                <dd>
+                    {{ $deployment->trigger }}
+                    @if ($deployment->triggered_by)
+                        — {{ $deployment->triggered_by }}
                     @endif
-                </td>
-                <td>
-                    @php $lastJob = $task->agentJobs->last(); @endphp
-                    @if ($lastJob)
-                        {{ $lastJob->agent->name ?? $lastJob->agent->public_id }}
+                </dd>
+            </div>
+            <div>
+                <dt>{{ __('deployment_ui.artifact_id') }}</dt>
+                <dd class="ui-code-wrap">{{ $deployment->artifact?->public_id ?? ($deployment->artifact_id ? '#'.$deployment->artifact_id : __('deployment_ui.artifact_not_used')) }}</dd>
+            </div>
+            <div>
+                <dt>{{ __('deployment_ui.artifact_state') }}</dt>
+                <dd>
+                    @if ($artifactUiStatus)
+                        <x-ui.status-badge domain="artifact" :status="$artifactUiStatus" />
                     @else
-                        <x-empty-state>{{ __('ui.deployments.not_claimed_yet') }}</x-empty-state>
+                        <span class="muted">{{ __('deployment_ui.artifact_not_used') }}</span>
                     @endif
-                </td>
-                <td>{{ $task->agentJobs->count() }}</td>
-                <td><a href="{{ route('deployment-tasks.show', $task) }}">{{ __('ui.common.details') }} ←</a></td>
-            </tr>
-        @endforeach
-        </tbody>
-    </table>
-</x-card>
-@endif
+                </dd>
+            </div>
+            <div class="ui-meta-grid__full">
+                <dt>{{ __('deployment_ui.artifact_checksum') }}</dt>
+                <dd>
+                    @if ($deployment->artifact?->checksum_sha256)
+                        <span class="ui-code-wrap">{{ $deployment->artifact->checksum_sha256 }}</span>
+                        <span class="muted">— {{ $artifactIntegrityFailed ? __('deployment_ui.checksum_state_failed') : __('deployment_ui.checksum_state_recorded') }}</span>
+                    @else
+                        {{ __('deployment_ui.checksum_not_recorded') }}
+                    @endif
+                </dd>
+            </div>
+            @if ($deployment->artifact)
+            <div>
+                <dt>{{ __('deployment_ui.artifact_size') }}</dt>
+                <dd><x-ltr>{{ $deployment->artifact->sizeMb() }} MB</x-ltr></dd>
+            </div>
+            @endif
+            <div>
+                <dt>{{ __('deployment_ui.build_source') }}</dt>
+                <dd>{{ $deployment->artifact ? __('deployment_ui.build_source_artifact') : __('deployment_ui.build_source_direct') }}</dd>
+            </div>
+            <div>
+                <dt>{{ __('deployment_ui.builder_agent') }}</dt>
+                <dd>{{ $deployment->artifact?->uploaded_by ?? '—' }}</dd>
+            </div>
+            <div>
+                <dt>{{ __('deployment_ui.approval') }}</dt>
+                <dd>{{ $deployment->approved_by ? __('deployment_ui.approved_by_at', ['actor' => $deployment->approved_by, 'time' => $displayTime($deployment->approved_at, '—')]) : __('deployment_ui.not_approved') }}</dd>
+            </div>
+            @if ($deployment->previous_commit_hash)
+            <div class="ui-meta-grid__full">
+                <dt>{{ __('ui.deployments.previous_commit') }}</dt>
+                <dd class="ui-code-wrap">{{ $deployment->previous_commit_hash }}</dd>
+            </div>
+            @endif
+            @if ($deployment->rollbackOf || $rollbackDeployment)
+            <div class="ui-meta-grid__full">
+                <dt>{{ __('deployment_ui.rollback_lineage') }}</dt>
+                <dd>
+                    @if ($deployment->rollbackOf)
+                        {{ __('ui.deployments.rollback_of') }}
+                        <a href="{{ route('deployments.show', $deployment->rollbackOf) }}" class="ui-code-wrap">{{ $deployment->rollbackOf->public_id }}</a>
+                    @endif
+                    @if ($rollbackDeployment)
+                        {{ __('ui.deployments.rolled_back_by') }}
+                        <a href="{{ route('deployments.show', $rollbackDeployment) }}" class="ui-code-wrap">{{ $rollbackDeployment->public_id }}</a>
+                        <x-ui.status-badge domain="deployment" :status="$rollbackDeployment->status" size="small" />
+                    @endif
+                </dd>
+            </div>
+            @endif
+            @if ($deployment->release_notes)
+            <div class="ui-meta-grid__full">
+                <dt>{{ __('ui.deployments.release_notes_field') }}</dt>
+                <dd>{{ $deployment->release_notes }}</dd>
+            </div>
+            @endif
+        </dl>
+    </x-ui.info-card>
 
-<x-card :title="__('ui.deployments.pipeline_log_title')">
-    @forelse ($deployment->logEntries as $entry)
-        <h4 style="margin-bottom:0.2rem;">
-            {{ $entry->sequence }}. {{ $entry->step_name }}
-            {{-- Root-cause fix (sandogh deployment overhaul): a recipe step
-            (explicit `status` column set) can fail with no exit_code at
-            all — a verify_* check, or a restart_service the agent-local
-            ServiceAllowlist rejected before ever spawning a process — so
-            this can't rely on exit_code alone the way a legacy pipeline
-            entry (status always null) always has. --}}
-            @if ($entry->status !== null)
-                <span class="badge badge-{{ $entry->status }}">{{ __('status.' . $entry->status) }}</span>
-                @if ($entry->step_type)
-                    <span class="badge">{{ __('ui.deployments.recipe_step_type', ['type' => $entry->step_type]) }}</span>
-                @endif
-                @if ($entry->failure_code)
-                    <span class="muted">{{ __('ui.deployments.failure_code', ['code' => $entry->failure_code]) }}</span>
-                @endif
-            @elseif ($entry->exit_code === 0)
-                <span class="badge badge-succeeded">{{ __('ui.deployment_tasks.exit_success') }}</span>
-            @elseif ($entry->exit_code !== null)
-                <span class="badge badge-failed">{{ __('ui.deployment_tasks.exit_failed', ['code' => $entry->exit_code]) }}</span>
+    <x-ui.info-card
+        :title="__('deployment_ui.health_title')"
+        :description="__('deployment_ui.health_description')"
+    >
+        <x-ui.health-indicator
+            :status="$healthUiStatus"
+            :detail="$deployment->hasHttpHealthCheck() ? __('deployment_ui.health_configured') : __('deployment_ui.health_not_configured')"
+        />
+        <dl class="ui-meta-grid" style="margin-top:var(--ui-space-4);">
+            <div class="ui-meta-grid__full">
+                <dt>{{ __('deployment_ui.verified_live') }}</dt>
+                <dd>
+                    @if ($deployment->isVerifiedDeployed())
+                        <span class="stat-good">{{ __('ui.deployments.verified_deployed_yes') }} — {{ __('deployment_ui.verified_live_yes') }}</span>
+                    @else
+                        <span class="stat-warn">{{ __('ui.deployments.verified_deployed_no') }} — {{ __('deployment_ui.verified_live_no') }}</span>
+                    @endif
+                </dd>
+            </div>
+            @if ($deployment->hasHttpHealthCheck())
+            <div class="ui-meta-grid__full">
+                <dt>{{ __('deployment_ui.health_url') }}</dt>
+                <dd class="ui-code-wrap">{{ $healthConfig['url'] ?? '—' }}</dd>
+            </div>
+            <div>
+                <dt>{{ __('deployment_ui.health_expected_status') }}</dt>
+                <dd><x-ltr>{{ $healthConfig['expected_status'] ?? 200 }}</x-ltr></dd>
+            </div>
+            <div>
+                <dt>{{ __('deployment_ui.health_response_time') }}</dt>
+                <dd><x-ltr>{{ isset($healthDetails['duration_ms']) ? $healthDetails['duration_ms'].' ms' : '—' }}</x-ltr></dd>
+            </div>
+            <div class="ui-meta-grid__full">
+                <dt>{{ $healthUiStatus === 'failed' ? __('deployment_ui.health_failure_reason') : __('deployment_ui.health_result') }}</dt>
+                <dd>{{ $healthDetails['output'] ?? ($healthUiStatus === 'failed' ? ($failureMessage ?? __('deployment_ui.health_no_result')) : __('deployment_ui.health_no_result')) }}</dd>
+            </div>
             @endif
-            @if ($entry->timed_out)
-                <span class="badge badge-failed">{{ __('ui.deployment_tasks.timed_out') }}</span>
+        </dl>
+        @if ($deployment->http_health_verified_at)
+            <div class="ui-health-result">{{ $displayTime($deployment->http_health_verified_at, '—') }}</div>
+        @endif
+    </x-ui.info-card>
+
+    <x-ui.info-card
+        class="ui-ops-grid__full"
+        :title="__('deployment_ui.execution_timeline')"
+        :description="__('deployment_ui.execution_timeline_description')"
+    >
+        @if (!empty($steps))
+            <h3 style="font-size:var(--ui-text-sm);margin-top:0;">
+                {{ $usesRecipe ? __('ui.deployments.recipe_steps_title') : __('ui.deployments.pipeline_steps_title') }}
+            </h3>
+            <div class="ui-stage-list">
+                @foreach ($steps as $step)
+                    <x-ui.status-badge domain="deployment" :status="$step['status']" :label="$step['name']" size="small" :title="__('status.'.$step['status'])" />
+                @endforeach
+            </div>
+            @if ($currentStep)
+                <p class="muted"><strong>{{ __('ui.deployments.current_step') }}:</strong> {{ $currentStep['name'] }}</p>
             @endif
-            <span class="muted">(<x-ltr>{{ $entry->duration_ms }}ms</x-ltr>)</span>
-        </h4>
-        <p class="muted" style="margin-top:0;"><x-ltr><code>{{ $entry->command }}</code></x-ltr></p>
-        <pre>{{ $entry->output }}</pre>
-    @empty
-        <x-empty-state>{{ __('ui.deployments.no_log_entries') }}</x-empty-state>
-    @endforelse
-</x-card>
+        @endif
+
+        @if ($deployment->approved_at || $deployment->queued_at || $deployment->started_at || collect($steps)->contains(fn ($step) => !in_array($step['status'], ['pending', 'skipped'], true)) || $deployment->finished_at)
+        <x-ui.timeline :label="__('deployment_ui.execution_timeline')">
+            @if ($deployment->approved_at)
+            <li class="ui-timeline__item--success">
+                <span class="ui-timeline__time">{{ $displayTime($deployment->approved_at, '—') }}</span>
+                <span class="ui-timeline__event"><span class="ui-timeline__title">{{ __('deployment_ui.event_approved') }}</span></span>
+            </li>
+            @endif
+            @if ($deployment->queued_at)
+            <li class="ui-timeline__item--success">
+                <span class="ui-timeline__time">{{ $displayTime($deployment->queued_at, '—') }}</span>
+                <span class="ui-timeline__event"><span class="ui-timeline__title">{{ __('deployment_ui.event_queued') }}</span></span>
+            </li>
+            @endif
+            @if ($deployment->started_at)
+            <li class="ui-timeline__item--info">
+                <span class="ui-timeline__time">{{ $displayTime($deployment->started_at, '—') }}</span>
+                <span class="ui-timeline__event"><span class="ui-timeline__title">{{ __('deployment_ui.event_started') }}</span></span>
+            </li>
+            @endif
+            @foreach ($steps as $step)
+                @continue(in_array($step['status'], ['pending', 'skipped'], true))
+                @php
+                    $stepPresentation = \App\Support\Ui\StatusRegistry::resolve('deployment', $step['status']);
+                @endphp
+                <li class="ui-timeline__item--{{ $stepPresentation['level'] }}">
+                    <span class="ui-timeline__time">{{ $step['started_at'] ? $displayTime($step['started_at'], '—') : '—' }}</span>
+                    <span class="ui-timeline__event">
+                        <span class="ui-timeline__title">{{ $step['name'] }}</span>
+                        <x-ui.status-badge domain="deployment" :status="$step['status']" size="small" />
+                        @if ($step['duration_ms'] !== null)
+                            <span class="muted ui-code-wrap">{{ $step['duration_ms'] }} ms</span>
+                        @endif
+                    </span>
+                </li>
+            @endforeach
+            @if ($deployment->http_health_verified_at)
+            <li class="ui-timeline__item--success">
+                <span class="ui-timeline__time">{{ $displayTime($deployment->http_health_verified_at, '—') }}</span>
+                <span class="ui-timeline__event"><span class="ui-timeline__title">{{ __('deployment_ui.event_health_verified') }}</span></span>
+            </li>
+            @endif
+            @if ($deployment->rolled_back_at)
+            <li class="ui-timeline__item--warning">
+                <span class="ui-timeline__time">{{ $displayTime($deployment->rolled_back_at, '—') }}</span>
+                <span class="ui-timeline__event"><span class="ui-timeline__title">{{ __('deployment_ui.event_rolled_back') }}</span></span>
+            </li>
+            @endif
+            @if ($deployment->finished_at)
+            <li class="ui-timeline__item--{{ $verdict['level'] }}">
+                <span class="ui-timeline__time">{{ $displayTime($deployment->finished_at, '—') }}</span>
+                <span class="ui-timeline__event">
+                    <span class="ui-timeline__title">{{ __('deployment_ui.event_finished') }}</span>
+                    <x-ui.status-badge domain="deployment" :status="$deployment->status" size="small" />
+                </span>
+            </li>
+            @endif
+        </x-ui.timeline>
+        @else
+            <x-ui.empty-state :title="__('deployment_ui.no_timeline_events')" />
+        @endif
+    </x-ui.info-card>
+
+    <x-ui.info-card
+        class="ui-ops-grid__full"
+        :title="__('deployment_ui.targets_title')"
+        :description="__('deployment_ui.targets_description')"
+    >
+        <div class="ui-table-wrap">
+            <table>
+                <thead><tr>
+                    <th>{{ __('deployment_ui.target') }}</th>
+                    <th>{{ __('deployment_ui.server') }}</th>
+                    <th>{{ __('ui.common.status') }}</th>
+                    <th>{{ __('deployment_ui.agent') }}</th>
+                    <th>{{ __('deployment_ui.agent_version') }}</th>
+                    <th>{{ __('deployment_ui.heartbeat') }}</th>
+                    <th>{{ __('deployment_ui.attempts') }}</th>
+                    <th></th>
+                </tr></thead>
+                <tbody>
+                @forelse ($deployment->tasks as $task)
+                    @php
+                        $lastJob = $task->agentJobs->last();
+                        $agent = $lastJob?->agent;
+                    @endphp
+                    <tr>
+                        <td>{{ $task->deploymentTarget->name }}</td>
+                        <td><a href="{{ route('servers.show', $task->deploymentTarget->server) }}">{{ $task->deploymentTarget->server->name }}</a></td>
+                        <td><x-ui.status-badge domain="deployment" :status="$task->status" size="small" /></td>
+                        <td>
+                            @if ($agent)
+                                <span class="ui-agent-identity">
+                                    <span>{{ $agent->name ?? $agent->public_id }}</span>
+                                    <x-ui.status-badge domain="agent" :status="$agent->isOnline() ? 'online' : 'offline'" size="small" />
+                                </span>
+                            @else
+                                <span class="muted">{{ __('deployment_ui.agent_not_claimed') }}</span>
+                            @endif
+                        </td>
+                        <td>{{ $agent?->agent_version ?? '—' }}</td>
+                        <td>{{ $agent?->last_seen_at ? $displayTime($agent->last_seen_at, '—') : '—' }}</td>
+                        <td>{{ $task->agentJobs->count() }}</td>
+                        <td><a href="{{ route('deployment-tasks.show', $task) }}">{{ __('deployment_ui.view_target') }}</a></td>
+                    </tr>
+                @empty
+                    <tr>
+                        <td>{{ __('deployment_ui.legacy_target') }}</td>
+                        <td><a href="{{ route('servers.show', $deployment->server) }}">{{ $deployment->server->name }}</a></td>
+                        <td><x-ui.status-badge domain="deployment" :status="$deployment->status" size="small" /></td>
+                        <td colspan="3"><span class="muted">{{ __('deployment_ui.agent_not_recorded') }}</span></td>
+                        <td>—</td>
+                        <td></td>
+                    </tr>
+                @endforelse
+                </tbody>
+            </table>
+        </div>
+    </x-ui.info-card>
+
+    <x-ui.info-card
+        class="ui-ops-grid__full"
+        :title="__('deployment_ui.logs_title')"
+        :description="__('deployment_ui.logs_description')"
+    >
+        <div class="ui-log-list">
+            @forelse ($deployment->logEntries as $entry)
+                @php
+                    $entryStatus = $entry->status
+                        ?? ($entry->exit_code === 0 ? 'succeeded' : ($entry->exit_code !== null ? 'failed' : 'running'));
+                @endphp
+                <details class="ui-log-entry">
+                    <summary>
+                        <span class="ui-log-entry__name">{{ $entry->sequence }}. {{ $entry->step_name }}</span>
+                        <x-ui.status-badge domain="deployment" :status="$entryStatus" size="small" />
+                        @if ($entry->timed_out)
+                            <span class="ui-status ui-status--danger ui-status--small">{{ __('ui.deployment_tasks.timed_out') }}</span>
+                        @endif
+                        @if ($entry->failure_code)
+                            <span class="muted ui-code-wrap">{{ $entry->failure_code }}</span>
+                        @endif
+                        <span class="muted ui-code-wrap">{{ $entry->duration_ms }} ms</span>
+                    </summary>
+                    <div class="ui-log-entry__content">
+                        <strong>{{ __('deployment_ui.log_command') }}</strong>
+                        <p class="ui-code-wrap">{{ $entry->command }}</p>
+                        <strong>{{ __('deployment_ui.log_output') }}</strong>
+                        <pre>{{ $entry->output }}</pre>
+                    </div>
+                </details>
+            @empty
+                <x-ui.empty-state :title="__('ui.deployments.no_log_entries')" />
+            @endforelse
+        </div>
+    </x-ui.info-card>
+</div>
 @endsection
