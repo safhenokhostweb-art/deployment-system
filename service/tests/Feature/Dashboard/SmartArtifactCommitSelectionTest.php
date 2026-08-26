@@ -76,6 +76,68 @@ class SmartArtifactCommitSelectionTest extends TestCase
         $this->assertDatabaseCount('deployments', 0);
     }
 
+    /**
+     * Reproduces the exact reported production scenario for deployment-system
+     * itself (not just an external project): the authoritative Agent's
+     * persistent source workspace is still checked out at an old commit
+     * (only `local_head_sha` is stale — nothing else about the mapping is),
+     * while its remote-tracking ref has already advanced past a normal push.
+     * Build Artifact eligibility must track the exact remote SHA, never the
+     * workspace's own lagging HEAD — and computing that eligibility must
+     * never itself mutate the persistent mapping row.
+     */
+    public function test_deployment_system_stale_workspace_head_never_blocks_build_for_the_fresh_remote_commit(): void
+    {
+        $oldHead = str_repeat('1', 40);
+        $freshRemote = str_repeat('2', 40);
+        [$user, $project, $mapping] = $this->verifiedProject('deployment-system', $oldHead);
+        $mapping->update(['remote_tracking_sha' => $freshRemote]);
+        $mappingUpdatedAt = $mapping->fresh()->updated_at->toIso8601String();
+
+        $response = $this->actingAs($user)->get(route('projects.show', $project));
+
+        $response->assertOk()->assertSee($freshRemote)->assertSee($oldHead);
+        $this->assertSelectorTargets($response->getContent(), $freshRemote);
+        $this->assertBuildButtonEnabled($response->getContent());
+        $this->assertSame($oldHead, $mapping->fresh()->local_head_sha, 'Reading eligibility must never rewrite the reported workspace HEAD.');
+        $this->assertSame($mappingUpdatedAt, $mapping->fresh()->updated_at->toIso8601String(), 'Reading eligibility must not touch the mapping row at all.');
+
+        $this->actingAs($user)->post(route('projects.publish', $project), [
+            'local_project_mapping_id' => $mapping->id,
+            'commit_selection_mode' => 'latest',
+        ])->assertRedirect();
+
+        $job = PublishJob::sole();
+        $this->assertSame($freshRemote, $job->reviewed_head_sha, 'The queued build must target the exact remote HEAD, never the stale workspace HEAD.');
+        $this->assertSame($oldHead, $mapping->fresh()->local_head_sha, 'Queuing a build must never rewrite the persistent workspace mapping.');
+    }
+
+    /**
+     * Two build requests for the exact same project+commit (a double click,
+     * or a webhook auto-build racing an operator's manual click) must never
+     * queue two separate isolated builds for an identical commit.
+     */
+    public function test_concurrent_build_requests_for_the_same_commit_reuse_the_same_publish_job(): void
+    {
+        [$user, $project, $mapping] = $this->verifiedProject('deployment-system', str_repeat('a', 40));
+        $remote = str_repeat('b', 40);
+        $mapping->update(['remote_tracking_sha' => $remote]);
+
+        $this->actingAs($user)->post(route('projects.publish', $project), [
+            'local_project_mapping_id' => $mapping->id,
+            'commit_selection_mode' => 'latest',
+        ])->assertRedirect();
+        $first = PublishJob::sole();
+
+        $this->actingAs($user)->post(route('projects.publish', $project), [
+            'local_project_mapping_id' => $mapping->id,
+            'commit_selection_mode' => 'latest',
+        ])->assertRedirect();
+
+        $this->assertDatabaseCount('publish_jobs', 1);
+        $this->assertSame($first->id, PublishJob::sole()->id);
+    }
+
     public function test_valid_artifact_for_older_commit_does_not_shadow_new_remote_head(): void
     {
         [$user, $project, $mapping] = $this->verifiedProject('customer-site', str_repeat('a', 40));

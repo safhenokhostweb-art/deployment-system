@@ -77,29 +77,48 @@ class PublishJobService
         $mapping = $this->buildAgents->resolve($project, $branch);
         abort_unless($mapping->local_agent_id === $localAgent->id, 409, 'Artifact builds must use the project authoritative production build Agent.');
 
-        $job = PublishJob::create([
-            'local_agent_id' => $localAgent->id,
-            'project_id' => $project->id,
-            'action' => PublishJob::ACTION_BUILD_ARTIFACT,
-            'status' => PublishJob::STATUS_APPROVED,
-            'requested_by' => $requestedBy,
-            'approved_by' => $requestedBy,
-            'approved_at' => now(),
-            'reviewed_head_sha' => $commitHash,
-            'reviewed_branch' => $branch,
-            'reviewed_working_tree_clean' => true,
-        ]);
+        return DB::transaction(function () use ($localAgent, $project, $commitHash, $branch, $requestedBy): PublishJob {
+            // Concurrency: a build for this exact project+commit may already
+            // be in flight (a double click, a webhook-triggered auto-build,
+            // or a racing request) — reuse it instead of racing the same
+            // Agent through two isolated build workspaces for an identical
+            // commit. Locked so two simultaneous requests can't both read
+            // "none exists yet" and both insert.
+            $existingBuild = PublishJob::query()
+                ->where('project_id', $project->id)
+                ->where('action', PublishJob::ACTION_BUILD_ARTIFACT)
+                ->where('reviewed_head_sha', $commitHash)
+                ->whereIn('status', [PublishJob::STATUS_QUEUED, PublishJob::STATUS_APPROVED, PublishJob::STATUS_RUNNING])
+                ->lockForUpdate()
+                ->first();
+            if ($existingBuild !== null) {
+                return $existingBuild;
+            }
 
-        AuditLogEntry::record(
-            actorType: AuditLogEntry::ACTOR_USER,
-            actorIdentifier: $requestedBy,
-            action: 'publish_job.artifact_build_queued',
-            subjectType: PublishJob::class,
-            subjectId: $job->id,
-            metadata: ['local_agent_id' => $localAgent->id, 'project_id' => $project->id, 'commit_hash' => $commitHash, 'branch' => $branch],
-        );
+            $job = PublishJob::create([
+                'local_agent_id' => $localAgent->id,
+                'project_id' => $project->id,
+                'action' => PublishJob::ACTION_BUILD_ARTIFACT,
+                'status' => PublishJob::STATUS_APPROVED,
+                'requested_by' => $requestedBy,
+                'approved_by' => $requestedBy,
+                'approved_at' => now(),
+                'reviewed_head_sha' => $commitHash,
+                'reviewed_branch' => $branch,
+                'reviewed_working_tree_clean' => true,
+            ]);
 
-        return $job;
+            AuditLogEntry::record(
+                actorType: AuditLogEntry::ACTOR_USER,
+                actorIdentifier: $requestedBy,
+                action: 'publish_job.artifact_build_queued',
+                subjectType: PublishJob::class,
+                subjectId: $job->id,
+                metadata: ['local_agent_id' => $localAgent->id, 'project_id' => $project->id, 'commit_hash' => $commitHash, 'branch' => $branch],
+            );
+
+            return $job;
+        });
     }
 
     /**
