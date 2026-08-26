@@ -52,7 +52,7 @@ use DeploymentAgent\WorkspaceScanner;
  * can flag servers running an outdated agent. Bump this when agent.php or
  * lib/* changes in a way that matters operationally.
  */
-const AGENT_VERSION = '1.3.5';
+const AGENT_VERSION = '1.3.6';
 
 $configPath = __DIR__ . '/config.php';
 
@@ -316,6 +316,7 @@ function pollAndExecuteOperation(Client $client, Executor $executor, array $conf
 
     $workingDirectory = sys_get_temp_dir();
     $phpBinary = 'php';
+    $projectKey = null;
 
     if (OperationRegistry::requiresProject($operationType)) {
         $projectKey = $job['project_key'] ?? null;
@@ -348,6 +349,29 @@ function pollAndExecuteOperation(Client $client, Executor $executor, array $conf
 
     $timeout = $config['default_step_timeout_seconds'];
     $result = $executor->run($command, $workingDirectory, $timeout);
+
+    if (
+        $result['exitCode'] === 0
+        && !$result['timedOut']
+        && OperationRegistry::requiresRuntimePermissionsAfter($operationType)
+    ) {
+        // Keep the privilege boundary identical to deployment pipelines:
+        // a literal argv call to the root-owned helper, with the project key
+        // already resolved from this Agent's local configuration.
+        $logger->info("Operation job {$job['id']}: normalizing runtime permissions after config cache.");
+        $permissionsResult = $executor->runArgv(
+            ['sudo', '-n', '/usr/local/sbin/deployment-runtime-permissions', (string) $projectKey],
+            $workingDirectory,
+            $timeout,
+        );
+        $result = [
+            'exitCode' => $permissionsResult['exitCode'],
+            'output' => rtrim($result['output']) . "\n" . $permissionsResult['output'],
+            'timedOut' => $permissionsResult['timedOut'],
+            'durationMs' => $result['durationMs'] + $permissionsResult['durationMs'],
+        ];
+    }
+
     $output = mb_substr($result['output'], -50000);
 
     if ($result['exitCode'] !== 0 || $result['timedOut']) {

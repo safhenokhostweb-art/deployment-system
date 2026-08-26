@@ -41,6 +41,16 @@ final class OperationRegistry
         return in_array($type, self::REQUIRES_PROJECT, true);
     }
 
+    /**
+     * `artisan config:cache` creates bootstrap/cache/config.php as the
+     * unprivileged deployment user. Normalize the narrowly allowlisted
+     * runtime paths immediately afterward so PHP-FPM can update that cache.
+     */
+    public static function requiresRuntimePermissionsAfter(string $type): bool
+    {
+        return $type === 'config_cache';
+    }
+
     public static function commandFor(string $type): ?string
     {
         return self::COMMANDS[$type] ?? null;

@@ -193,6 +193,7 @@ check('disk_check is an allowed, server-group operation needing no project', Ope
 check('an arbitrary/malicious type string is never allowed', !OperationRegistry::isAllowed('rm -rf /'), $failures, $passCount);
 check('an unknown type resolves to no command at all', OperationRegistry::commandFor('rm -rf /') === null, $failures, $passCount);
 check('cache_clear resolves to the expected artisan command template', OperationRegistry::commandFor('cache_clear') === '{php_binary} artisan cache:clear', $failures, $passCount);
+check('config_cache alone requires post-operation runtime permission normalization', OperationRegistry::requiresRuntimePermissionsAfter('config_cache') && !OperationRegistry::requiresRuntimePermissionsAfter('cache_clear') && !OperationRegistry::requiresRuntimePermissionsAfter('route_cache'), $failures, $passCount);
 
 // --- Phase 4-K: HealthCollector — best-effort, must never throw and must
 // always return the expected shape (nullable floats), regardless of

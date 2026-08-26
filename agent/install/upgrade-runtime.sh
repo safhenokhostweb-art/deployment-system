@@ -15,6 +15,8 @@ FAILED="${INSTALL_DIR}.failed-${STAMP}"
 PRIVILEGED_BACKUP="${INSTALL_DIR}.privileged-backup-${STAMP}"
 RUNTIME_HELPER=/usr/local/sbin/deployment-runtime-permissions
 RUNTIME_SUDOERS=/etc/sudoers.d/deployment-runtime-permissions
+SERVICE_RELOAD_HELPER=/usr/local/sbin/deployment-service-reload
+SERVICE_RELOAD_SUDOERS=/etc/sudoers.d/deployment-service-reload
 CURRENT_MOVED=false
 ACTIVATED=false
 PRIVILEGED_ACTIVATED=false
@@ -31,6 +33,8 @@ esac
 [ -f "$SOURCE_DIR/agent.php" ] || fail 'Server Agent source is missing'
 [ -f "$SCRIPT_DIR/deployment-runtime-permissions" ] || fail 'runtime permission helper source is missing'
 [ -f "$SCRIPT_DIR/deployment-runtime-permissions.sudoers" ] || fail 'runtime permission sudoers source is missing'
+[ -f "$SCRIPT_DIR/deployment-service-reload" ] || fail 'service reload helper source is missing'
+[ -f "$SCRIPT_DIR/deployment-service-reload.sudoers" ] || fail 'service reload sudoers source is missing'
 [ ! -e "$STAGING" ] || fail "staging path already exists: $STAGING"
 [ ! -e "$BACKUP" ] || fail "backup path already exists: $BACKUP"
 [ ! -e "$PRIVILEGED_BACKUP" ] || fail "privileged helper backup path already exists: $PRIVILEGED_BACKUP"
@@ -46,6 +50,8 @@ php -l "$SOURCE_DIR/agent.php" >/dev/null
 for file in "$SOURCE_DIR"/lib/*.php; do php -l "$file" >/dev/null; done
 bash -n "$SCRIPT_DIR/deployment-runtime-permissions"
 visudo -cf "$SCRIPT_DIR/deployment-runtime-permissions.sudoers" >/dev/null
+bash -n "$SCRIPT_DIR/deployment-service-reload"
+visudo -cf "$SCRIPT_DIR/deployment-service-reload.sudoers" >/dev/null
 
 CONFIG_HASH="$(sha256sum "$INSTALL_DIR/config.php" | awk '{print $1}')"
 cp -a "$INSTALL_DIR" "$STAGING"
@@ -70,6 +76,8 @@ done
 install -d -o root -g root -m 0700 "$PRIVILEGED_BACKUP"
 if [ -e "$RUNTIME_HELPER" ]; then cp -a "$RUNTIME_HELPER" "$PRIVILEGED_BACKUP/helper"; else touch "$PRIVILEGED_BACKUP/helper.absent"; fi
 if [ -e "$RUNTIME_SUDOERS" ]; then cp -a "$RUNTIME_SUDOERS" "$PRIVILEGED_BACKUP/sudoers"; else touch "$PRIVILEGED_BACKUP/sudoers.absent"; fi
+if [ -e "$SERVICE_RELOAD_HELPER" ]; then cp -a "$SERVICE_RELOAD_HELPER" "$PRIVILEGED_BACKUP/service-reload"; else touch "$PRIVILEGED_BACKUP/service-reload.absent"; fi
+if [ -e "$SERVICE_RELOAD_SUDOERS" ]; then cp -a "$SERVICE_RELOAD_SUDOERS" "$PRIVILEGED_BACKUP/service-reload-sudoers"; else touch "$PRIVILEGED_BACKUP/service-reload-sudoers.absent"; fi
 
 rollback() {
     code=$?
@@ -89,6 +97,16 @@ rollback() {
         else
             rm -f "$RUNTIME_SUDOERS"
         fi
+        if [ -f "$PRIVILEGED_BACKUP/service-reload" ]; then
+            install -o root -g root -m 0755 "$PRIVILEGED_BACKUP/service-reload" "$SERVICE_RELOAD_HELPER"
+        else
+            rm -f "$SERVICE_RELOAD_HELPER"
+        fi
+        if [ -f "$PRIVILEGED_BACKUP/service-reload-sudoers" ]; then
+            install -o root -g root -m 0440 "$PRIVILEGED_BACKUP/service-reload-sudoers" "$SERVICE_RELOAD_SUDOERS"
+        else
+            rm -f "$SERVICE_RELOAD_SUDOERS"
+        fi
     fi
     if [ "$CURRENT_MOVED" = true ] && [ -d "$BACKUP" ]; then
         mv "$BACKUP" "$INSTALL_DIR"
@@ -107,6 +125,9 @@ PRIVILEGED_ACTIVATED=true
 install -o root -g root -m 0755 "$SCRIPT_DIR/deployment-runtime-permissions" "$RUNTIME_HELPER"
 install -o root -g root -m 0440 "$SCRIPT_DIR/deployment-runtime-permissions.sudoers" "$RUNTIME_SUDOERS"
 visudo -cf "$RUNTIME_SUDOERS" >/dev/null
+install -o root -g root -m 0755 "$SCRIPT_DIR/deployment-service-reload" "$SERVICE_RELOAD_HELPER"
+install -o root -g root -m 0440 "$SCRIPT_DIR/deployment-service-reload.sudoers" "$SERVICE_RELOAD_SUDOERS"
+visudo -cf "$SERVICE_RELOAD_SUDOERS" >/dev/null
 systemctl restart "$SERVICE"
 sleep 2
 systemctl is-active --quiet "$SERVICE"
@@ -114,6 +135,8 @@ systemctl is-active --quiet "$SERVICE"
 grep -q "^const AGENT_VERSION = '$SOURCE_VERSION';$" "$INSTALL_DIR/agent.php"
 cmp -s "$SCRIPT_DIR/deployment-runtime-permissions" "$RUNTIME_HELPER"
 cmp -s "$SCRIPT_DIR/deployment-runtime-permissions.sudoers" "$RUNTIME_SUDOERS"
+cmp -s "$SCRIPT_DIR/deployment-service-reload" "$SERVICE_RELOAD_HELPER"
+cmp -s "$SCRIPT_DIR/deployment-service-reload.sudoers" "$SERVICE_RELOAD_SUDOERS"
 
 trap - ERR
 echo "UPGRADE_OK service=$SERVICE version=$CURRENT_VERSION->$SOURCE_VERSION backup=$BACKUP privileged_backup=$PRIVILEGED_BACKUP"

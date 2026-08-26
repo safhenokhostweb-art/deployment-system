@@ -8,10 +8,52 @@ if [ "$#" -ne 1 ]; then
     exit 64
 fi
 
+# Application releases do not change PHP-FPM configuration, and production
+# OPcache validates timestamps, so reloading the shared PHP-FPM service here
+# only interrupts unrelated in-flight requests. Nginx is different: an
+# operator may legitimately change its configuration between deployments.
+# Hash the fully expanded, syntax-checked configuration and reload only after
+# a real change. The first invocation establishes a baseline without touching
+# the running service.
+NGINX_STATE_DIR=/var/lib/deployment-agent
+NGINX_STATE_FILE="$NGINX_STATE_DIR/nginx-config.sha256"
+NGINX_LOCK_FILE="$NGINX_STATE_DIR/nginx-config.lock"
+
+persist_nginx_hash() {
+    local hash="$1" temporary
+    temporary="$(/usr/bin/mktemp "${NGINX_STATE_FILE}.tmp.XXXXXX")"
+    printf '%s\n' "$hash" > "$temporary"
+    /bin/chmod 0644 "$temporary"
+    /bin/mv -f -- "$temporary" "$NGINX_STATE_FILE"
+}
+
+reload_nginx_if_config_changed() {
+    local current_hash previous_hash
+
+    /usr/bin/install -d -o root -g root -m 0755 "$NGINX_STATE_DIR"
+    exec 9>"$NGINX_LOCK_FILE"
+    /usr/bin/flock -x 9
+
+    current_hash="$(/usr/sbin/nginx -T 2>/dev/null | /usr/bin/sha256sum)"
+    current_hash="${current_hash%% *}"
+
+    if [ ! -r "$NGINX_STATE_FILE" ]; then
+        persist_nginx_hash "$current_hash"
+        return 0
+    fi
+
+    read -r previous_hash < "$NGINX_STATE_FILE"
+    if [ "$current_hash" = "$previous_hash" ]; then
+        return 0
+    fi
+
+    /usr/bin/systemctl reload nginx
+    persist_nginx_hash "$current_hash"
+}
+
 case "$1" in
     deployment-system)
-        /usr/bin/systemctl reload php8.3-fpm
-        /usr/bin/systemctl reload nginx
+        reload_nginx_if_config_changed
         # The activated release's queue workers must load the new code.
         # Workers are long-running processes that keep their old bytecode
         # until restarted, so `artisan queue:restart` alone (soft signal
@@ -20,8 +62,7 @@ case "$1" in
         /usr/bin/supervisorctl restart 'deployment-service-worker:*'
         ;;
     saas-platform)
-        /usr/bin/systemctl reload php8.3-fpm
-        /usr/bin/systemctl reload nginx
+        reload_nginx_if_config_changed
 
         # These programs are intentionally always-on. Restart only their
         # exact allowlisted names so the activated release is loaded.
