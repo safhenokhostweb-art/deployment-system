@@ -66,7 +66,7 @@ final class ArtifactUploader
     /**
      * @return array{succeeded: bool, message: string, failureCode: ?string}
      */
-    public function buildAndUploadRemoteCommit(string $projectKey, string $repositoryPath, string $remoteName, string $commitHash, string $branch, string $jobId, ?callable $onTick = null, string $applicationRoot = '.'): array
+    public function buildAndUploadRemoteCommit(string $projectKey, string $repositoryPath, string $repositoryUrl, string $remoteName, string $commitHash, string $branch, string $jobId, ?callable $onTick = null, string $applicationRoot = '.'): array
     {
         return $this->buildAndUploadFromPreparedSource(
             $projectKey,
@@ -74,7 +74,7 @@ final class ArtifactUploader
             $commitHash,
             $branch,
             $jobId,
-            fn (BuildWorkspace $workspace) => $this->sourcePreparer->prepareRemoteCommit($workspace, $repositoryPath, $remoteName, $branch, $commitHash, $onTick),
+            fn (BuildWorkspace $workspace) => $this->sourcePreparer->prepareRemoteCommit($workspace, $repositoryPath, $repositoryUrl, $remoteName, $branch, $commitHash, $onTick),
             $onTick,
             $applicationRoot,
         );

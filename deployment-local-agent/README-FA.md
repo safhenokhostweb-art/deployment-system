@@ -51,7 +51,7 @@ C:\ProgramData\DeploymentLocalAgent\agent\config.php
 
 ```bash
 sudo /opt/deployment-agent/workspaces/deployment-system/deployment-local-agent/upgrade-linux.sh \
-  --expected-version 1.4.6
+  --expected-version 1.4.7
 ```
 
 اسکریپت فقط `agent.php`، `heartbeat-watchdog.php` و `lib/*.php` را فعال

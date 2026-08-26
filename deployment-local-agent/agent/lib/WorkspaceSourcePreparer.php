@@ -65,13 +65,15 @@ final class WorkspaceSourcePreparer
     /**
      * @return array{commitTimestamp: int}
      */
-    public function prepareRemoteCommit(BuildWorkspace $workspace, string $repositoryPath, string $remoteName, string $branch, string $commitHash, ?callable $onTick = null): array
+    public function prepareRemoteCommit(BuildWorkspace $workspace, string $repositoryPath, string $repositoryUrl, string $remoteName, string $branch, string $commitHash, ?callable $onTick = null): array
     {
         if (SafetyChecker::productionSourcePathForbidden($repositoryPath)) {
             throw new LocalBuildFailedException('production_source_forbidden', "Production target '{$repositoryPath}' cannot be used as a Git or artifact source.");
         }
 
+        $this->assertTrustedPersistentWorkspace($repositoryPath, $repositoryUrl, $remoteName, $branch);
         $this->fetchBranch($repositoryPath, $remoteName, $branch, $onTick);
+        $this->assertLocalBranchNotDiverged($repositoryPath, $remoteName, $branch);
         $this->assertCommitExists($repositoryPath, $commitHash);
         $this->assertCommitReachableFromRemoteBranch($repositoryPath, $commitHash, $remoteName, $branch);
 
@@ -90,6 +92,84 @@ final class WorkspaceSourcePreparer
         $this->copyPathDependencies($workspace, $repositoryPath);
 
         return ['commitTimestamp' => $this->commitTimestamp($workspace->projectDir(), $commitHash)];
+    }
+
+    private function assertTrustedPersistentWorkspace(string $repositoryPath, string $repositoryUrl, string $remoteName, string $branch): void
+    {
+        if (!is_dir($repositoryPath)) {
+            throw new LocalBuildFailedException('local_workspace_prepare_failed', "Source workspace '{$repositoryPath}' does not exist.");
+        }
+        if (preg_match('/^[A-Za-z0-9._-]+$/', $remoteName) !== 1) {
+            throw new LocalBuildFailedException('local_workspace_prepare_failed', "Configured remote name '{$remoteName}' contains unsupported characters.");
+        }
+        if (!$this->validBranch($branch)) {
+            throw new LocalBuildFailedException('local_workspace_prepare_failed', "Configured branch '{$branch}' contains unsupported characters.");
+        }
+
+        $inside = $this->git->run(['git', 'rev-parse', '--is-inside-work-tree'], $repositoryPath, $this->git->timeoutFor('status'));
+        if ($inside['exitCode'] !== 0 || trim($inside['output']) !== 'true') {
+            throw new LocalBuildFailedException('local_workspace_prepare_failed', "Source workspace '{$repositoryPath}' is not a Git working tree.");
+        }
+
+        $actualBranch = $this->git->currentBranch($repositoryPath);
+        if (!hash_equals($branch, $actualBranch)) {
+            throw new LocalBuildFailedException('local_workspace_prepare_failed', "Source workspace branch mismatch: expected '{$branch}', found '{$actualBranch}'.");
+        }
+
+        $remote = $this->git->run(['git', 'config', '--get', 'remote.' . $remoteName . '.url'], $repositoryPath, $this->git->timeoutFor('status'));
+        $actualRepositoryUrl = trim($remote['output']);
+        if ($remote['exitCode'] !== 0 || $actualRepositoryUrl === '') {
+            throw new LocalBuildFailedException('local_workspace_prepare_failed', "Configured remote '{$remoteName}' is missing from source workspace '{$repositoryPath}'.");
+        }
+        if (!hash_equals($this->normalizeRepository($repositoryUrl), $this->normalizeRepository($actualRepositoryUrl))) {
+            throw new LocalBuildFailedException('local_workspace_prepare_failed', "Source workspace repository mismatch for remote '{$remoteName}'.");
+        }
+
+        $changedFiles = $this->git->changedFiles($repositoryPath);
+        if ($changedFiles !== []) {
+            $sample = implode(', ', array_slice($changedFiles, 0, 5));
+            throw new LocalBuildFailedException('local_workspace_prepare_failed', 'Source workspace is dirty; refusing to fetch or build. Changed paths: ' . $sample);
+        }
+    }
+
+    private function assertLocalBranchNotDiverged(string $repositoryPath, string $remoteName, string $branch): void
+    {
+        $remoteRef = "refs/remotes/{$remoteName}/{$branch}";
+        $result = $this->git->run(['git', 'merge-base', '--is-ancestor', 'HEAD', $remoteRef], $repositoryPath, 30);
+        if ($result['exitCode'] !== 0) {
+            throw new LocalBuildFailedException('local_workspace_prepare_failed', "Source workspace branch has diverged from {$remoteName}/{$branch}; refusing to reset or discard local commits.");
+        }
+    }
+
+    private function validBranch(string $branch): bool
+    {
+        return preg_match('/^[A-Za-z0-9][A-Za-z0-9._\/-]*$/', $branch) === 1
+            && !str_contains($branch, '..')
+            && !str_contains($branch, '@{')
+            && !str_ends_with($branch, '/')
+            && !str_ends_with($branch, '.');
+    }
+
+    private function normalizeRepository(string $repository): string
+    {
+        $normalized = trim(str_replace('\\', '/', $repository));
+        if (preg_match('/^git@([^:]+):(.+)$/i', $normalized, $matches) === 1) {
+            $host = strtolower($matches[1]);
+            if ($host === 'github.com' || $host === 'github-safhe') {
+                return 'github.com/' . strtolower(preg_replace('#\.git/?$#i', '', $matches[2]) ?? $matches[2]);
+            }
+
+            $normalized = $host . '/' . $matches[2];
+        }
+
+        $parts = parse_url($normalized);
+        if (is_array($parts) && in_array(strtolower((string) ($parts['host'] ?? '')), ['github.com', 'ssh.github.com'], true)) {
+            $path = ltrim((string) ($parts['path'] ?? ''), '/');
+
+            return 'github.com/' . strtolower(preg_replace('#\.git/?$#i', '', $path) ?? $path);
+        }
+
+        return preg_replace('#\.git/?$#i', '', rtrim($normalized, '/')) ?? $normalized;
     }
 
     private function remoteUrl(string $repositoryPath, string $remoteName): string
