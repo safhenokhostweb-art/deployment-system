@@ -12,6 +12,8 @@ use App\Services\Deployment\Artifact\ArtifactService;
 use App\Services\Publish\ArtifactCommitSelector;
 use App\Services\Publish\AuthoritativeBuildAgentResolver;
 use App\Services\Publish\PublishJobService;
+use App\Services\GitHub\GitHubAppClient;
+use App\Services\GitHub\GitHubApiException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
@@ -31,6 +33,7 @@ class PublishController extends Controller
         private readonly DeploymentDispatcher $deployments,
         private readonly AuthoritativeBuildAgentResolver $buildAgents,
         private readonly ArtifactService $artifacts,
+        private readonly GitHubAppClient $github,
     ) {
     }
 
@@ -78,7 +81,8 @@ class PublishController extends Controller
             ]);
 
             $selectionMode = $validated['commit_selection_mode'] ?? ArtifactCommitSelector::MODE_LATEST;
-            $commitHash = $this->artifactCommits->resolveCommit($mapping, $selectionMode, $validated['commit_hash'] ?? null);
+            $remoteHead = $selectionMode === ArtifactCommitSelector::MODE_LATEST ? $this->remoteBranchHead($project, $mapping->effectiveBranch()) : null;
+            $commitHash = $this->artifactCommits->resolveCommit($mapping, $selectionMode, $validated['commit_hash'] ?? null, $remoteHead);
             $branch = $mapping->effectiveBranch();
             $existingArtifact = $this->artifactCommits->findAvailableArtifact($project, $commitHash, $branch);
 
@@ -290,5 +294,20 @@ class PublishController extends Controller
         abort_if($mapping === null, 422, 'The selected local agent is not mapped to this project.');
 
         return $mapping;
+    }
+
+    private function remoteBranchHead(Project $project, string $branch): ?string
+    {
+        if (! $project->githubAccount?->isConnected() || ! $this->github->isConfigured()) {
+            return null;
+        }
+        $parts = explode('/', trim((string) $project->repository, '/'));
+        abort_unless(count($parts) === 2, 422, 'Project repository must be owner/repository for latest release selection.');
+        try {
+            $token = $this->github->createInstallationToken($project->githubAccount->installation_id)['token'];
+            return $this->github->getBranchHead($token, $parts[0], $parts[1], $branch);
+        } catch (GitHubApiException $e) {
+            abort(502, 'Unable to resolve the configured remote branch HEAD.');
+        }
     }
 }

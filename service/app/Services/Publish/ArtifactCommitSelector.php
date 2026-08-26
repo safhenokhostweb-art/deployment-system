@@ -58,7 +58,7 @@ final class ArtifactCommitSelector
         })->values()->all();
     }
 
-    public function resolveCommit(LocalProjectMapping $mapping, string $mode, ?string $selectedCommit): string
+    public function resolveCommit(LocalProjectMapping $mapping, string $mode, ?string $selectedCommit, ?string $latestRemoteCommit = null): string
     {
         abort_unless(in_array($mode, [self::MODE_LATEST, self::MODE_ADVANCED], true), 422, 'Invalid Artifact commit selection mode.');
 
@@ -66,6 +66,11 @@ final class ArtifactCommitSelector
             abort_unless($this->validSha($selectedCommit), 422, 'Artifact build requires a valid 40-character commit SHA.');
 
             return $selectedCommit;
+        }
+
+        if ($latestRemoteCommit !== null) {
+            abort_unless($this->validSha($latestRemoteCommit), 422, 'The configured remote branch returned an invalid commit SHA.');
+            return strtolower($latestRemoteCommit);
         }
 
         $currentCommit = $mapping->local_head_sha;
