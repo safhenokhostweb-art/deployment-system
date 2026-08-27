@@ -118,6 +118,7 @@
             {{ __('ui.projects.auto_deploy_label') }}
         </label>
 
+        <input type="hidden" name="is_active" value="0">
         <label>
             <input type="checkbox" name="is_active" value="1" style="width:auto;display:inline-block;" {{ old('is_active', $project->is_active) ? 'checked' : '' }}>
             {{ __('ui.projects.active_label') }}

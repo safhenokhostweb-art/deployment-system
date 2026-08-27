@@ -393,7 +393,7 @@ class ProjectController extends Controller
             'requires_complete_artifact' => $validated['requires_complete_artifact'] ?? $project->requires_complete_artifact,
             'application_root' => $validated['application_root'],
             'auto_deploy' => $request->boolean('auto_deploy'),
-            'is_active' => $request->boolean('is_active', true),
+            'is_active' => $request->boolean('is_active'),
         ]);
 
         AuditLogEntry::record(
