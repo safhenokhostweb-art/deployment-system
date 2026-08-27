@@ -87,7 +87,10 @@ class GitHubIntegrationTest extends TestCase
 
         $this->assertSame('ghs_fake_installation_token', $result['token']);
 
-        Http::assertSent(function ($request) {
+        $capturedPayloadJson = null;
+        $capturedPayload = null;
+
+        Http::assertSent(function ($request) use (&$capturedPayloadJson, &$capturedPayload) {
             $auth = $request->header('Authorization')[0] ?? '';
             if (!str_starts_with($auth, 'Bearer ')) {
                 return false;
@@ -98,10 +101,18 @@ class GitHubIntegrationTest extends TestCase
                 return false;
             }
             $header = json_decode(base64_decode(strtr($parts[0], '-_', '+/')), true);
-            $payload = json_decode(base64_decode(strtr($parts[1], '-_', '+/')), true);
+            $capturedPayloadJson = base64_decode(strtr($parts[1], '-_', '+/'));
+            $capturedPayload = json_decode($capturedPayloadJson, true);
 
-            return $header['alg'] === 'RS256' && $payload['iss'] === '123456';
+            return $header['alg'] === 'RS256';
         });
+
+        // GitHub rejects the App JWT with 401 "'Issuer' claim ('iss') must
+        // be an Integer" if this is encoded as a quoted JSON string — assert
+        // both the decoded PHP type and the raw JSON bytes are unquoted.
+        $this->assertIsInt($capturedPayload['iss']);
+        $this->assertSame(123456, $capturedPayload['iss']);
+        $this->assertMatchesRegularExpression('/"iss":123456}/', (string) $capturedPayloadJson);
     }
 
     public function test_connect_redirects_to_github_installation_url_when_configured(): void

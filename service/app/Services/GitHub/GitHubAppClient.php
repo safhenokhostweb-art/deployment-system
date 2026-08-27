@@ -260,7 +260,7 @@ class GitHubAppClient
         $payload = [
             'iat' => $now - 60,
             'exp' => $now + 540,
-            'iss' => $this->appId,
+            'iss' => (int) $this->appId,
         ];
 
         $segments = [
