@@ -23,6 +23,7 @@ class ProcessGitHubWebhookPushTest extends TestCase
         $job = new ProcessGitHubWebhookPush($project, str_repeat('a', 40), 'main', 'octocat');
         $job->handle(
             app(\App\Services\Releases\ReleaseOrchestrator::class),
+            app(\App\Services\Releases\ReleaseGitFactsResolver::class),
             app(\App\Services\Publish\AuthoritativeBuildAgentResolver::class),
             app(\App\Services\Publish\PublishJobService::class),
         );
@@ -65,6 +66,7 @@ class ProcessGitHubWebhookPushTest extends TestCase
         $job = new ProcessGitHubWebhookPush($project->fresh(), $sha, 'main', 'octocat');
         $job->handle(
             app(\App\Services\Releases\ReleaseOrchestrator::class),
+            app(\App\Services\Releases\ReleaseGitFactsResolver::class),
             app(\App\Services\Publish\AuthoritativeBuildAgentResolver::class),
             app(\App\Services\Publish\PublishJobService::class),
         );

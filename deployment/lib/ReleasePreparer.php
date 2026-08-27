@@ -25,11 +25,6 @@ final class ReleasePreparer
         $this->block($branch !== $expected, "PRODUCTION BRANCH MISMATCH: expected {$expected}, found {$branch}");
         $this->block($this->git(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], true) !== '', 'UNRESOLVED MERGE STATE');
 
-        $head = strtolower(trim($this->git(['rev-parse', 'HEAD'])));
-        $base = strtolower((string) $this->task['base_sha']);
-        $this->block(preg_match('/^[0-9a-f]{40}$/', $base) !== 1, 'Active release task has an invalid base_sha.');
-        $this->git(['merge-base', '--is-ancestor', $base, $head]);
-
         $entries = $this->statusEntries();
         foreach ($entries as $entry) {
             $xy = $entry['xy'];
@@ -39,7 +34,14 @@ final class ReleasePreparer
             }
         }
 
-        $committed = $this->nullLines($this->git(['diff', '--name-only', '-z', $base.'..'.$head]));
+        $taskBase = strtolower((string) $this->task['base_sha']);
+        $this->block(preg_match('/^[0-9a-f]{40}$/', $taskBase) !== 1, 'Active release task has an invalid base_sha.');
+        $base = $this->synchronizeRemote($branch, $taskBase, $prepare);
+        // A prepare-time fast-forward can update tracked files, so select
+        // from a fresh status snapshot. The task file is control-plane
+        // state, while every other unowned path still fails closed below.
+        $entries = $this->statusEntries();
+
         $dirty = [];
         $excludedUntracked = [];
         foreach ($entries as $entry) {
@@ -60,7 +62,10 @@ final class ReleasePreparer
             $dirty[] = $path;
         }
 
-        $candidate = array_values(array_unique(array_merge($committed, $dirty)));
+        // Release content is only the current task-owned worktree delta.
+        // synchronizeRemote() rejects pre-existing unpushed commits, which
+        // guarantees one release commit on the authoritative remote HEAD.
+        $candidate = array_values(array_unique($dirty));
         sort($candidate, SORT_STRING);
         $unowned = array_values(array_filter($candidate, fn (string $path): bool => ! $this->matches($path, $this->task['owned_paths'])));
         $disallowed = array_values(array_filter($candidate, fn (string $path): bool => ! $this->matches($path, $this->policy['allowed_release_paths'])));
@@ -128,6 +133,36 @@ final class ReleasePreparer
         }
         $this->deliverMetadata($summary, $metadataPath);
         return $summary;
+    }
+
+    private function synchronizeRemote(string $branch, string $taskBase, bool $prepare): string
+    {
+        $remote = (string) ($this->policy['remote'] ?? 'origin');
+        $localHead = strtolower(trim($this->git(['rev-parse', 'HEAD'])));
+        $localTaskMergeBase = strtolower(trim($this->git(['merge-base', $taskBase, $localHead])));
+        $this->block($localTaskMergeBase !== $taskBase, 'LOCAL HISTORY MISMATCH: active task baseline is not an ancestor of HEAD.');
+        $this->git(['fetch', '--no-tags', $remote, $branch]);
+        $remoteHead = strtolower(trim($this->git(['rev-parse', 'FETCH_HEAD'])));
+        $this->block(preg_match('/^[0-9a-f]{40}$/', $remoteHead) !== 1, 'REMOTE SYNCHRONIZATION FAILURE: invalid production HEAD.');
+        $remoteTaskMergeBase = strtolower(trim($this->git(['merge-base', $taskBase, $remoteHead])));
+        $this->block($remoteTaskMergeBase !== $taskBase, 'REMOTE HISTORY MISMATCH: active task baseline is not an ancestor of the production branch.');
+
+        if ($localHead === $remoteHead) {
+            return $remoteHead;
+        }
+        $headsMergeBase = strtolower(trim($this->git(['merge-base', $localHead, $remoteHead])));
+        if ($headsMergeBase === $remoteHead) {
+            throw new RuntimeException('UNPUSHED COMMITS - RELEASE NOT SAFE: release preparation requires one exact task-owned commit on the remote production HEAD.');
+        }
+        $this->block($headsMergeBase !== $localHead, 'DIVERGED PRODUCTION BRANCH - RELEASE NOT SAFE.');
+
+        if ($prepare) {
+            // This is a non-destructive fast-forward. Git refuses it if an
+            // upstream change would overwrite any local worktree file.
+            $this->git(['merge', '--ff-only', $remoteHead]);
+        }
+
+        return $remoteHead;
     }
 
     private function assertContract(): void

@@ -386,9 +386,14 @@ $mirrorPairs = [
     [__DIR__ . '/../config.example.php', __DIR__ . '/../../deployment-local-agent/config/config.example.php'],
 ];
 foreach ($mirrorPairs as [$original, $mirror]) {
+    // Git may materialize CRLF and LF differently under core.autocrlf even
+    // when the indexed blobs are identical. Compare executable content,
+    // not checkout-specific line-ending bytes.
+    $originalContent = is_file($original) ? str_replace("\r\n", "\n", (string) file_get_contents($original)) : null;
+    $mirrorContent = is_file($mirror) ? str_replace("\r\n", "\n", (string) file_get_contents($mirror)) : null;
     check(
-        'mirror parity: ' . basename($mirror) . ' is byte-for-byte identical between local-agent and deployment-local-agent',
-        is_file($original) && is_file($mirror) && file_get_contents($original) === file_get_contents($mirror),
+        'mirror parity: ' . basename($mirror) . ' is content-identical between local-agent and deployment-local-agent',
+        $originalContent !== null && $mirrorContent !== null && $originalContent === $mirrorContent,
         $failures,
         $passCount,
     );

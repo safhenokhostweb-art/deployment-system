@@ -9,6 +9,10 @@ use Illuminate\Support\Facades\DB;
 
 class ReleaseOrchestrator
 {
+    public function __construct(private readonly ReleaseMetadataValidator $validator)
+    {
+    }
+
     /** @param array<string, mixed> $metadata */
     public function recordMetadata(Project $project, array $metadata): Release
     {
@@ -63,6 +67,75 @@ class ReleaseOrchestrator
             }
 
             return $this->syncArtifactState($release);
+        });
+    }
+
+    /**
+     * Root-cause fix (bootstrap deadlock): every push already creates a
+     * Release (createForCommit) but never recorded WHY it isn't ready —
+     * only an explicit signed POST or admin backfill ever populated real
+     * metadata, so a Deploy Latest page had nothing to show but "metadata
+     * has not been recorded" for every push, forever, until a human acted.
+     * This records the FACTS a push already makes knowable — base SHA,
+     * changed files, migration files, all GitHub-derived, never operator
+     * input — the moment a webhook is processed, using infrastructure that
+     * is always already deployed by the time any push happens (unlike a
+     * new UI feature or project-side tool, which can't help bootstrap
+     * themselves). It never sets release_ready — that still requires
+     * genuine EVIDENCE (test/build attestation), which no push event can
+     * honestly supply on its own.
+     *
+     * Deliberately never downgrades or overwrites an already-ready
+     * (release_ready === true) release: once real evidence has been
+     * recorded — by the signed endpoint or the admin backfill path — a
+     * later webhook redelivery or duplicate call must be a pure no-op.
+     *
+     * @param  array<int, string>  $changedFiles
+     * @param  array<int, string>  $migrationFiles
+     */
+    public function recordFactualMetadata(
+        Project $project,
+        Release $release,
+        string $commitHash,
+        string $branch,
+        string $baseSha,
+        array $changedFiles,
+        array $migrationFiles,
+    ): Release {
+        return DB::transaction(function () use ($project, $release, $commitHash, $branch, $baseSha, $changedFiles, $migrationFiles): Release {
+            $release = Release::query()->lockForUpdate()->find($release->id) ?? $release;
+            $existing = is_array($release->metadata) ? $release->metadata : [];
+
+            if (($existing['release_ready'] ?? false) === true) {
+                return $release;
+            }
+            if (isset($existing['base_sha']) && $existing['base_sha'] !== $baseSha) {
+                // A prior signed submission disagrees with what GitHub
+                // itself now reports for this exact commit — a real
+                // anomaly worth surfacing, not silently reconciling.
+                abort(409, 'RELEASE METADATA MISMATCH: base SHA changed for an existing release.');
+            }
+
+            $metadata = array_merge($existing, [
+                'schema_version' => $existing['schema_version'] ?? 1,
+                'project_key' => $project->project_key,
+                'commit_sha' => $commitHash,
+                'base_sha' => $baseSha,
+                'branch' => $branch,
+                'changed_files' => $changedFiles,
+                'migration_files' => $migrationFiles,
+                'test_results' => $existing['test_results'] ?? [],
+                'build_result' => $existing['build_result'] ?? ['required' => true, 'status' => 'pending', 'contract' => 'server-managed-exact-commit'],
+                'risk_flags' => $existing['risk_flags'] ?? [],
+                'created_timestamp' => $existing['created_timestamp'] ?? now()->toIso8601String(),
+                'release_ready' => false,
+                'source' => $existing['source'] ?? 'webhook_derived',
+            ]);
+            $metadata = $this->validator->validate($project, $metadata);
+
+            $release->forceFill(['branch' => $branch, 'metadata' => $metadata])->save();
+
+            return $release->refresh();
         });
     }
 

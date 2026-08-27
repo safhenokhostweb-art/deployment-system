@@ -8,6 +8,7 @@ use App\Models\PublishJob;
 use App\Models\Release;
 use App\Services\Publish\AuthoritativeBuildAgentResolver;
 use App\Services\Publish\PublishJobService;
+use App\Services\Releases\ReleaseGitFactsResolver;
 use App\Services\Releases\ReleaseOrchestrator;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Illuminate\Bus\Queueable;
@@ -47,19 +48,42 @@ class ProcessGitHubWebhookPush implements ShouldQueue
 
     public function handle(
         ReleaseOrchestrator $releases,
+        ReleaseGitFactsResolver $gitFacts,
         AuthoritativeBuildAgentResolver $buildAgents,
         PublishJobService $publishJobs,
     ): void
     {
         // A branch advance prepares a Release; it never creates a production
         // Deployment. Deployment remains an explicit operator-confirmed act.
+        $commitHash = strtolower($this->commitHash);
         $release = $releases->createForCommit(
             $this->project,
-            strtolower($this->commitHash),
+            $commitHash,
             $this->branch,
             'webhook',
             ['pusher' => $this->pusher],
         );
+
+        // Root-cause fix (bootstrap deadlock): record the FACTS this push
+        // already makes knowable — never evidence, never release_ready —
+        // so Deploy Latest's "missing requirements" narrows to genuine
+        // test/build evidence instead of everything, for every project,
+        // on every push, using infrastructure that's always already
+        // deployed by the time any push happens. Best-effort: GitHub being
+        // briefly unreachable must never fail push processing itself.
+        $facts = $gitFacts->resolve($this->project, $commitHash);
+        if ($facts['error'] === null) {
+            $releases->recordFactualMetadata(
+                $this->project,
+                $release,
+                $commitHash,
+                $this->branch,
+                $facts['base_sha'],
+                $facts['changed_files'],
+                $facts['migration_files'],
+            );
+        }
+
         if ($release->status !== Release::STATUS_AWAITING_ARTIFACT || ! $this->project->requires_complete_artifact) {
             return;
         }

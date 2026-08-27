@@ -55,6 +55,7 @@ require __DIR__ . '/lib/BuildWorkspace.php';
 require __DIR__ . '/lib/WorkspaceSourcePreparer.php';
 require __DIR__ . '/lib/ArtifactBuilder.php';
 require __DIR__ . '/lib/ArtifactUploader.php';
+require __DIR__ . '/lib/PublishJobHeartbeatWorker.php';
 require __DIR__ . '/lib/LocalBuildFailedException.php';
 require __DIR__ . '/lib/ArtifactSourceResolver.php';
 require __DIR__ . '/lib/ApplicationRoot.php';
@@ -81,6 +82,7 @@ use LocalAgent\ProjectConfigSyncScheduler;
 use LocalAgent\ShutdownSignal;
 use LocalAgent\SourceWorkspaceManager;
 use LocalAgent\PushManager;
+use LocalAgent\PublishJobHeartbeatWorker;
 use LocalAgent\SafetyChecker;
 use LocalAgent\Security;
 use LocalAgent\WorkspaceSourcePreparer;
@@ -172,11 +174,9 @@ $workspaceTtlSeconds = (int) ($config['workspace_ttl_seconds'] ?? 86400);
 // time to a build whose own output already shows it succeeded; it never
 // weakens detection of an actually-stuck build.
 $npmGracePeriodSeconds = (int) ($config['npm_grace_period_seconds'] ?? 120);
-// Root-cause fix (customer-site large-project builds): the default
-// composer/npm build timeout is 1800s (30 min); each is configurable via
-// config.php for projects that legitimately need more. The previous
-// deployment-local-agent package default was 600s, which killed a large
-// `composer install` right after "Generating optimized autoload files".
+// Root-cause fix (customer-site large-project builds): composer/npm build
+// timeouts default to 1800s (30 min) and are configurable via config.php
+// for projects that legitimately need more.
 $composerTimeoutSeconds = (int) ($config['composer_timeout_seconds'] ?? 1800);
 $npmInstallTimeoutSeconds = (int) ($config['npm_install_timeout_seconds'] ?? 1800);
 $npmBuildTimeoutSeconds = (int) ($config['npm_build_timeout_seconds'] ?? 1800);
@@ -201,6 +201,10 @@ $artifactUploader = new ArtifactUploader(
     agentVersion: LOCAL_AGENT_VERSION,
 );
 $jobMaxRuntimeSeconds = (int) ($config['job_max_runtime_seconds'] ?? 1800);
+// This is deliberately capped well below the Hub's default 120-second
+// lease. The independent worker is primary protection; GitManager's
+// callback below remains useful supplemental coverage.
+$publishJobHeartbeatIntervalSeconds = min(30, max(5, (int) ($config['job_heartbeat_interval_seconds'] ?? 25)));
 
 // Project config is downloaded from the Hub (single source of truth) and
 // cached locally so the agent keeps working while the Hub is temporarily
@@ -272,7 +276,7 @@ do {
     $reloadRequested = false;
 
     try {
-        pollAndExecutePublish($client, $git, $commits, $pushes, $safety, $artifactUploader, $projects, $logger, $jobMaxRuntimeSeconds);
+        pollAndExecutePublish($client, $git, $commits, $pushes, $safety, $artifactUploader, $projects, $logger, $jobMaxRuntimeSeconds, $configPath, $publishJobHeartbeatIntervalSeconds);
     } catch (\Throwable $e) {
         $logger->error('Unhandled error during poll cycle: ' . $e->getMessage());
     }
@@ -310,7 +314,7 @@ do {
     }
 } while (!$runOnce);
 
-function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $commits, PushManager $pushes, SafetyChecker $safety, ArtifactUploader $artifactUploader, array $projects, Logger $logger, int $jobMaxRuntimeSeconds): void
+function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $commits, PushManager $pushes, SafetyChecker $safety, ArtifactUploader $artifactUploader, array $projects, Logger $logger, int $jobMaxRuntimeSeconds, string $configPath, int $heartbeatIntervalSeconds): void
 {
     $response = $client->request('GET', '/api/local-agent/publish-jobs/next');
 
@@ -329,10 +333,22 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
     $projectConfig = $projects[$projectKey] ?? null;
     $reportPath = "/api/local-agent/publish-jobs/{$job['id']}/report";
     $heartbeatPath = "/api/local-agent/publish-jobs/{$job['id']}/heartbeat";
+    $heartbeatWorker = new PublishJobHeartbeatWorker((string) $job['id'], $configPath, $logger, $heartbeatIntervalSeconds, maxLifetimeSeconds: $jobMaxRuntimeSeconds + 120);
+    $heartbeatWorker->start();
+    $logger->info("Job {$job['id']}: publish claimed; independent heartbeat lifecycle started.");
+
+    $reportTerminal = static function (array $payload) use ($client, $reportPath, $logger, $job): void {
+        $status = (string) ($payload['status'] ?? 'unknown');
+        $logger->info("Job {$job['id']}: reporting final state '{$status}'.");
+        $client->request('POST', $reportPath, $payload);
+        $logger->info("Job {$job['id']}: final state '{$status}' reported.");
+    };
+
+    try {
 
     if ($projectConfig === null) {
         $logger->error("Unknown project: job {$job['id']} references project_key '{$projectKey}', which is not present in the synchronized, cached, or legacy project configuration on this agent.");
-        $client->request('POST', $reportPath, [
+        $reportTerminal([
             'status' => 'failed',
             'error_message' => "Unknown project_key '{$projectKey}' on this agent",
         ]);
@@ -349,7 +365,7 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
 
     if (!is_dir($repositoryPath)) {
         $logger->error("Invalid source workspace: project '{$projectKey}' is configured with source_workspace_path '{$repositoryPath}', which does not exist on this machine.");
-        $client->request('POST', $reportPath, [
+        $reportTerminal([
             'status' => 'failed',
             'error_message' => "Invalid local path '{$repositoryPath}' for project '{$projectKey}'",
         ]);
@@ -373,11 +389,10 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
 
     $jobStartedAt = microtime(true);
 
-    try {
         if (SafetyChecker::productionSourcePathForbidden($repositoryPath)) {
             $message = "مسیر ساخت انتشار اشتباه است. سیستم اجازه ساخت Artifact یا اجرای Git از مسیر سایت فعال را نمی‌دهد. لطفاً Source Workspace جداگانه تنظیم کنید: {$repositoryPath}";
             $logger->error("Job {$job['id']}: {$message}");
-            $client->request('POST', $reportPath, [
+            $reportTerminal([
                 'status' => 'failed',
                 'error_message' => $message,
                 'failure_code' => 'production_source_forbidden',
@@ -394,14 +409,14 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
             // survived — the operator should see a blocked .env the same
             // way they see an allowed file, never just silence.
             $blockedFiles = array_values(array_diff($rawFiles, $changedFiles));
-            $reportResponse = $client->request('POST', $reportPath, [
+            $reportTerminal([
                 'changed_files' => $changedFiles,
                 'blocked_files' => $blockedFiles,
                 'head_sha' => $git->lastCommitHash($repositoryPath),
                 'branch' => $git->currentBranch($repositoryPath),
-                'working_tree_clean' => $changedFiles === [] && $blockedFiles === [],
+                'working_tree_clean' => $rawFiles === [],
             ]);
-            $logger->info("Job {$job['id']}: reported " . count($changedFiles) . ' changed file(s), ' . count($blockedFiles) . ' blocked file(s)' . ($reportResponse['status'] === 200 ? '' : ' (Hub HTTP ' . $reportResponse['status'] . ')'));
+            $logger->info("Job {$job['id']}: reported " . count($changedFiles) . ' changed file(s), ' . count($blockedFiles) . ' blocked file(s)');
 
             return;
         }
@@ -421,7 +436,7 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
 
             if (!$artifactResult['succeeded']) {
                 $logger->error("Job {$job['id']}: artifact build failed [{$artifactResult['failureCode']}]: {$artifactResult['message']}");
-                $client->request('POST', $reportPath, [
+                $reportTerminal([
                     'status' => 'failed',
                     'error_message' => $artifactResult['message'],
                     'failure_code' => $artifactResult['failureCode'],
@@ -431,7 +446,7 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
                 return;
             }
 
-            $client->request('POST', $reportPath, ['status' => 'succeeded', 'commit_hash' => $commitHash, 'output' => '[artifact] uploaded: ' . $artifactResult['message']]);
+            $reportTerminal(['status' => 'succeeded', 'commit_hash' => $commitHash, 'output' => '[artifact] uploaded: ' . $artifactResult['message']]);
             $logger->info("Job {$job['id']}: artifact built for {$commitHash}");
 
             return;
@@ -439,8 +454,20 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
 
         if ($job['action'] === 'publish') {
             $logger->info("Job {$job['id']}: publishing {$projectKey} ({$repositoryPath})");
-            $safety->assertSafeToPublish($git, $repositoryPath, $branch);
-            $changedFiles = IgnoreRules::filter($git->changedFiles($repositoryPath), IgnoreRules::loadPatterns($repositoryPath));
+            $logger->info("Job {$job['id']}: validation started.");
+            $noSourceChange = ($job['no_source_change'] ?? false) === true;
+            if ($noSourceChange) {
+                $expectedHead = $job['expected_head_sha'] ?? null;
+                $expectedBranch = $job['expected_branch'] ?? null;
+                if (!is_string($expectedHead) || !is_string($expectedBranch)) {
+                    throw new \RuntimeException('Refusing no-source-change publish: verified review evidence is missing.');
+                }
+                $commitHash = $safety->assertSafeToPublishVerifiedHead($git, $repositoryPath, $expectedBranch, $expectedHead);
+                $changedFiles = [];
+            } else {
+                $safety->assertSafeToPublish($git, $repositoryPath, $branch);
+                $changedFiles = IgnoreRules::filter($git->changedFiles($repositoryPath), IgnoreRules::loadPatterns($repositoryPath));
+            }
             // Phase 5.5: only commit when there is something new to commit
             // — a retry after "commit succeeded, push failed" has nothing
             // left to add (the previous attempt already committed it), and
@@ -452,8 +479,8 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
 
             assertWithinMaxRuntime($jobStartedAt, $jobMaxRuntimeSeconds, (string) $job['id'], $logger);
 
-            $output = $pushes->push($repositoryPath, $remoteName, $branch, $onTick);
-            $commitHash = $git->lastCommitHash($repositoryPath);
+            $output = $noSourceChange ? 'No source changes: publishing verified existing commit without git commit or push.' : $pushes->push($repositoryPath, $remoteName, $branch, $onTick);
+            $commitHash ??= $git->lastCommitHash($repositoryPath);
 
             // Root-cause fix (production has no access to
             // repo.packagist.org, api.github.com, or the npm registry):
@@ -468,7 +495,7 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
 
             if (!$artifactResult['succeeded']) {
                 $logger->error("Job {$job['id']}: publish failed at the artifact stage [{$artifactResult['failureCode']}]: {$artifactResult['message']}");
-                $client->request('POST', $reportPath, [
+                $reportTerminal([
                     'status' => 'failed',
                     'error_message' => $artifactResult['message'],
                     'failure_code' => $artifactResult['failureCode'],
@@ -480,7 +507,7 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
 
             $output .= "\n[artifact] uploaded: " . $artifactResult['message'];
 
-            $client->request('POST', $reportPath, ['status' => 'succeeded', 'commit_hash' => $commitHash, 'output' => $output]);
+            $reportTerminal(['status' => 'succeeded', 'commit_hash' => $commitHash, 'output' => $output]);
             $logger->info("Job {$job['id']}: published as {$commitHash}");
 
             return;
@@ -496,14 +523,14 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
 
             $output = $pushes->push($repositoryPath, $remoteName, $branch, $onTick);
 
-            $client->request('POST', $reportPath, ['status' => 'succeeded', 'commit_hash' => $revertCommit, 'output' => $output]);
+            $reportTerminal(['status' => 'succeeded', 'commit_hash' => $revertCommit, 'output' => $output]);
             $logger->info("Job {$job['id']}: reverted {$lastCommit} as {$revertCommit}");
 
             return;
         }
 
         $logger->error("Job {$job['id']}: unknown action '{$job['action']}'");
-        $client->request('POST', $reportPath, ['status' => 'failed', 'error_message' => "Unknown action '{$job['action']}'"]);
+        $reportTerminal(['status' => 'failed', 'error_message' => "Unknown action '{$job['action']}'"]);
     } catch (\LocalAgent\LocalBuildFailedException $e) {
         $logger->error("Job {$job['id']} artifact source resolution failed [{$e->failureCode}]: " . $e->getMessage());
         $reportTerminal([
@@ -518,21 +545,23 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
         // deployments:recover-stale-inferred `abandoned` (the agent never
         // came back to report anything at all).
         $logger->error("Job {$job['id']} " . ($e->timedOut ? 'timed out' : 'failed') . ': ' . $e->getMessage());
-        $client->request('POST', $reportPath, [
+        $reportTerminal([
             'status' => 'failed',
             'error_message' => $e->getMessage(),
             'failure_code' => $e->timedOut ? 'process_timeout' : null,
         ]);
     } catch (JobMaxRuntimeExceededException $e) {
         $logger->error("Job {$job['id']}: " . $e->getMessage());
-        $client->request('POST', $reportPath, [
+        $reportTerminal([
             'status' => 'failed',
             'error_message' => $e->getMessage(),
             'failure_code' => 'process_timeout',
         ]);
     } catch (\Throwable $e) {
         $logger->error("Job {$job['id']} failed: " . $e->getMessage());
-        $client->request('POST', $reportPath, ['status' => 'failed', 'error_message' => $e->getMessage()]);
+        $reportTerminal(['status' => 'failed', 'error_message' => $e->getMessage()]);
+    } finally {
+        $heartbeatWorker->stop();
     }
 }
 

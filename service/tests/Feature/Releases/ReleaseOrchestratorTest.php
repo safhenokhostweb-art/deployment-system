@@ -109,6 +109,7 @@ class ReleaseOrchestratorTest extends TestCase
 
         (new \App\Jobs\ProcessGitHubWebhookPush($project, $commitHash, 'main', 'dev@example.test'))->handle(
             app(ReleaseOrchestrator::class),
+            app(\App\Services\Releases\ReleaseGitFactsResolver::class),
             app(\App\Services\Publish\AuthoritativeBuildAgentResolver::class),
             app(\App\Services\Publish\PublishJobService::class),
         );

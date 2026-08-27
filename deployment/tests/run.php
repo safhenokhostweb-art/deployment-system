@@ -100,6 +100,10 @@ function expectFailure(callable $callback, string $contains): void
 function test(string $name, callable $callback): void
 {
     global $passed, $failed;
+    $filter = getenv('RELEASE_CONTRACT_TEST_FILTER');
+    if (is_string($filter) && $filter !== '' && ! str_contains($name, $filter)) {
+        return;
+    }
     try {
         $callback();
         $passed++;
@@ -187,6 +191,41 @@ test('prepare stages only intended paths, pushes, and writes metadata', function
     if (! str_contains(command($root, ['git', 'status', '--porcelain']), 'storage/')) {
         throw new RuntimeException('Excluded runtime path was staged (git add -A behavior).');
     }
+});
+
+test('prepare fast-forwards a stale persistent workspace and creates one exact release commit', function (): void {
+    [$root, $remote] = fixture();
+    $upstream = $root.'-upstream';
+    command(dirname($upstream), ['git', 'clone', '--branch', 'main', $remote, $upstream]);
+    command($upstream, ['git', 'config', 'user.name', 'Upstream Test']);
+    command($upstream, ['git', 'config', 'user.email', 'upstream@example.test']);
+    file_put_contents($upstream.'/upstream.txt', "new upstream state\n");
+    command($upstream, ['git', 'add', '--', 'upstream.txt']);
+    command($upstream, ['git', 'commit', '-m', 'advance production']);
+    command($upstream, ['git', 'push', 'origin', 'main']);
+    $upstreamHead = trim(command($upstream, ['git', 'rev-parse', 'HEAD']));
+
+    file_put_contents($root.'/src/app.php', "<?php\nreturn 4;\n");
+    $result = (new ReleasePreparer($root))->run(true);
+    $releaseHead = $result['commit_sha'];
+    $parent = trim(command($root, ['git', 'rev-parse', $releaseHead.'^']));
+    $files = trim(command($root, ['git', 'diff', '--name-only', $parent.'..'.$releaseHead]));
+    $commitCount = trim(command($root, ['git', 'rev-list', '--count', $upstreamHead.'..'.$releaseHead]));
+
+    if ($result['base_sha'] !== $upstreamHead || $parent !== $upstreamHead || $files !== 'src/app.php' || $commitCount !== '1') {
+        throw new RuntimeException('Stale workspace did not produce one exact commit on the authoritative remote HEAD.');
+    }
+    if (! is_file($root.'/upstream.txt') || trim(command($root, ['git', '--git-dir='.$remote, 'rev-parse', 'refs/heads/main'])) !== $releaseHead) {
+        throw new RuntimeException('Workspace or remote was not advanced automatically.');
+    }
+});
+
+test('pre-existing unpushed commits fail closed instead of producing ambiguous factual metadata', function (): void {
+    [$root] = fixture();
+    file_put_contents($root.'/src/app.php', "<?php\nreturn 5;\n");
+    command($root, ['git', 'add', '--', 'src/app.php']);
+    command($root, ['git', 'commit', '-m', 'premature local commit']);
+    expectFailure(fn () => (new ReleasePreparer($root))->run(false), 'UNPUSHED COMMITS');
 });
 
 test('provider identity is absent from the contract', function (): void {

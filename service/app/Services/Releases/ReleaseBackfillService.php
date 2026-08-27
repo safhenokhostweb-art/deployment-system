@@ -41,6 +41,7 @@ final class ReleaseBackfillService
 
     public function __construct(
         private readonly GitHubAppClient $github,
+        private readonly ReleaseGitFactsResolver $gitFacts,
         private readonly ArtifactService $artifacts,
         private readonly ReleaseMetadataValidator $validator,
         private readonly ReleaseOrchestrator $releases,
@@ -205,20 +206,24 @@ final class ReleaseBackfillService
         try {
             $token = $this->github->createInstallationToken($project->githubAccount->installation_id)['token'];
             $commit = $this->github->getBranchHead($token, $parts[0], $parts[1], $project->branch);
-            $baseSha = $this->github->getCommitParent($token, $parts[0], $parts[1], $commit);
-            if ($baseSha === null) {
-                $missing[] = 'The remote commit has no parent (initial commit) — release metadata backfill requires a base commit to diff against.';
-
-                return [$commit, null, [], true];
-            }
-            $changedFiles = $this->github->compareCommits($token, $parts[0], $parts[1], $baseSha, $commit);
-
-            return [$commit, $baseSha, $changedFiles, true];
         } catch (GitHubApiException $exception) {
-            $missing[] = 'Unable to reach GitHub to verify base SHA and changed files: ' . $exception->getMessage();
+            $missing[] = 'Unable to reach GitHub to resolve the remote branch HEAD: ' . $exception->getMessage();
 
             return [null, null, [], true];
         }
+
+        // Base SHA / changed files / migration files are derived through the
+        // same resolver the automatic webhook-driven factual population
+        // uses, so the two can never disagree about what "authoritative"
+        // means for the exact same commit.
+        $facts = $this->gitFacts->resolve($project, $commit);
+        if ($facts['error'] !== null) {
+            $missing[] = $facts['error'];
+
+            return [$commit, null, [], true];
+        }
+
+        return [$commit, $facts['base_sha'], $facts['changed_files'], true];
     }
 
     /** @return array<int, string> */
