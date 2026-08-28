@@ -65,6 +65,14 @@ final class ProjectConfigCache
                 'requires_complete_artifact' => $entry['requires_complete_artifact'] ?? false,
                 'dependency_pinning_required' => $entry['dependency_pinning_required'] ?? false,
                 'dependency_allowlist' => $entry['dependency_allowlist'] ?? [],
+                // Phase 2 (Workspace Inventory): authoritative, Hub-issued
+                // numeric identifiers this agent round-trips on its
+                // inventory report — see WorkspaceInventoryReporter. Absent
+                // on a legacy config.php `projects` entry (never synced
+                // from the Hub at all) or an old cache file predating this
+                // field; nullable and never invented locally.
+                'project_id' => isset($entry['project_id']) && is_int($entry['project_id']) ? $entry['project_id'] : null,
+                'mapping_id' => isset($entry['mapping_id']) && is_int($entry['mapping_id']) ? $entry['mapping_id'] : null,
             ];
         }
 
@@ -99,6 +107,8 @@ final class ProjectConfigCache
                 || !is_bool($entry['requires_complete_artifact'] ?? false)
                 || !is_bool($entry['dependency_pinning_required'] ?? false)
                 || !is_array($entry['dependency_allowlist'] ?? [])
+                || (array_key_exists('project_id', $entry) && $entry['project_id'] !== null && !is_int($entry['project_id']))
+                || (array_key_exists('mapping_id', $entry) && $entry['mapping_id'] !== null && !is_int($entry['mapping_id']))
             ) {
                 throw new \InvalidArgumentException("invalid configuration for project '{$key}' (source_workspace_path/remote_name/branch must be non-empty strings)");
             }

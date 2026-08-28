@@ -12,6 +12,7 @@ use App\Http\Controllers\Api\LocalAgentControlJobController;
 use App\Http\Controllers\Api\LocalAgentJobController;
 use App\Http\Controllers\Api\LocalAgentProjectSyncController;
 use App\Http\Controllers\Api\LocalAgentRegistrationController;
+use App\Http\Controllers\Api\LocalAgentWorkspaceInventoryController;
 use App\Http\Controllers\Api\ProjectReleaseController;
 use Illuminate\Support\Facades\Route;
 
@@ -91,6 +92,14 @@ Route::middleware('local-agent.signed')->prefix('local-agent')->group(function (
     // Phase 5.2: the file watcher's own report — see agent.php's
     // pollAndDetectChanges() and LocalAgentChangeDetectionController.
     Route::post('/change-detections', [LocalAgentChangeDetectionController::class, 'report'])->name('local-agent.change-detections.report');
+
+    // Phase 2 (Workspace Inventory): the structured, read-only
+    // WorkspaceInventoryScanner report — a dedicated channel from
+    // /heartbeat (which stays lightweight) and from /change-detections
+    // (files-only, no branch/ahead-behind/counts) — see
+    // WorkspaceInventoryReporter on the agent side and
+    // LocalAgentWorkspaceInventoryController here.
+    Route::post('/workspace-inventory', [LocalAgentWorkspaceInventoryController::class, 'report'])->name('local-agent.workspace-inventory.report');
 
     // Phase 5.3: the Hub's only channel to remotely restart an agent or
     // pull its recent log output — see agent.php's pollAndHandleControl().

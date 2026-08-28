@@ -42,6 +42,9 @@ require __DIR__ . '/lib/CommitManager.php';
 require __DIR__ . '/lib/PushManager.php';
 require __DIR__ . '/lib/IgnoreRules.php';
 require __DIR__ . '/lib/SafetyChecker.php';
+require __DIR__ . '/lib/GitStatusPorcelainV2Parser.php';
+require __DIR__ . '/lib/WorkspaceInventoryScanner.php';
+require __DIR__ . '/lib/WorkspaceInventoryReporter.php';
 require __DIR__ . '/lib/LogTail.php';
 require __DIR__ . '/lib/ShutdownSignal.php';
 require __DIR__ . '/lib/InvalidProjectCacheException.php';
@@ -86,6 +89,8 @@ use LocalAgent\PushManager;
 use LocalAgent\PublishJobHeartbeatWorker;
 use LocalAgent\SafetyChecker;
 use LocalAgent\Security;
+use LocalAgent\WorkspaceInventoryReporter;
+use LocalAgent\WorkspaceInventoryScanner;
 use LocalAgent\WorkspaceSourcePreparer;
 
 /**
@@ -233,6 +238,16 @@ $projects = [];
 $projectStateReporter = new LocalProjectStateReporter();
 $sourceWorkspaceManager = new SourceWorkspaceManager($git, $logger);
 
+// Phase 2 (Workspace Inventory): a dedicated, coarser-cadence report from
+// the read-only Phase 1 scanner — deliberately independent of the
+// 15s-cadence heartbeat above (see WorkspaceInventoryReporter's own
+// docblock: it never reports more often than this, and only reports at
+// all when the scanned snapshot actually changed or this interval has
+// elapsed since the last successful report).
+$workspaceInventoryScanner = new WorkspaceInventoryScanner($git);
+$workspaceInventoryIntervalSeconds = (int) ($config['workspace_inventory_interval_seconds'] ?? 60);
+$workspaceInventoryReporter = new WorkspaceInventoryReporter($workspaceInventoryScanner, $client, $logger, $workspaceInventoryIntervalSeconds);
+
 $runOnce = in_array('--once', $argv, true);
 
 // Root-cause fix (Watchdog, section 9): lets the independent
@@ -249,6 +264,8 @@ $logger->info('Local Publisher Agent starting' . ($runOnce ? ' (single poll)' : 
 
 /** @var array<string, array<int, string>> $lastReportedChanges project_key => last file list reported this run */
 $lastReportedChanges = [];
+/** @var array<string, array{hash: string, at: int}> $lastReportedWorkspaceInventory project_key => last reported snapshot_hash + timestamp this run */
+$lastReportedWorkspaceInventory = [];
 
 $shuttingDown = false;
 registerGracefulShutdown($logger, $shuttingDown);
@@ -286,6 +303,12 @@ do {
         pollAndDetectChanges($client, $git, $projects, $logger, $lastReportedChanges);
     } catch (\Throwable $e) {
         $logger->error('Unhandled error during change-detection cycle: ' . $e->getMessage());
+    }
+
+    try {
+        $workspaceInventoryReporter->poll($projects, $lastReportedWorkspaceInventory);
+    } catch (\Throwable $e) {
+        $logger->error('Unhandled error during workspace inventory cycle: ' . $e->getMessage());
     }
 
     try {

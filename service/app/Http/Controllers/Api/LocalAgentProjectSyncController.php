@@ -33,6 +33,14 @@ class LocalAgentProjectSyncController extends Controller
             ->get()
             ->map(fn ($mapping) => [
                 'project_key' => $mapping->project->project_key,
+                // Phase 2 (Workspace Inventory): authoritative, Hub-issued
+                // numeric identifiers the agent round-trips on its inventory
+                // report so the Hub never has to trust a client-supplied id
+                // — see LocalAgentWorkspaceInventoryController, which
+                // re-verifies both belong to the authenticated agent on
+                // every report regardless.
+                'project_id' => $mapping->project_id,
+                'mapping_id' => $mapping->id,
                 'source_workspace_path' => $mapping->sourceWorkspacePath(),
                 'repository_url' => 'https://github.com/' . $mapping->project->repository . '.git',
                 'remote_name' => $mapping->remote_name,
