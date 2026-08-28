@@ -205,8 +205,12 @@ final class SafeFilesystem
      * specific realpath-comparison technique is used instead of
      * is_link()/readlink(), both confirmed unreliable for a Windows
      * Junction by direct testing.
+     *
+     * Public: also used by WorkspaceInventoryScanner to refuse scanning a
+     * mapped workspace root that is itself a symlink/Junction, before any
+     * `git` command ever runs against it.
      */
-    private static function isLinkLikeEntry(string $path): bool
+    public static function isLinkLikeEntry(string $path): bool
     {
         $real = realpath($path);
         if ($real === false) {
