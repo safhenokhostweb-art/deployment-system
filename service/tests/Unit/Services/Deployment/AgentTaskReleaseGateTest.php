@@ -96,6 +96,30 @@ class AgentTaskReleaseGateTest extends TestCase
         $this->assertSame($ctx['deployment']->commit_hash, $claimed['job']['commit_hash']);
     }
 
+    public function test_v2_task_is_blocked_on_1_3_4_p1_after_policy_rollback(): void
+    {
+        config()->set('deployment.artifact_dependency_policies.customer-site.required', false);
+        $ctx = $this->makeTask(['project' => ['project_key' => 'customer-site']]);
+        $ctx['agent']->update(['agent_version' => '1.3.4-p1']);
+        $this->attachArtifact($ctx, $ctx['deployment']->commit_hash, ['vendor/autoload.php', '.deployment/dependency-lock-v2']);
+
+        $this->assertNull(app(AgentTaskService::class)->claimNextTask($ctx['agent']));
+        $this->assertSame(DeploymentTask::STATUS_FAILED, $ctx['task']->fresh()->status);
+        $this->assertSame(Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE, $ctx['deployment']->fresh()->failure_code);
+    }
+
+    public function test_v2_task_payload_requires_lock_on_1_4_with_policy_off(): void
+    {
+        config()->set('deployment.artifact_dependency_policies.customer-site.required', false);
+        $ctx = $this->makeTask(['project' => ['project_key' => 'customer-site']]);
+        $ctx['agent']->update(['agent_version' => '1.4.0']);
+        $this->attachArtifact($ctx, $ctx['deployment']->commit_hash, ['vendor/autoload.php', '.deployment/dependency-lock-v2']);
+
+        $claimed = app(AgentTaskService::class)->claimNextTask($ctx['agent']);
+        $this->assertNotNull($claimed);
+        $this->assertTrue($claimed['job']['artifact']['dependency_lock_required']);
+    }
+
     public function test_task_payload_carries_persistent_runtime_mapping(): void
     {
         $ctx = $this->makeTask(['project' => [

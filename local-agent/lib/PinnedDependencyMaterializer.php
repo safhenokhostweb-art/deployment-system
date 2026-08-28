@@ -1,0 +1,196 @@
+<?php
+
+declare(strict_types=1);
+
+namespace LocalAgent;
+
+/** Materializes allowlisted Composer path packages from an exact reachable Git commit. */
+final class PinnedDependencyMaterializer
+{
+    public function __construct(private readonly GitManager $git)
+    {
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $dependencies
+     * @param array<int, array<string, mixed>> $allowlist
+     * @param array<string, array<string, mixed>> $repositoryMappings
+     * @return array<int, array<string, string>>
+     */
+    public function materialize(BuildWorkspace $workspace, array $dependencies, array $allowlist, array $repositoryMappings, ?callable $onTick = null): array
+    {
+        $locks = [];
+        $seenDestinations = [];
+
+        foreach ($dependencies as $index => $dependency) {
+            $normalized = $this->validateRequest($dependency, $allowlist, $repositoryMappings);
+            $destination = $normalized['destination_path'];
+            if (isset($seenDestinations[$destination])) {
+                throw $this->failure('Dependency contract contains a duplicate destination path.');
+            }
+            $seenDestinations[$destination] = true;
+
+            $target = $workspace->resolvePathDependencyTarget($destination);
+            if (file_exists($target) || is_link($target)) {
+                throw $this->failure('Dependency destination already exists in the isolated workspace.');
+            }
+
+            $mapping = $repositoryMappings[$normalized['repository_mapping']];
+            $checkout = $workspace->root() . '/dependency-checkouts/' . $index . '-' . bin2hex(random_bytes(6));
+            if (!mkdir($checkout, 0700, true) && !is_dir($checkout)) {
+                throw $this->failure('Could not create an isolated dependency checkout.');
+            }
+
+            $this->run(['git', 'init'], $checkout, 30, 'initializing dependency checkout', $onTick);
+            $this->run(['git', 'remote', 'add', 'origin', (string) $mapping['repository_url']], $checkout, 30, 'configuring dependency mapping', $onTick);
+            $this->run(['git', 'fetch', '--no-tags', '--prune', 'origin', $normalized['branch']], $checkout, $this->git->timeoutFor('fetch'), 'fetching dependency branch', $onTick);
+            $this->run(['git', 'cat-file', '-e', $normalized['commit_sha'] . '^{commit}'], $checkout, 30, 'validating dependency commit', $onTick);
+            $this->run(['git', 'merge-base', '--is-ancestor', $normalized['commit_sha'], 'FETCH_HEAD'], $checkout, 30, 'validating dependency reachability', $onTick);
+
+            $tree = $this->git->run(['git', 'rev-parse', $normalized['commit_sha'] . ':' . $normalized['source_path']], $checkout, 30);
+            $treeHash = strtolower(trim($tree['output']));
+            if ($tree['exitCode'] !== 0 || preg_match('/^[0-9a-f]{40}$/', $treeHash) !== 1) {
+                throw $this->failure('Allowlisted dependency source path is not a Git tree at the requested commit.');
+            }
+            $type = $this->git->run(['git', 'cat-file', '-t', $treeHash], $checkout, 30);
+            if ($type['exitCode'] !== 0 || trim($type['output']) !== 'tree') {
+                throw $this->failure('Allowlisted dependency source path is not a directory tree.');
+            }
+
+            $entries = $this->git->run(['git', 'ls-tree', '-r', '-z', $normalized['commit_sha'], '--', $normalized['source_path']], $checkout, 30);
+            if ($entries['exitCode'] !== 0 || preg_match('/(^|\x00)(120000|160000) /', $entries['output']) === 1) {
+                throw $this->failure('Dependency tree contains a symlink or unresolved submodule.');
+            }
+
+            $archive = $workspace->root() . '/dependency-' . $index . '-' . bin2hex(random_bytes(6)) . '.zip';
+            try {
+                $this->run(['git', 'archive', '--format=zip', '-o', $archive, $normalized['commit_sha'] . ':' . $normalized['source_path']], $checkout, 300, 'archiving dependency tree', $onTick);
+                if (!is_dir(dirname($target)) && !mkdir(dirname($target), 0700, true) && !is_dir(dirname($target))) {
+                    throw $this->failure('Could not create the dependency destination.');
+                }
+                if (!mkdir($target, 0700, true) && !is_dir($target)) {
+                    throw $this->failure('Could not create the dependency package directory.');
+                }
+                SafeFilesystem::extractZipSafely($archive, $target);
+            } finally {
+                @unlink($archive);
+            }
+
+            self::assertOrdinaryTree($target);
+            $composer = json_decode((string) @file_get_contents($target . '/composer.json'), true);
+            if (!is_array($composer) || !hash_equals($normalized['package_name'], (string) ($composer['name'] ?? ''))) {
+                throw $this->failure('Materialized package name does not match the allowlisted Composer package.');
+            }
+
+            $locks[] = [
+                'project_id' => $normalized['project_id'],
+                'repository_mapping' => $normalized['repository_mapping'],
+                'branch' => $normalized['branch'],
+                'commit_sha' => $normalized['commit_sha'],
+                'package_name' => $normalized['package_name'],
+                'source_path' => $normalized['source_path'],
+                'destination_path' => $destination,
+                'artifact_path' => 'vendor/' . $normalized['package_name'],
+                'tree_hash' => $treeHash,
+                'checksum_sha256' => self::contentChecksum($target),
+            ];
+        }
+
+        return $locks;
+    }
+
+    /** @param array<string, mixed> $request @param array<int, array<string, mixed>> $allowlist @param array<string, array<string, mixed>> $mappings */
+    private function validateRequest(array $request, array $allowlist, array $mappings): array
+    {
+        $fields = ['project_id', 'repository_mapping', 'branch', 'commit_sha', 'package_name', 'source_path', 'destination_path'];
+        foreach ($fields as $field) {
+            if (!is_string($request[$field] ?? null) || trim($request[$field]) === '') {
+                throw $this->failure("Dependency contract field '{$field}' is missing or invalid.");
+            }
+        }
+        $request = array_map(static fn ($value) => is_string($value) ? trim($value) : $value, $request);
+        if (preg_match('/^[0-9a-f]{40}$/', $request['commit_sha']) !== 1) {
+            throw $this->failure('Dependency commit must be a full lowercase 40-character Git SHA.');
+        }
+        if (!$this->validRef($request['branch']) || !$this->validIdentifier($request['project_id']) || !$this->validIdentifier($request['repository_mapping'])) {
+            throw $this->failure('Dependency project, mapping, or branch contains unsupported characters.');
+        }
+        if (preg_match('#^[a-z0-9_.-]+/[a-z0-9_.-]+$#', $request['package_name']) !== 1) {
+            throw $this->failure('Dependency package name is invalid.');
+        }
+        foreach (['source_path', 'destination_path'] as $pathField) {
+            if (!$this->safeRelativePath($request[$pathField], $pathField === 'destination_path')) {
+                throw $this->failure("Dependency {$pathField} is not a safe relative path.");
+            }
+        }
+        if (!isset($mappings[$request['repository_mapping']]) || !is_string($mappings[$request['repository_mapping']]['repository_url'] ?? null)) {
+            throw $this->failure('Dependency repository mapping is not configured on this Local Agent.');
+        }
+
+        $matchFields = ['project_id', 'repository_mapping', 'branch', 'package_name', 'source_path', 'destination_path'];
+        $allowed = false;
+        foreach ($allowlist as $candidate) {
+            $matches = is_array($candidate);
+            foreach ($matchFields as $field) {
+                $matches = $matches && isset($candidate[$field]) && hash_equals((string) $candidate[$field], $request[$field]);
+            }
+            $allowed = $allowed || $matches;
+        }
+        if (!$allowed) {
+            throw $this->failure('Dependency repository or package path is not allowlisted for this consumer project.');
+        }
+
+        return $request;
+    }
+
+    private function run(array $command, string $cwd, int $timeout, string $operation, ?callable $onTick): void
+    {
+        $result = $this->git->run($command, $cwd, $timeout, $onTick);
+        if ($result['exitCode'] !== 0) {
+            throw $this->failure("Dependency materialization failed while {$operation}.");
+        }
+    }
+
+    private function safeRelativePath(string $path, bool $allowParentSegments = false): bool
+    {
+        $normalized = str_replace('\\', '/', $path);
+        return $normalized !== '' && !str_starts_with($normalized, '/') && preg_match('#^[A-Za-z]:/#', $normalized) !== 1
+            && ($allowParentSegments || !in_array('..', explode('/', $normalized), true)) && !str_contains($normalized, "\0")
+            && !str_contains($normalized, '*') && !str_contains($normalized, '?');
+    }
+
+    private function validIdentifier(string $value): bool { return preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]*$/', $value) === 1; }
+    private function validRef(string $value): bool { return preg_match('/^[A-Za-z0-9][A-Za-z0-9._\/-]*$/', $value) === 1 && !str_contains($value, '..') && !str_contains($value, '@{'); }
+    private function failure(string $message): LocalBuildFailedException { return new LocalBuildFailedException('local_workspace_prepare_failed', $message); }
+
+    public static function assertOrdinaryTree(string $root): void
+    {
+        if (!is_dir($root) || SafeFilesystem::isLinkLikeEntry($root)) {
+            throw new LocalBuildFailedException('local_workspace_prepare_failed', 'Materialized dependency is not an ordinary directory.');
+        }
+        $iterator = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($root, \FilesystemIterator::SKIP_DOTS), \RecursiveIteratorIterator::SELF_FIRST);
+        foreach ($iterator as $entry) {
+            if ($entry->isLink() || SafeFilesystem::isLinkLikeEntry($entry->getPathname())) {
+                throw new LocalBuildFailedException('local_workspace_prepare_failed', 'Materialized dependency contains a symlink or reparse point.');
+            }
+        }
+    }
+
+    public static function contentChecksum(string $root): string
+    {
+        self::assertOrdinaryTree($root);
+        $files = [];
+        $realRoot = realpath($root);
+        SafeFilesystem::collectFilesSafely((string) $realRoot, (string) $realRoot, '', $files);
+        ksort($files, SORT_STRING);
+        $hash = hash_init('sha256');
+        foreach ($files as $relative => $absolute) {
+            $bytes = file_get_contents($absolute);
+            if ($bytes === false) {
+                throw new LocalBuildFailedException('local_workspace_prepare_failed', 'Could not checksum materialized dependency content.');
+            }
+            hash_update($hash, $relative . "\0" . strlen($bytes) . "\0" . $bytes);
+        }
+        return hash_final($hash);
+    }
+}

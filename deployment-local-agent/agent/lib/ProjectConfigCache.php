@@ -63,6 +63,8 @@ final class ProjectConfigCache
                 'application_root' => $entry['application_root'] ?? '.',
                 'repository_url' => $entry['repository_url'] ?? null,
                 'requires_complete_artifact' => $entry['requires_complete_artifact'] ?? false,
+                'dependency_pinning_required' => $entry['dependency_pinning_required'] ?? false,
+                'dependency_allowlist' => $entry['dependency_allowlist'] ?? [],
             ];
         }
 
@@ -95,6 +97,8 @@ final class ProjectConfigCache
                 || !is_string($entry['application_root'] ?? '.')
                 || (isset($entry['repository_url']) && (!is_string($entry['repository_url']) || $entry['repository_url'] === ''))
                 || !is_bool($entry['requires_complete_artifact'] ?? false)
+                || !is_bool($entry['dependency_pinning_required'] ?? false)
+                || !is_array($entry['dependency_allowlist'] ?? [])
             ) {
                 throw new \InvalidArgumentException("invalid configuration for project '{$key}' (source_workspace_path/remote_name/branch must be non-empty strings)");
             }

@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\LocalAgent;
+use App\Support\Deployment\ArtifactDependencyPolicy;
 use Illuminate\Http\Request;
 
 /**
@@ -38,6 +39,8 @@ class LocalAgentProjectSyncController extends Controller
                 'branch' => $mapping->effectiveBranch(),
                 'application_root' => $mapping->project->application_root ?? '.',
                 'requires_complete_artifact' => (bool) $mapping->project->requires_complete_artifact,
+                'dependency_pinning_required' => ArtifactDependencyPolicy::required($mapping->project->project_key),
+                'dependency_allowlist' => ArtifactDependencyPolicy::allowlist($mapping->project->project_key),
             ])
             ->values();
 

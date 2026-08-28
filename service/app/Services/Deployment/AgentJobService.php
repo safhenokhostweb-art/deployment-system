@@ -10,6 +10,7 @@ use App\Models\Deployment;
 use App\Models\DeploymentLogEntry;
 use App\Models\Server;
 use App\Services\Deployment\Artifact\ArtifactService;
+use App\Support\Deployment\ArtifactDependencyPolicy;
 use App\Services\Deployment\Artifact\ArtifactPhysicalIntegrityException;
 use App\Services\Security\JobPayloadSigner;
 use App\Services\Security\SecretRedactor;
@@ -174,6 +175,21 @@ class AgentJobService
                 return null;
             }
 
+            $dependencyLockRequired = $deployment->artifact !== null
+                && $this->artifactRequiresDependencyLock($deployment->artifact->required_paths ?? [], $project->project_key);
+            if ($dependencyLockRequired && !$this->serverAgentEnforcesDependencyLock($server)) {
+                $reportedVersion = $server->agents()->first()?->agent_version;
+                $requiredVersion = (string) config('deployment.min_server_agent_version_for_dependency_pinning');
+                $deployment->update([
+                    'status' => Deployment::STATUS_FAILED,
+                    'finished_at' => now(),
+                    'last_activity_at' => now(),
+                    'failure_code' => Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE,
+                    'failure_message' => "The server agent is too old to validate dependency locks. Upgrade to {$requiredVersion} or newer.",
+                ]);
+                return null;
+            }
+
             if ($deployment->hasHttpHealthCheck() && !$this->serverAgentEnforcesHttpHealth($server)) {
                 $reportedVersion = $server->agents()->first()?->agent_version;
                 $requiredVersion = (string) config('deployment.min_server_agent_version_for_http_health');
@@ -277,6 +293,7 @@ class AgentJobService
                     // AgentTaskService's task payload.
                     'commit_hash' => $deployment->artifact->commit_hash,
                     'required_paths' => $deployment->artifact->required_paths ?? [],
+                    'dependency_lock_required' => $dependencyLockRequired,
                 ] : null,
                 'issued_at' => now()->timestamp,
             ];
@@ -494,6 +511,19 @@ class AgentJobService
         }
 
         return version_compare($agentVersion, (string) config('deployment.min_server_agent_version_for_artifact'), '>=');
+    }
+
+    private function serverAgentEnforcesDependencyLock(Server $server): bool
+    {
+        $agentVersion = $server->agents()->first()?->agent_version;
+        return is_string($agentVersion) && version_compare($agentVersion, (string) config('deployment.min_server_agent_version_for_dependency_pinning'), '>=');
+    }
+
+    /** @param array<int, string> $requiredPaths */
+    private function artifactRequiresDependencyLock(array $requiredPaths, string $projectKey): bool
+    {
+        return in_array('.deployment/dependency-lock-v2', $requiredPaths, true)
+            || ArtifactDependencyPolicy::required($projectKey);
     }
 
     private function serverAgentEnforcesHttpHealth(Server $server): bool

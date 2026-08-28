@@ -37,6 +37,8 @@ namespace LocalAgent;
  */
 final class ArtifactBuilder
 {
+    public const DEPENDENCY_LOCK_MARKER = '.deployment/dependency-lock-v2';
+
     /**
      * @param array{ranComposer: bool, ranNpmBuild: bool} $buildResult what LocalBuildRunner reported — determines which validations below actually apply
      * @param array{project_key?: string, commit_sha?: string, branch?: string, agent_version?: string} $provenance release provenance written into the artifact's own manifest
@@ -55,7 +57,8 @@ final class ArtifactBuilder
         // before activation. Written into the isolated workspace tree, so
         // it becomes part of the immutable zip (never the developer's live
         // working tree).
-        $this->writeReleaseManifest($projectDir, $buildResult, $provenance);
+        $this->validateDependencyLocks($projectDir, $provenance['dependency_locks'] ?? [], false);
+        $this->writeReleaseManifest($projectDir, $buildResult, $provenance, $commitTimestamp);
 
         $finalZipPath = null;
         try {
@@ -68,6 +71,7 @@ final class ArtifactBuilder
                 throw new LocalBuildFailedException('artifact_build_failed', 'The assembled artifact is empty.');
             }
 
+            $this->verifySealedDependencyLocks($finalZipPath, $provenance['dependency_locks'] ?? []);
             $onStage?->__invoke('checksum calculation started');
             $checksum = hash_file('sha256', $finalZipPath);
             if ($checksum === false) {
@@ -125,6 +129,9 @@ final class ArtifactBuilder
             $paths[] = 'public/build/manifest.json';
         }
         $paths[] = '.deployment/release-manifest.json';
+        if (is_file($projectDir . '/' . self::DEPENDENCY_LOCK_MARKER)) {
+            $paths[] = self::DEPENDENCY_LOCK_MARKER;
+        }
         return $paths;
     }
 
@@ -138,13 +145,23 @@ final class ArtifactBuilder
      *
      * @param array{project_key?: string, commit_sha?: string, branch?: string, agent_version?: string} $provenance
      */
-    private function writeReleaseManifest(string $projectDir, array $buildResult, array $provenance): void
+    private function writeReleaseManifest(string $projectDir, array $buildResult, array $provenance, int $commitTimestamp): void
     {
+        $manifestDir = "{$projectDir}/.deployment";
+        if (!is_dir($manifestDir)) {
+            mkdir($manifestDir, 0755, true);
+        }
+        if (($provenance['dependency_pinning_required'] ?? false) === true) {
+            // Stored in Artifact.required_paths as a durable protocol marker.
+            // This lets a rolled-back Hub distinguish v2 artifacts even after
+            // the project policy is disabled, without a database migration.
+            file_put_contents($projectDir . '/' . self::DEPENDENCY_LOCK_MARKER, "dependency-lock-manifest-v2\n");
+        }
         $paths = array_values(array_unique(array_merge($this->requiredPaths($projectDir, $buildResult), ['.deployment/release-manifest.json'])));
 
         $manifest = [
             'format' => 'deployment-system-release-manifest',
-            'version' => 1,
+            'version' => ($provenance['dependency_pinning_required'] ?? false) ? 2 : 1,
             'project_key' => $provenance['project_key'] ?? null,
             'commit_sha' => $provenance['commit_sha'] ?? null,
             'branch' => $provenance['branch'] ?? null,
@@ -156,15 +173,42 @@ final class ArtifactBuilder
                 'ran_npm_build' => (bool) ($buildResult['ranNpmBuild'] ?? false),
             ],
             'agent_version' => $provenance['agent_version'] ?? 'unknown',
-            'generated_at' => gmdate('c'),
+            'generated_at' => gmdate('c', $commitTimestamp),
             'status' => 'pass',
         ];
-
-        $manifestDir = "{$projectDir}/.deployment";
-        if (!is_dir($manifestDir)) {
-            mkdir($manifestDir, 0755, true);
+        if (($provenance['dependency_pinning_required'] ?? false) === true) {
+            $manifest['dependency_lock_required'] = true;
+            $manifest['dependency_locks'] = array_values($provenance['dependency_locks'] ?? []);
         }
+
         file_put_contents("{$manifestDir}/release-manifest.json", json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    }
+
+    private function validateDependencyLocks(string $projectDir, array $locks, bool $sealed): void
+    {
+        foreach ($locks as $lock) {
+            $path = $projectDir . '/' . ($lock['artifact_path'] ?? '');
+            $resolved = realpath($path);
+            if ($resolved === false) throw new LocalBuildFailedException('artifact_build_failed', 'Pinned Composer dependency is missing from vendor.');
+            if ($sealed) PinnedDependencyMaterializer::assertOrdinaryTree($path);
+            PinnedDependencyMaterializer::assertOrdinaryTree($resolved);
+            if (!hash_equals((string) ($lock['checksum_sha256'] ?? ''), PinnedDependencyMaterializer::contentChecksum($resolved))) {
+                throw new LocalBuildFailedException('artifact_build_failed', 'Composer materialized dependency differs from its exact pinned Git tree.');
+            }
+        }
+    }
+
+    private function verifySealedDependencyLocks(string $zipPath, array $locks): void
+    {
+        if ($locks === []) return;
+        $root = sys_get_temp_dir() . '/la-verify-' . bin2hex(random_bytes(8));
+        mkdir($root, 0700, true);
+        try {
+            SafeFilesystem::extractZipSafely($zipPath, $root);
+            $this->validateDependencyLocks($root, $locks, true);
+        } finally {
+            SafeFilesystem::recursiveDelete($root);
+        }
     }
 
     /**

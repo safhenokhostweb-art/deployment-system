@@ -66,7 +66,7 @@ final class ArtifactUploader
     /**
      * @return array{succeeded: bool, message: string, failureCode: ?string}
      */
-    public function buildAndUploadRemoteCommit(string $projectKey, string $repositoryPath, string $repositoryUrl, string $remoteName, string $commitHash, string $branch, string $jobId, ?callable $onTick = null, string $applicationRoot = '.'): array
+    public function buildAndUploadRemoteCommit(string $projectKey, string $repositoryPath, string $repositoryUrl, string $remoteName, string $commitHash, string $branch, string $jobId, ?callable $onTick = null, string $applicationRoot = '.', array $dependencyContract = [], array $dependencyAllowlist = [], array $repositoryMappings = []): array
     {
         return $this->buildAndUploadFromPreparedSource(
             $projectKey,
@@ -74,7 +74,7 @@ final class ArtifactUploader
             $commitHash,
             $branch,
             $jobId,
-            fn (BuildWorkspace $workspace) => $this->sourcePreparer->prepareRemoteCommit($workspace, $repositoryPath, $repositoryUrl, $remoteName, $branch, $commitHash, $onTick),
+            fn (BuildWorkspace $workspace) => $this->sourcePreparer->prepareRemoteCommit($workspace, $repositoryPath, $repositoryUrl, $remoteName, $branch, $commitHash, $onTick, $dependencyContract, $dependencyAllowlist, $repositoryMappings),
             $onTick,
             $applicationRoot,
         );
@@ -116,6 +116,8 @@ final class ArtifactUploader
                     'commit_sha' => $commitHash,
                     'branch' => $branch,
                     'agent_version' => $this->agentVersion ?? 'unknown',
+                    'dependency_locks' => $prepared['dependencyLocks'] ?? [],
+                    'dependency_pinning_required' => ($prepared['dependencyLocks'] ?? []) !== [],
                 ],
             );
             $archivePath = $archive['path'];

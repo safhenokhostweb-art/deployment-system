@@ -105,6 +105,37 @@ class AgentJobServiceReleaseGateTest extends TestCase
         $this->assertSame(Deployment::STATUS_RUNNING, $deployment->fresh()->status);
     }
 
+    public function test_v2_artifact_is_blocked_after_policy_rollback_on_server_1_3_4_p1(): void
+    {
+        config()->set('deployment.artifact_dependency_policies.customer-site.required', false);
+        $server = $this->serverWithAgent('1.3.4-p1');
+        $artifact = $this->artifactFor($server, [
+            'required_paths' => ['composer.json', 'vendor/autoload.php', '.deployment/dependency-lock-v2'],
+        ]);
+        $artifact->project->update(['project_key' => 'customer-site']);
+        $deployment = $this->queuedArtifactDeployment($server, $artifact);
+
+        $this->assertNull(app(AgentJobService::class)->claimNextJob($server));
+        $this->assertSame(Deployment::STATUS_FAILED, $deployment->fresh()->status);
+        $this->assertSame(Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE, $deployment->fresh()->failure_code);
+    }
+
+    public function test_v2_artifact_dispatches_to_server_1_4_even_when_policy_is_off(): void
+    {
+        config()->set('deployment.artifact_dependency_policies.customer-site.required', false);
+        $server = $this->serverWithAgent('1.4.0');
+        $artifact = $this->artifactFor($server, [
+            'required_paths' => ['composer.json', 'vendor/autoload.php', '.deployment/dependency-lock-v2'],
+        ]);
+        $artifact->project->update(['project_key' => 'customer-site']);
+        $deployment = $this->queuedArtifactDeployment($server, $artifact);
+
+        $claimed = app(AgentJobService::class)->claimNextJob($server);
+        $this->assertNotNull($claimed);
+        $this->assertTrue($claimed['job']['artifact']['dependency_lock_required']);
+        $this->assertSame(Deployment::STATUS_RUNNING, $deployment->fresh()->status);
+    }
+
     public function test_current_agent_receives_signed_persistent_runtime_contract(): void
     {
         $server = $this->serverWithAgent('1.3.4');

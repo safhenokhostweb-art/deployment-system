@@ -15,6 +15,7 @@ use App\Services\Security\JobPayloadSigner;
 use App\Services\Security\SecretRedactor;
 use Illuminate\Support\Facades\DB;
 use App\Support\Deployment\HttpHealthCheckPayload;
+use App\Support\Deployment\ArtifactDependencyPolicy;
 
 /**
  * New-domain analog of AgentJobService — claims DeploymentTask rows
@@ -94,6 +95,13 @@ class AgentTaskService
                 if ($task->deployment->artifact !== null && !$this->agentEnforcesReleaseGate($agent)) {
                     $this->rejectIncompatibleAgentTask($task, $agent);
 
+                    continue;
+                }
+
+                if ($task->deployment->artifact !== null
+                    && $this->artifactRequiresDependencyLock($task->deployment->artifact->required_paths ?? [], $task->deployment->project->project_key)
+                    && !$this->agentEnforcesDependencyLock($agent)) {
+                    $this->rejectIncompatibleDependencyLockTask($task, $agent);
                     continue;
                 }
 
@@ -201,6 +209,35 @@ class AgentTaskService
         return is_string($agent->agent_version)
             && $agent->agent_version !== ''
             && version_compare($agent->agent_version, (string) config('deployment.min_server_agent_version_for_http_health'), '>=');
+    }
+
+    private function agentEnforcesDependencyLock(Agent $agent): bool
+    {
+        return is_string($agent->agent_version)
+            && version_compare($agent->agent_version, (string) config('deployment.min_server_agent_version_for_dependency_pinning'), '>=');
+    }
+
+    /** @param array<int, string> $requiredPaths */
+    private function artifactRequiresDependencyLock(array $requiredPaths, string $projectKey): bool
+    {
+        return in_array('.deployment/dependency-lock-v2', $requiredPaths, true)
+            || ArtifactDependencyPolicy::required($projectKey);
+    }
+
+    private function rejectIncompatibleDependencyLockTask(DeploymentTask $task, Agent $agent): void
+    {
+        $requiredVersion = (string) config('deployment.min_server_agent_version_for_dependency_pinning');
+        $message = "Server Agent {$agent->public_id} cannot validate dependency locks; version {$requiredVersion} or newer is required.";
+        $task->update([
+            'status' => DeploymentTask::STATUS_FAILED,
+            'failure_code' => Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE,
+            'failure_message' => $message,
+        ]);
+        $task->deployment->update([
+            'failure_code' => Deployment::FAILURE_CODE_AGENT_PROTOCOL_INCOMPATIBLE,
+            'failure_message' => $message,
+        ]);
+        $this->aggregator->recalculate($task->deployment);
     }
 
     private function agentEnforcesPersistentRuntime(Agent $agent, \App\Models\Project $project): bool
@@ -407,6 +444,10 @@ class AgentTaskService
                 // to pin the release. Mirrors AgentJobService's payload.
                 'commit_hash' => $task->deployment->artifact->commit_hash,
                 'required_paths' => $task->deployment->artifact->required_paths ?? [],
+                'dependency_lock_required' => $this->artifactRequiresDependencyLock(
+                    $task->deployment->artifact->required_paths ?? [],
+                    $task->deployment->project->project_key,
+                ),
             ] : null,
             'issued_at' => now()->timestamp,
         ];

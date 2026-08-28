@@ -37,7 +37,7 @@ try {
     for ($i = 0; $i < $zip->numFiles; $i++) { $names[] = $zip->getNameIndex($i); }
     $zip->close();
     $check('subdirectory application root is packaged without service wrapper', in_array('artisan', $names, true) && in_array('vendor/autoload.php', $names, true) && !in_array('service/artisan', $names, true));
-    $check('Laravel runtime requirements are emitted', $archive['requiredPaths'] === ['composer.json', 'vendor/autoload.php', 'artisan', 'bootstrap/app.php', 'public/index.php']);
+    $check('Laravel runtime requirements are emitted', $archive['requiredPaths'] === ['composer.json', 'vendor/autoload.php', 'artisan', 'bootstrap/app.php', 'public/index.php', '.deployment/release-manifest.json']);
     @unlink($archive['path']);
 
     foreach (['../service', '/absolute', 'C:/absolute'] as $invalid) {

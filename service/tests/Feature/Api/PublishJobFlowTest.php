@@ -21,6 +21,12 @@ class PublishJobFlowTest extends TestCase
     use RefreshDatabase;
     use SignsLocalAgentRequests;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+        config()->set('deployment.artifact_dependency_policies.customer-site.required', true);
+    }
+
     private function headersFor(LocalAgent $agent, string $method, string $path, string $body = ''): array
     {
         return $this->localAgentHeaders($method, $path, $body, $agent->public_id, LocalAgentFactory::$lastPlainToken, LocalAgentFactory::$lastPlainSecret);
@@ -131,6 +137,56 @@ class PublishJobFlowTest extends TestCase
 
         $this->postJson($path, $body, $this->headersFor($agent, 'POST', $path, json_encode($body)))->assertStatus(422);
         $this->assertSame(PublishJob::STATUS_RUNNING, $job->fresh()->status);
+    }
+
+    public function test_customer_site_build_contract_is_v2_and_contains_only_allowlisted_pins(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create(['agent_version' => '1.5.0']);
+        $project = $this->mappedProject($agent);
+        $project->update(['project_key' => 'customer-site']);
+        $dependencyProject = Project::factory()->create(['project_key' => 'saas-platform', 'repository' => 'owner/saas-platform']);
+        LocalProjectMapping::factory()->create(['local_agent_id' => $agent->id, 'project_id' => $dependencyProject->id, 'local_path' => '/opt/workspaces/saas-platform', 'source_workspace_path' => '/opt/workspaces/saas-platform', 'git_branch' => 'main']);
+        app(PublishJobService::class)->queueArtifactBuild($agent, $project, '1bf0d8913948f928e90c452d8896a71922ac0398', 'main', 'dev@example.test');
+
+        $headers = $this->headersFor($agent, 'GET', '/api/local-agent/publish-jobs/next');
+        $response = $this->get('/api/local-agent/publish-jobs/next', $headers)->assertOk();
+        $response->assertJsonPath('job.build_contract_version', 2)
+            ->assertJsonPath('job.dependency_contract.version', 2)
+            ->assertJsonPath('job.dependency_contract.required', true)
+            ->assertJsonPath('job.dependency_contract.dependencies.4.package_name', 'saas-platform/core-utils')
+            ->assertJsonPath('job.dependency_contract.dependencies.4.commit_sha', 'd9997e892564b2b8f16e7f67129b1e629f592122');
+        $dependency = $response->json('job.dependency_contract.dependencies.4');
+        $this->assertArrayNotHasKey('repository_url', $dependency);
+
+        $syncHeaders = $this->headersFor($agent, 'GET', '/api/local-agent/projects');
+        $sync = $this->get('/api/local-agent/projects', $syncHeaders)->assertOk();
+        $consumer = collect($sync->json('projects'))->firstWhere('project_key', 'customer-site');
+        $this->assertTrue($consumer['dependency_pinning_required']);
+        $this->assertCount(5, $consumer['dependency_allowlist']);
+        $this->assertArrayNotHasKey('commit_sha', $consumer['dependency_allowlist'][0]);
+    }
+
+    public function test_customer_site_dependency_policy_fails_closed_on_old_local_agent_only(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create(['agent_version' => '1.4.7']);
+        $project = $this->mappedProject($agent);
+        $project->update(['project_key' => 'customer-site']);
+        $job = app(PublishJobService::class)->queueArtifactBuild($agent, $project, str_repeat('e', 40), 'main', 'dev@example.test');
+        $this->get('/api/local-agent/publish-jobs/next', $this->headersFor($agent, 'GET', '/api/local-agent/publish-jobs/next'))->assertStatus(409);
+        $this->assertSame(PublishJob::STATUS_FAILED, $job->fresh()->status);
+    }
+
+    public function test_new_hub_with_policy_off_keeps_local_agent_1_4_7_compatible(): void
+    {
+        config()->set('deployment.artifact_dependency_policies.customer-site.required', false);
+        $agent = LocalAgent::factory()->approved()->create(['agent_version' => '1.4.7']);
+        $project = $this->mappedProject($agent);
+        $project->update(['project_key' => 'customer-site']);
+        app(PublishJobService::class)->queueArtifactBuild($agent, $project, str_repeat('e', 40), 'main', 'dev@example.test');
+
+        $response = $this->get('/api/local-agent/publish-jobs/next', $this->headersFor($agent, 'GET', '/api/local-agent/publish-jobs/next'));
+        $response->assertOk()->assertJsonPath('job.build_contract_version', 2);
+        $this->assertSame([], $response->json('job.dependency_contract'));
     }
 
     public function test_status_check_rejects_no_source_change_evidence_for_the_wrong_mapping_branch(): void

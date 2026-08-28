@@ -53,6 +53,7 @@ require __DIR__ . '/lib/SourceWorkspaceManager.php';
 require __DIR__ . '/lib/SafeFilesystem.php';
 require __DIR__ . '/lib/BuildWorkspace.php';
 require __DIR__ . '/lib/WorkspaceSourcePreparer.php';
+require __DIR__ . '/lib/PinnedDependencyMaterializer.php';
 require __DIR__ . '/lib/ArtifactBuilder.php';
 require __DIR__ . '/lib/ArtifactUploader.php';
 require __DIR__ . '/lib/PublishJobHeartbeatWorker.php';
@@ -94,7 +95,7 @@ use LocalAgent\WorkspaceSourcePreparer;
  * Hub side for why this never triggers an automatic download). Bump
  * when agent.php or lib/* changes in a way that matters operationally.
  */
-const LOCAL_AGENT_VERSION = '1.4.7';
+const LOCAL_AGENT_VERSION = '1.5.0';
 
 $configPath = __DIR__ . '/config.php';
 
@@ -432,7 +433,12 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
             }
 
             $logger->info("Job {$job['id']}: building artifact for {$projectKey} commit {$commitHash} from {$remoteName}/{$artifactBranch}; no commit or push will be performed.");
-            $artifactResult = $artifactUploader->buildAndUploadRemoteCommit($projectKey, $repositoryPath, $repositoryUrl, $remoteName, $commitHash, $artifactBranch, (string) $job['id'], $onTick, $projectConfig['application_root'] ?? '.');
+            $contract = is_array($job['dependency_contract'] ?? null) ? $job['dependency_contract'] : [];
+            $mappings = [];
+            foreach ($projects as $mappedKey => $mappedProject) {
+                if (is_string($mappedProject['repository_url'] ?? null)) $mappings[$mappedKey] = ['repository_url' => $mappedProject['repository_url']];
+            }
+            $artifactResult = $artifactUploader->buildAndUploadRemoteCommit($projectKey, $repositoryPath, $repositoryUrl, $remoteName, $commitHash, $artifactBranch, (string) $job['id'], $onTick, $projectConfig['application_root'] ?? '.', $contract, $projectConfig['dependency_allowlist'] ?? [], $mappings);
 
             if (!$artifactResult['succeeded']) {
                 $logger->error("Job {$job['id']}: artifact build failed [{$artifactResult['failureCode']}]: {$artifactResult['message']}");
@@ -491,7 +497,12 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
             // depends entirely on that artifact existing now that it can
             // never run composer/npm itself, so a broken build here is a
             // genuine publish failure, not a side note.
-            $artifactResult = $artifactUploader->buildAndUploadRemoteCommit($projectKey, $repositoryPath, $repositoryUrl, $remoteName, $commitHash, $branch, (string) $job['id'], $onTick, $projectConfig['application_root'] ?? '.');
+            $contract = is_array($job['dependency_contract'] ?? null) ? $job['dependency_contract'] : [];
+            $mappings = [];
+            foreach ($projects as $mappedKey => $mappedProject) {
+                if (is_string($mappedProject['repository_url'] ?? null)) $mappings[$mappedKey] = ['repository_url' => $mappedProject['repository_url']];
+            }
+            $artifactResult = $artifactUploader->buildAndUploadRemoteCommit($projectKey, $repositoryPath, $repositoryUrl, $remoteName, $commitHash, $branch, (string) $job['id'], $onTick, $projectConfig['application_root'] ?? '.', $contract, $projectConfig['dependency_allowlist'] ?? [], $mappings);
 
             if (!$artifactResult['succeeded']) {
                 $logger->error("Job {$job['id']}: publish failed at the artifact stage [{$artifactResult['failureCode']}]: {$artifactResult['message']}");

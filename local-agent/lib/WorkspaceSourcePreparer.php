@@ -65,7 +65,7 @@ final class WorkspaceSourcePreparer
     /**
      * @return array{commitTimestamp: int}
      */
-    public function prepareRemoteCommit(BuildWorkspace $workspace, string $repositoryPath, string $repositoryUrl, string $remoteName, string $branch, string $commitHash, ?callable $onTick = null): array
+    public function prepareRemoteCommit(BuildWorkspace $workspace, string $repositoryPath, string $repositoryUrl, string $remoteName, string $branch, string $commitHash, ?callable $onTick = null, array $dependencyContract = [], array $dependencyAllowlist = [], array $repositoryMappings = []): array
     {
         if (SafetyChecker::productionSourcePathForbidden($repositoryPath)) {
             throw new LocalBuildFailedException('production_source_forbidden', "Production target '{$repositoryPath}' cannot be used as a Git or artifact source.");
@@ -89,9 +89,27 @@ final class WorkspaceSourcePreparer
             throw new LocalBuildFailedException('local_workspace_prepare_failed', "Workspace checkout mismatch: expected {$commitHash}, got {$checkedOut}.");
         }
 
-        $this->copyPathDependencies($workspace, $repositoryPath);
+        $dependencyLocks = [];
+        $pinningRequired = ($dependencyContract['required'] ?? false) === true;
+        $dependencies = $dependencyContract['dependencies'] ?? [];
+        if ($pinningRequired || $dependencies !== []) {
+            if (($dependencyContract['version'] ?? null) !== 2 || !is_array($dependencies) || ($pinningRequired && $dependencies === [])) {
+                throw new LocalBuildFailedException('local_workspace_prepare_failed', 'A valid dependency contract v2 is required for this project.');
+            }
+            $composerPaths = self::parsePathRepositoryUrls($workspace->projectDir() . '/composer.json');
+            $requestedPaths = array_map(static fn (array $dependency): string => (string) ($dependency['destination_path'] ?? ''), $dependencies);
+            sort($composerPaths, SORT_STRING);
+            sort($requestedPaths, SORT_STRING);
+            if ($composerPaths !== $requestedPaths) {
+                throw new LocalBuildFailedException('local_workspace_prepare_failed', 'Dependency contract must pin every Composer path repository exactly once.');
+            }
+            $dependencyLocks = (new PinnedDependencyMaterializer($this->git))->materialize($workspace, $dependencies, $dependencyAllowlist, $repositoryMappings, $onTick);
+        } else {
+            // Contract v1 compatibility only. Projects opted into pinning never reach this branch.
+            $this->copyPathDependencies($workspace, $repositoryPath);
+        }
 
-        return ['commitTimestamp' => $this->commitTimestamp($workspace->projectDir(), $commitHash)];
+        return ['commitTimestamp' => $this->commitTimestamp($workspace->projectDir(), $commitHash), 'dependencyLocks' => $dependencyLocks];
     }
 
     private function assertTrustedPersistentWorkspace(string $repositoryPath, string $repositoryUrl, string $remoteName, string $branch): void

@@ -8,6 +8,7 @@ use App\Models\LocalProjectMapping;
 use App\Models\PublishJob;
 use App\Services\Publish\PublishJobService;
 use App\Services\Publish\LocalAgentControlJobService;
+use App\Support\Deployment\ArtifactDependencyPolicy;
 use Illuminate\Http\Request;
 
 /**
@@ -98,6 +99,14 @@ class LocalAgentJobController extends Controller
             return response()->json(['job' => null]);
         }
 
+        if ($job->action === PublishJob::ACTION_BUILD_ARTIFACT && ArtifactDependencyPolicy::required($job->project->project_key)) {
+            $minimum = (string) config('deployment.min_local_agent_version_for_dependency_pinning');
+            if (!is_string($agent->agent_version) || !version_compare($agent->agent_version, $minimum, '>=')) {
+                $this->publishJobs->reportFailure($job, "Dependency-pinned artifacts require Local Agent {$minimum} or newer.");
+                abort(409, "Dependency-pinned artifacts require Local Agent {$minimum} or newer.");
+            }
+        }
+
         return response()->json([
             'job' => [
                 'id' => $job->public_id,
@@ -112,6 +121,8 @@ class LocalAgentJobController extends Controller
                 'expected_branch' => $job->action === PublishJob::ACTION_PUBLISH && $job->no_source_change ? $job->reviewed_branch : null,
                 'artifact_commit_hash' => $job->action === PublishJob::ACTION_BUILD_ARTIFACT ? $job->reviewed_head_sha : null,
                 'artifact_branch' => $job->action === PublishJob::ACTION_BUILD_ARTIFACT ? $job->reviewed_branch : null,
+                'build_contract_version' => in_array($job->action, [PublishJob::ACTION_BUILD_ARTIFACT, PublishJob::ACTION_PUBLISH], true) ? 2 : null,
+                'dependency_contract' => in_array($job->action, [PublishJob::ACTION_BUILD_ARTIFACT, PublishJob::ACTION_PUBLISH], true) ? ArtifactDependencyPolicy::contract($job->project->project_key) : null,
             ],
         ]);
     }

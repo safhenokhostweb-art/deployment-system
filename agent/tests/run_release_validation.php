@@ -160,8 +160,30 @@ check('non-Composer release with a commit is accepted (no false positive)', $r['
 $r = $validator->validate($staticRoot, '', []);
 check('non-Composer release without a commit value is not falsely blocked (production artifacts always carry one)', $r['pass'] === true, $failures, $passCount);
 
+// 14) Dependency pinning is policy-scoped: legacy artifacts still pass for
+// other projects, while an opted-in project fails closed without a v2 lock.
+$lockedRoot = makeRoot(); buildLaravelFixture($lockedRoot);
+$r = $validator->validate($lockedRoot, TEST_COMMIT, $requiredPaths, true);
+check('opted-in project rejects a legacy manifest without dependency lock', !$r['pass'] && in_array('dependency_lock', $r['failures'], true), $failures, $passCount);
+$r = $validator->validate($lockedRoot, TEST_COMMIT, $requiredPaths, false);
+check('legacy artifact remains compatible when project policy is not enabled', $r['pass'] === true, $failures, $passCount);
+
+// 15) A valid lock passes and any checksum manipulation is rejected.
+$packageRoot = $lockedRoot . '/vendor/saas-platform/core';
+$bytes = (string) file_get_contents($packageRoot . '/composer.json');
+$checksum = hash('sha256', 'composer.json' . "\0" . strlen($bytes) . "\0" . $bytes);
+$lock = ['project_id'=>'saas-platform','repository_mapping'=>'saas-platform','branch'=>'main','commit_sha'=>str_repeat('a',40),'package_name'=>'saas-platform/core','source_path'=>'packages/core','destination_path'=>'../saas/packages/core','artifact_path'=>'vendor/saas-platform/core','tree_hash'=>str_repeat('b',40),'checksum_sha256'=>$checksum];
+file_put_contents($lockedRoot . '/.deployment/release-manifest.json', json_encode(['format'=>'deployment-system-release-manifest','version'=>2,'commit_sha'=>TEST_COMMIT,'status'=>'pass','dependency_lock_required'=>true,'dependency_locks'=>[$lock]]));
+$r = $validator->validate($lockedRoot, TEST_COMMIT, $requiredPaths, true);
+check('valid dependency lock is accepted', $r['pass'] === true, $failures, $passCount);
+$lock['checksum_sha256'] = str_repeat('0',64);
+file_put_contents($lockedRoot . '/.deployment/release-manifest.json', json_encode(['format'=>'deployment-system-release-manifest','version'=>2,'commit_sha'=>TEST_COMMIT,'status'=>'pass','dependency_lock_required'=>true,'dependency_locks'=>[$lock]]));
+$r = $validator->validate($lockedRoot, TEST_COMMIT, $requiredPaths, true);
+check('tampered dependency checksum is rejected', !$r['pass'] && in_array('dependency_lock', $r['failures'], true), $failures, $passCount);
+
 rrmdir($root);
 rrmdir($staticRoot);
+rrmdir($lockedRoot);
 
 $total = $passCount + count($failures);
 echo "ReleaseValidator: {$passCount}/{$total} checks passed\n";

@@ -57,7 +57,7 @@ final class ReleaseValidator
      *   vite_required: bool
      * }
      */
-    public function validate(string $releaseRoot, string $commitSha, array $descriptorRequiredPaths): array
+    public function validate(string $releaseRoot, string $commitSha, array $descriptorRequiredPaths, bool $dependencyLockRequired = false): array
     {
         $root = rtrim($releaseRoot, '/\\');
         $checks = [];
@@ -187,6 +187,9 @@ final class ReleaseValidator
 
         // 6. In-artifact release manifest (provenance) — verified when present.
         $manifestPath = $root . '/' . self::IN_ARTIFACT_MANIFEST_PATH;
+        if ($dependencyLockRequired && !is_file($manifestPath)) {
+            $check('dependency_lock', 'dependency lock manifest is required by project policy', fn (): string => 'dependency lock is required by project policy but the artifact has no release manifest');
+        }
         if (is_file($manifestPath)) {
             $check('release_manifest', 'in-artifact release manifest is consistent', function () use ($manifestPath, $commitSha): bool|string {
                 $manifest = json_decode((string) file_get_contents($manifestPath), true);
@@ -200,6 +203,24 @@ final class ReleaseValidator
                     return 'the in-artifact release manifest commit_sha does not match the job commit';
                 }
 
+                return true;
+            });
+            $check('dependency_lock', 'dependency lock entries match artifact bytes', function () use ($manifestPath, $root, $dependencyLockRequired): bool|string {
+                $manifest = json_decode((string) file_get_contents($manifestPath), true);
+                $locks = is_array($manifest) && is_array($manifest['dependency_locks'] ?? null) ? $manifest['dependency_locks'] : [];
+                if ($dependencyLockRequired && (($manifest['version'] ?? null) !== 2 || ($manifest['dependency_lock_required'] ?? false) !== true || $locks === [])) {
+                    return 'project policy requires a version 2 non-empty dependency lock';
+                }
+                foreach ($locks as $lock) {
+                    foreach (['project_id', 'repository_mapping', 'branch', 'commit_sha', 'package_name', 'source_path', 'destination_path', 'artifact_path', 'tree_hash', 'checksum_sha256'] as $field) {
+                        if (!is_string($lock[$field] ?? null) || $lock[$field] === '') return "dependency lock field {$field} is missing";
+                    }
+                    if (preg_match('/^[0-9a-f]{40}$/', $lock['commit_sha']) !== 1 || preg_match('/^[0-9a-f]{40}$/', $lock['tree_hash']) !== 1 || preg_match('/^[0-9a-f]{64}$/', $lock['checksum_sha256']) !== 1) return 'dependency lock contains an invalid SHA or checksum';
+                    if ($lock['artifact_path'] !== 'vendor/' . $lock['package_name'] || str_contains($lock['artifact_path'], '..')) return 'dependency lock artifact_path is invalid';
+                    $packageRoot = $root . '/' . $lock['artifact_path'];
+                    if (!self::ordinaryDirectoryTree($packageRoot)) return 'dependency package is missing, linked, or contains a reparse point';
+                    if (!hash_equals($lock['checksum_sha256'], self::contentChecksum($packageRoot))) return 'dependency package checksum does not match the manifest lock';
+                }
                 return true;
             });
         }
@@ -284,6 +305,36 @@ final class ReleaseValidator
         }
 
         return $errors === [] ? true : 'entry(ies) resolve outside the release root: ' . implode(', ', array_slice($errors, 0, 5));
+    }
+
+    private static function ordinaryDirectoryTree(string $root): bool
+    {
+        if (!is_dir($root) || is_link($root)) return false;
+        $parent = realpath(dirname($root));
+        $real = realpath($root);
+        if ($parent === false || $real === false || $real !== rtrim($parent, '\\/') . DIRECTORY_SEPARATOR . basename($root)) return false;
+        $iterator = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($root, \FilesystemIterator::SKIP_DOTS), \RecursiveIteratorIterator::SELF_FIRST);
+        foreach ($iterator as $entry) {
+            if ($entry->isLink()) return false;
+            $entryParent = realpath(dirname($entry->getPathname()));
+            if ($entryParent === false || realpath($entry->getPathname()) !== rtrim($entryParent, '\\/') . DIRECTORY_SEPARATOR . $entry->getFilename()) return false;
+        }
+        return true;
+    }
+
+    private static function contentChecksum(string $root): string
+    {
+        $files = [];
+        $iterator = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($root, \FilesystemIterator::SKIP_DOTS));
+        foreach ($iterator as $entry) if ($entry->isFile()) $files[str_replace('\\', '/', substr($entry->getPathname(), strlen(rtrim($root, '\\/')) + 1))] = $entry->getPathname();
+        ksort($files, SORT_STRING);
+        $hash = hash_init('sha256');
+        foreach ($files as $relative => $path) {
+            $bytes = file_get_contents($path);
+            if ($bytes === false) return '';
+            hash_update($hash, $relative . "\0" . strlen($bytes) . "\0" . $bytes);
+        }
+        return hash_final($hash);
     }
 
     /**

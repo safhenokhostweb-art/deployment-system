@@ -117,7 +117,7 @@ return [
     | that keeps these three from drifting apart again.
     |
     */
-    'latest_local_agent_version' => env('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION', '1.4.7'),
+    'latest_local_agent_version' => env('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION', '1.5.0'),
 
     /*
     |--------------------------------------------------------------------------
@@ -216,6 +216,33 @@ return [
     'artifact_retention_count_per_project' => (int) env('DEPLOYMENT_ARTIFACT_RETENTION_COUNT', 3),
     'artifact_retention_days' => (int) env('DEPLOYMENT_ARTIFACT_RETENTION_DAYS', 14),
     'artifact_max_size_mb' => (int) env('DEPLOYMENT_ARTIFACT_MAX_SIZE_MB', 500),
+
+    // Versioned, Hub-owned allowlist. Build-request callers cannot supply a
+    // repository URL or package path; they can only receive this policy.
+    'artifact_dependency_policies' => [
+        'customer-site' => [
+            // Rollout switch: remains off through mixed-version operation and
+            // is enabled only after both capable agents are heartbeating.
+            'required' => (bool) env('DEPLOYMENT_CUSTOMER_SITE_DEPENDENCY_PINNING', false),
+            'dependencies' => array_map(static fn (array $package): array => [
+                'project_id' => 'saas-platform',
+                'repository_mapping' => 'saas-platform',
+                'branch' => 'main',
+                'commit_sha' => 'd9997e892564b2b8f16e7f67129b1e629f592122',
+                'package_name' => $package[0],
+                'source_path' => $package[1],
+                'destination_path' => '../saas-platform/' . $package[1],
+            ], [
+                ['saas-platform/modules-tickets', 'packages/saas-platform/modules/tickets'],
+                ['saas-platform/modules-forms', 'packages/saas-platform/modules/forms'],
+                ['saas-platform/modules-crm', 'packages/saas-platform/modules/crm'],
+                ['saas-platform/modules-seo-advanced', 'packages/saas-platform/modules/seo-advanced'],
+                ['saas-platform/core-utils', 'packages/saas-platform/core-utils'],
+            ]),
+        ],
+    ],
+    'min_local_agent_version_for_dependency_pinning' => (string) env('DEPLOYMENT_MIN_LOCAL_AGENT_VERSION_FOR_DEPENDENCY_PINNING', '1.5.0'),
+    'min_server_agent_version_for_dependency_pinning' => (string) env('DEPLOYMENT_MIN_SERVER_AGENT_VERSION_FOR_DEPENDENCY_PINNING', '1.4.0'),
 
     /*
     |--------------------------------------------------------------------------
