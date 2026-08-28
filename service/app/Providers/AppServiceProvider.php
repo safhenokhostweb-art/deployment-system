@@ -2,11 +2,17 @@
 
 namespace App\Providers;
 
+use App\Console\Commands\DatabaseSafety\GuardedFreshCommand;
+use App\Console\Commands\DatabaseSafety\GuardedRefreshCommand;
+use App\Console\Commands\DatabaseSafety\GuardedResetCommand;
+use App\Console\Commands\DatabaseSafety\GuardedRollbackCommand;
+use App\Console\Commands\DatabaseSafety\GuardedWipeCommand;
 use App\Listeners\NotificationEventSubscriber;
 use App\Models\Project;
 use App\Models\User;
 use App\Policies\ProjectPolicy;
 use App\Support\Authorization\PermissionMatrix;
+use Illuminate\Console\Application as Artisan;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\URL;
@@ -71,5 +77,44 @@ class AppServiceProvider extends ServiceProvider
         // agent/GitHub/security operational events) turns into a
         // Notification row here, and nowhere else.
         Event::subscribe(NotificationEventSubscriber::class);
+
+        // Database Safety Hardening: fail-closed guard against a
+        // schema/data-destroying Artisan command (migrate:fresh, db:wipe,
+        // migrate:reset, migrate:refresh, migrate:rollback) ever running
+        // against anything but an approved, disposable test database —
+        // see DestructiveCommandGuard's own docblock for the exact
+        // incident this exists to make impossible.
+        //
+        // Root-cause fix: the first version of this used a
+        // CommandStarting event listener, which turned out to have a
+        // real bypass — confirmed by direct testing, not assumed. Laravel
+        // only dispatches CommandStarting when NOT
+        // app()->runningUnitTests() (see Kernel::rerouteSymfonyCommandEvents()),
+        // and app()->runningUnitTests() is simply `$app['env'] ===
+        // 'testing'` — which `--env=testing` sets DIRECTLY, independent
+        // of any actual .env file or DB config (see
+        // EnvironmentDetector::getEnvironmentArgument()). So the exact
+        // command shape of the original incident
+        // (`migrate:fresh --env=testing --force`) silently skipped
+        // CommandStarting entirely and the guard never ran.
+        //
+        // Artisan::starting() has no such gate: Illuminate\Console\
+        // Application's constructor calls it unconditionally, for every
+        // console invocation. Registering Guarded*Command classes here
+        // overrides the framework's own migrate:fresh/reset/refresh/
+        // rollback/db:wipe commands by name (Symfony Console: "if a
+        // command with the same name already exists, it will be
+        // overridden") — each override runs DestructiveCommandGuard
+        // first and only then delegates to the real parent handle(), so
+        // the destructive SQL is never reached when the guard denies.
+        Artisan::starting(function (Artisan $artisan): void {
+            $artisan->resolveCommands([
+                GuardedFreshCommand::class,
+                GuardedResetCommand::class,
+                GuardedRefreshCommand::class,
+                GuardedRollbackCommand::class,
+                GuardedWipeCommand::class,
+            ]);
+        });
     }
 }

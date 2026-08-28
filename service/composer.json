@@ -36,6 +36,7 @@
             "composer install",
             "@php -r \"file_exists('.env') || copy('.env.example', '.env');\"",
             "@php artisan key:generate",
+            "@php -r \"file_exists('.env.testing') || copy('env.testing.example', '.env.testing');\"",
             "@php artisan migrate --force",
             "npm install --ignore-scripts",
             "npm run build"
