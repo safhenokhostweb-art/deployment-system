@@ -1,0 +1,8 @@
+[Unit]
+Description=Record safe chrony synchronization health in Journal
+After=chrony.service
+Requires=chrony.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/chrony-health-journal

@@ -1,0 +1,13 @@
+[Unit]
+Description=Boot-only guarded clock correction before application services
+Wants=network-online.target
+After=network-online.target
+Before=chrony.service nginx.service php8.3-fpm.service mysql.service redis-server.service cron.service supervisor.service deployment-agent.service deployment-server-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/chrony-bootstep-guard
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically record chrony synchronization health
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+Persistent=true
+Unit=chrony-health-journal.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+exec 9>/run/lock/chrony-health-journal.lock
+if ! /usr/bin/flock -n 9; then
+    exit 0
+fi
+
+tracking="$(/usr/bin/chronyc -n tracking 2>&1)" || {
+    /usr/bin/logger -t chrony-health "status=failed phase=tracking output=$(printf '%s' "$tracking" | tr '\n' ' ' | cut -c1-500)"
+    exit 1
+}
+sources="$(/usr/bin/chronyc -n sources 2>&1)" || {
+    /usr/bin/logger -t chrony-health "status=failed phase=sources output=$(printf '%s' "$sources" | tr '\n' ' ' | cut -c1-500)"
+    exit 1
+}
+
+reference="$(printf '%s\n' "$tracking" | sed -n 's/^[[:space:]]*Reference ID[[:space:]]*:[[:space:]]*//p' | head -n1)"
+stratum="$(printf '%s\n' "$tracking" | sed -n 's/^[[:space:]]*Stratum[[:space:]]*:[[:space:]]*//p' | head -n1)"
+system_time="$(printf '%s\n' "$tracking" | sed -n 's/^[[:space:]]*System time[[:space:]]*:[[:space:]]*//p' | head -n1)"
+last_offset="$(printf '%s\n' "$tracking" | sed -n 's/^[[:space:]]*Last offset[[:space:]]*:[[:space:]]*//p' | head -n1)"
+rms_offset="$(printf '%s\n' "$tracking" | sed -n 's/^[[:space:]]*RMS offset[[:space:]]*:[[:space:]]*//p' | head -n1)"
+leap_status="$(printf '%s\n' "$tracking" | sed -n 's/^[[:space:]]*Leap status[[:space:]]*:[[:space:]]*//p' | head -n1)"
+selected="$(printf '%s\n' "$sources" | awk '$1 ~ /^\^\*/ {print $2; exit}')"
+usable_count="$(printf '%s\n' "$sources" | awk '$1 ~ /^\^[+*]/ {count++} END {print count+0}')"
+
+/usr/bin/logger -t chrony-health -- "status=ok reference=$reference selected=$selected usable_sources=$usable_count stratum=$stratum system_time='$system_time' last_offset='$last_offset' rms_offset='$rms_offset' leap_status='$leap_status'"

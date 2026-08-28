@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+LOCK_FILE=/run/lock/chrony-bootstep-guard.lock
+DONE_FILE=/run/chrony-bootstep-guard.done
+QUERY_CONFIG=/etc/chrony/chrony-bootstep.conf
+MAX_BOOT_UPTIME_SECONDS=300
+STEP_THRESHOLD_SECONDS=1
+
+exec 9>"$LOCK_FILE"
+if ! /usr/bin/flock -n 9; then
+    /usr/bin/logger -t chrony-bootstep 'result=skipped reason=lock_busy'
+    exit 0
+fi
+
+if [ -e "$DONE_FILE" ]; then
+    /usr/bin/logger -t chrony-bootstep 'result=skipped reason=already_completed'
+    exit 0
+fi
+
+uptime_seconds="$(cut -d. -f1 /proc/uptime)"
+case "$uptime_seconds" in
+    ''|*[!0-9]*) /usr/bin/logger -t chrony-bootstep 'result=failed reason=invalid_uptime'; exit 70 ;;
+esac
+
+if [ "$uptime_seconds" -gt "$MAX_BOOT_UPTIME_SECONDS" ]; then
+    /usr/bin/logger -t chrony-bootstep "result=skipped reason=runtime_guard uptime_seconds=$uptime_seconds"
+    /usr/bin/touch "$DONE_FILE"
+    exit 0
+fi
+
+/usr/bin/install -d -o _chrony -g _chrony -m 0755 /run/chrony
+query_output="$(/usr/sbin/chronyd -Q -t 20 -f "$QUERY_CONFIG" 2>&1)" || {
+    /usr/bin/logger -t chrony-bootstep "result=failed phase=query output=$(printf '%s' "$query_output" | tr '\n' ' ' | cut -c1-500)"
+    exit 1
+}
+
+offset="$(printf '%s\n' "$query_output" | sed -nE 's/.*System clock wrong by ([+-]?[0-9.]+) seconds.*/\1/p' | tail -n1)"
+case "$offset" in
+    ''|*[!0-9.+-]*) /usr/bin/logger -t chrony-bootstep 'result=failed phase=parse_offset'; exit 70 ;;
+esac
+
+absolute_offset="${offset#-}"
+if awk -v value="$absolute_offset" -v threshold="$STEP_THRESHOLD_SECONDS" 'BEGIN { exit !(value > threshold) }'; then
+    step_output="$(/usr/sbin/chronyd -q -t 30 -f "$QUERY_CONFIG" 2>&1)" || {
+        /usr/bin/logger -t chrony-bootstep "result=failed phase=step offset_seconds=$offset output=$(printf '%s' "$step_output" | tr '\n' ' ' | cut -c1-500)"
+        exit 1
+    }
+    /usr/bin/logger -t chrony-bootstep "result=stepped offset_seconds=$offset uptime_seconds=$uptime_seconds"
+else
+    /usr/bin/logger -t chrony-bootstep "result=no_step_needed offset_seconds=$offset uptime_seconds=$uptime_seconds"
+fi
+
+/usr/bin/touch "$DONE_FILE"
