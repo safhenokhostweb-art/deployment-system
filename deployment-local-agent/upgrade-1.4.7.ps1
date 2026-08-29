@@ -40,7 +40,8 @@ param(
     [string]$RollbackAttestation = '',
     [string]$RollbackAttestationSha256 = '',
     [switch]$TestMode,
-    [string]$RepoRoot = ''
+    [string]$RepoRoot = '',
+    [int]$StopTimeoutSeconds = 30
 )
 $ErrorActionPreference = 'Stop'
 
@@ -85,6 +86,68 @@ function Restart-Once {
     New-Item -ItemType File -Path $restartMarker -Force | Out-Null
 }
 
+# Reads the live agent.pid the running Local Agent wrote for itself at
+# startup (agent.php: `file_put_contents($pidFilePath, getmypid())`, the
+# same file the watchdog already trusts, per its own comment: "the watchdog
+# always re-validates the PID still belongs to a php.exe process before
+# acting on it"). Returns $null rather than throwing when absent/unreadable
+# - a missing or unparsable pid file just means there is nothing to wait on.
+function Get-CapturedAgentPid([string]$AgentDirPath) {
+    $pidPath = Join-Path $AgentDirPath 'storage\agent.pid'
+    if (-not (Test-Path -LiteralPath $pidPath)) { return $null }
+    $raw = (Get-Content -LiteralPath $pidPath -Raw -ErrorAction SilentlyContinue)
+    if (-not $raw) { return $null }
+    $raw = $raw.Trim()
+    if ($raw -notmatch '^\d+$') { return $null }
+    return [int]$raw
+}
+
+# Root-cause fix: Move-Item on a live AgentDir was failing with "The
+# process cannot access the file because it is being used by another
+# process" - the Scheduled Task's own php.exe still had the directory
+# open. Stops the task, then verifies BOTH that Task Scheduler no longer
+# reports it Running AND that the specific PID the agent itself recorded
+# has actually exited, before returning control to the caller - never a
+# fire-and-hope stop. Fails closed (throws) if either signal still shows
+# the agent alive once the bounded timeout elapses; the live directory is
+# never touched in that case, since this always runs strictly before the
+# swap. In TestMode there is no real Scheduled Task to poll, so only the
+# captured-PID liveness check is meaningful (a real PID a test controls
+# directly) - this is what lets tests exercise the exact fail-closed path
+# deterministically.
+function Stop-AgentTaskAndWait {
+    $capturedPid = Get-CapturedAgentPid $AgentDir
+
+    if ($TestMode) {
+        Add-Content -LiteralPath (Join-Path $StateRoot 'stop.log') -Value $RunId
+    } else {
+        schtasks /End /TN DeploymentLocalAgent 2>$null | Out-Null
+    }
+
+    $deadline = (Get-Date).AddSeconds($StopTimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $taskStillRunning = (-not $TestMode) -and ((Get-ScheduledTask -TaskName 'DeploymentLocalAgent').State -eq 'Running')
+        $processStillAlive = ($null -ne $capturedPid) -and ($null -ne (Get-Process -Id $capturedPid -ErrorAction SilentlyContinue))
+        if (-not $taskStillRunning -and -not $processStillAlive) {
+            return
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    throw 'Local Agent task/process did not stop within the timeout - refusing to swap a live directory.'
+}
+
+# Starts the task only (the "Run" half of what Restart-Once used to do in
+# one shot) - kept separate so the caller can poll for the new process's
+# own health before declaring activation complete.
+function Start-AgentTaskOnly {
+    if ($TestMode) {
+        Add-Content -LiteralPath (Join-Path $StateRoot 'restart.log') -Value $RunId
+    } else {
+        schtasks /Run /TN DeploymentLocalAgent | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Local Agent task start failed.' }
+    }
+}
+
 # Extracts the exact, pinned historical commit's package tree via `git
 # archive` into an isolated directory. Never runs checkout/reset/switch,
 # never reads the live working tree, and cannot be affected by the 19
@@ -109,7 +172,7 @@ function Get-HistoricalPayload([string]$DestDir) {
 
     # `git archive -o <path>` refuses an output path outside the repository
     # working tree (our staging area is deliberately outside it, under
-    # InstallDir/StateRoot) — so stdout is captured as a raw binary stream
+    # InstallDir/StateRoot) - so stdout is captured as a raw binary stream
     # via .NET directly instead, sidestepping both that restriction and
     # PowerShell's own text-pipeline byte-mangling of binary command output.
     $zipPath = Join-Path $DestDir 'payload.zip'
@@ -201,9 +264,80 @@ if ($Action -eq 'DryRun') {
     exit 0
 }
 if (Test-Path -LiteralPath $Done) { Write-Output "ACTIVATION_ALREADY_DONE run_id=$RunId"; exit 0 }
+
 $old = Join-Path $RunRoot 'pre-activation'
-Move-Item -LiteralPath $AgentDir -Destination $old
-Move-Item -LiteralPath $Stage -Destination $AgentDir
-Restart-Once
-New-Item -ItemType File -Path $Done -Force | Out-Null
-Write-Output "ACTIVATION_OK run_id=$RunId old_version=$SourceVersion new_version=$TargetVersion historical_commit=$HistoricalCommit backup=$Backup"
+$agentDirMoved = $false
+
+try {
+    # Steps 1-4 (preflight/backup/candidate/validation) are already fully
+    # complete by this point. Only now, after every pre-swap check has
+    # passed, do we touch the live Scheduled Task.
+    Stop-AgentTaskAndWait
+
+    Move-Item -LiteralPath $AgentDir -Destination $old
+    $agentDirMoved = $true
+    Move-Item -LiteralPath $Stage -Destination $AgentDir
+
+    if ((Get-FileHash -LiteralPath (Join-Path $AgentDir 'config.php')).Hash -ne (Get-FileHash -LiteralPath (Join-Path $old 'config.php')).Hash) {
+        throw 'config.php changed across the swap.'
+    }
+
+    # Test-only failure injection, double-gated so it can never fire
+    # outside a deliberately-constructed test: proves the automatic
+    # rollback below actually restores 1.4.6 from a genuine post-swap
+    # failure, not merely from a pre-swap one.
+    if ($TestMode -and (Test-Path -LiteralPath (Join-Path $RunRoot 'TEST-FORCE-POST-SWAP-FAILURE'))) {
+        throw 'TEST-INJECTED post-swap failure.'
+    }
+
+    Start-AgentTaskOnly
+
+    $deadline = (Get-Date).AddSeconds($StopTimeoutSeconds)
+    $verified = $false
+    while ((Get-Date) -lt $deadline) {
+        $taskOk = $TestMode -or ((Get-ScheduledTask -TaskName 'DeploymentLocalAgent').State -eq 'Running')
+        $versionOk = (Test-Path -LiteralPath (Join-Path $AgentDir 'agent.php')) -and ((Get-AgentVersion (Join-Path $AgentDir 'agent.php')) -eq $TargetVersion)
+        $newPid = Get-CapturedAgentPid $AgentDir
+        $processOk = $TestMode -or (($null -ne $newPid) -and ($null -ne (Get-Process -Id $newPid -ErrorAction SilentlyContinue)))
+        if ($taskOk -and $versionOk -and $processOk) {
+            $verified = $true
+            break
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $verified) {
+        throw 'Post-activation health verification failed (task not running, agent process not confirmed, or version mismatch).'
+    }
+
+    New-Item -ItemType File -Path $Done -Force | Out-Null
+    Write-Output "ACTIVATION_OK run_id=$RunId old_version=$SourceVersion new_version=$TargetVersion historical_commit=$HistoricalCommit backup=$Backup"
+}
+catch {
+    # Point 13: never leave the task stopped after a failed activation
+    # when rollback is possible. Restore the exact previous tree (if the
+    # swap ever got that far) and always try to bring 1.4.6 back up before
+    # re-throwing, so a failed activation attempt is never worse than a
+    # no-op from the operator's perspective.
+    $failureMessage = $_.Exception.Message
+
+    if ($agentDirMoved) {
+        if (Test-Path -LiteralPath $AgentDir) {
+            $corrupted = Join-Path $RunRoot 'failed-activation-partial'
+            if (Test-Path -LiteralPath $corrupted) { Remove-Item -LiteralPath $corrupted -Recurse -Force }
+            Move-Item -LiteralPath $AgentDir -Destination $corrupted
+        }
+        Move-Item -LiteralPath $old -Destination $AgentDir
+    }
+
+    $restoredVersion = $null
+    if (Test-Path -LiteralPath (Join-Path $AgentDir 'agent.php')) {
+        $restoredVersion = Get-AgentVersion (Join-Path $AgentDir 'agent.php')
+    }
+    if ($restoredVersion -ne $SourceVersion) {
+        throw "CRITICAL: activation failed AND automatic rollback could not confirm $SourceVersion is restored (found '$restoredVersion'). Original failure: $failureMessage"
+    }
+
+    Start-AgentTaskOnly
+
+    throw "Activation failed and was automatically rolled back to ${SourceVersion}: $failureMessage"
+}

@@ -169,6 +169,97 @@ try {
     Check 'rollback restores config.php byte-identical to pre-upgrade' ($configAfterRollback -eq $configBefore)
     Check 'repeated rollback does not cause an extra restart' ((Get-Content -LiteralPath (Join-Path $goodState 'restart.log')).Count -eq 2)
 
+    # --- 10: DryRun never touches the Scheduled Task (no stop.log at all) ---
+    $dryOnlyInstall = Join-Path $root 'dry-only'
+    New-FakeInstall $dryOnlyInstall '1.4.6' | Out-Null
+    $dryOnlyState = Join-Path $root 'dry-only-state'
+    & $ScriptUnderTest -Action DryRun -RunId 'dry-only-1' -InstallDir $dryOnlyInstall -StateRoot $dryOnlyState -TestMode | Out-Null
+    Check 'DryRun never writes a stop.log (task is never touched)' (-not (Test-Path -LiteralPath (Join-Path $dryOnlyState 'stop.log')))
+    Check 'DryRun never writes a restart.log either' (-not (Test-Path -LiteralPath (Join-Path $dryOnlyState 'restart.log')))
+
+    # --- 11: activation does NOT Move-Item the live AgentDir before the
+    # task/process is confirmed stopped. Proven with a REAL, genuinely
+    # running process (not a mock) whose PID is recorded as the agent's
+    # own storage/agent.pid, so Stop-AgentTaskAndWait's liveness check has
+    # something real to detect and correctly refuse to proceed past. ---
+    $lockInstall = Join-Path $root 'lock-install'
+    $lockAgentDir = New-FakeInstall $lockInstall '1.4.6'
+    $blocker = Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 60' -PassThru -WindowStyle Hidden
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $lockAgentDir 'storage') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $lockAgentDir 'storage\agent.pid') -Value $blocker.Id -NoNewline
+        $lockState = Join-Path $root 'lock-state'
+        $preTreeHash = (Get-ChildItem -LiteralPath $lockAgentDir -Recurse -File | Sort-Object FullName |
+            ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }) -join '|'
+
+        Expect-Throws 'activation refuses to swap while the recorded agent PID is still alive' {
+            & $ScriptUnderTest -Action Activate -RunId 'lock-test' -InstallDir $lockInstall -StateRoot $lockState -TestMode -StopTimeoutSeconds 2
+        }
+
+        Check 'blocked activation never moved the live AgentDir out of place' (Test-Path -LiteralPath $lockAgentDir)
+        Check 'blocked activation left no pre-activation directory behind' (-not (Test-Path -LiteralPath (Join-Path $lockState 'lock-test\pre-activation')))
+        $postTreeHash = (Get-ChildItem -LiteralPath $lockAgentDir -Recurse -File | Sort-Object FullName |
+            ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }) -join '|'
+        Check 'blocked AgentDir tree is byte-for-byte unchanged' ($preTreeHash -eq $postTreeHash)
+        Check 'the still-alive process was never itself killed by the script' ($null -ne (Get-Process -Id $blocker.Id -ErrorAction SilentlyContinue))
+    } finally {
+        Stop-Process -Id $blocker.Id -Force -ErrorAction SilentlyContinue
+    }
+
+    # --- 12: happy-path activation exercises the NEW two-step
+    # stop-then-start ordering (distinct stop.log then restart.log
+    # entries), not the old single combined Restart-Once call. ---
+    $orderInstall = Join-Path $root 'order-install'
+    New-FakeInstall $orderInstall '1.4.6' | Out-Null
+    $orderState = Join-Path $root 'order-state'
+    $orderOut = & $ScriptUnderTest -Action Activate -RunId 'order-test' -InstallDir $orderInstall -StateRoot $orderState -TestMode
+    Check 'ordered activation succeeds' ($LASTEXITCODE -eq 0 -and $orderOut -match 'ACTIVATION_OK')
+    Check 'ordered activation wrote a stop.log entry (task stopped before swap)' (
+        (Test-Path -LiteralPath (Join-Path $orderState 'stop.log')) -and
+        ((Get-Content -LiteralPath (Join-Path $orderState 'stop.log')) -contains 'order-test')
+    )
+    Check 'ordered activation wrote a restart.log entry (task started after swap)' (
+        (Test-Path -LiteralPath (Join-Path $orderState 'restart.log')) -and
+        ((Get-Content -LiteralPath (Join-Path $orderState 'restart.log')) -contains 'order-test')
+    )
+    Check 'ordered activation landed on 1.4.7' (
+        (Select-String -LiteralPath (Join-Path $orderInstall 'agent\agent.php') -Pattern "LOCAL_AGENT_VERSION = '([^']+)'").Matches[0].Groups[1].Value -eq '1.4.7'
+    )
+
+    # --- 13: a genuine POST-swap failure (injected only under the
+    # double-gated TestMode sentinel) triggers automatic rollback that
+    # restores the exact previous tree, config, and version, and leaves
+    # the task running again - never stopped after a failed activation. ---
+    $rbInstall = Join-Path $root 'rb-install'
+    New-FakeInstall $rbInstall '1.4.6' | Out-Null
+    $rbConfigBefore = Get-Content -LiteralPath (Join-Path $rbInstall 'agent\config.php') -Raw
+    $preFailTreeHash = (Get-ChildItem -LiteralPath $rbInstall -Recurse -File | Sort-Object FullName |
+        ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }) -join '|'
+    $rbState = Join-Path $root 'rb-state'
+    $rbRunRoot = Join-Path $rbState 'rb-test'
+    New-Item -ItemType Directory -Path $rbRunRoot -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $rbRunRoot 'TEST-FORCE-POST-SWAP-FAILURE') -Value '1'
+
+    Expect-Throws 'a genuine post-swap failure surfaces (does not silently succeed)' {
+        & $ScriptUnderTest -Action Activate -RunId 'rb-test' -InstallDir $rbInstall -StateRoot $rbState -TestMode
+    }
+
+    Check 'automatic rollback restored exactly version 1.4.6' (
+        (Select-String -LiteralPath (Join-Path $rbInstall 'agent\agent.php') -Pattern "LOCAL_AGENT_VERSION = '([^']+)'").Matches[0].Groups[1].Value -eq '1.4.6'
+    )
+    $rbConfigAfter = Get-Content -LiteralPath (Join-Path $rbInstall 'agent\config.php') -Raw
+    Check 'automatic rollback restored config.php byte-identical' ($rbConfigAfter -eq $rbConfigBefore)
+    $postFailTreeHash = (Get-ChildItem -LiteralPath $rbInstall -Recurse -File | Sort-Object FullName |
+        ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }) -join '|'
+    Check 'automatic rollback restored the exact previous tree byte-for-byte' ($preFailTreeHash -eq $postFailTreeHash)
+    Check 'automatic rollback restarted the task (never left stopped)' (
+        (Test-Path -LiteralPath (Join-Path $rbState 'restart.log')) -and
+        ((Get-Content -LiteralPath (Join-Path $rbState 'restart.log')) -contains 'rb-test')
+    )
+    Check 'the partially-swapped 1.4.7 content was preserved for forensics, not silently deleted' (
+        Test-Path -LiteralPath (Join-Path $rbRunRoot 'failed-activation-partial\agent.php')
+    )
+
     if ($failures.Count -eq 0) {
         Write-Output "Local Agent 1.4.6->1.4.7 bridge: $passCount passed, 0 failed. ALL PASS"
     } else {
