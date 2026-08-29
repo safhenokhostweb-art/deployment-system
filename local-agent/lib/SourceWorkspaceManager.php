@@ -9,9 +9,25 @@ namespace LocalAgent;
  *
  * A healthy checkout is reused without any network operation. Missing
  * checkouts are cloned into a sibling temporary directory and atomically
- * renamed into place. An invalid checkout is quarantined (never deleted)
+ * renamed into place. A genuinely invalid checkout (not a Git repository,
+ * or pointed at the wrong repository) is quarantined (never deleted)
  * before the same atomic clone is attempted; if cloning fails, the original
  * path is restored.
+ *
+ * A checkout that IS a correct, correctly-remoted Git repository but simply
+ * sits on a branch other than the one the Hub expects is a third, distinct
+ * case — these are real developer-owned workspaces (source_workspace_path
+ * points directly at the developer's own working directory, e.g. under
+ * C:\laragon\www\), and a developer legitimately checking out a different
+ * branch to review/audit is not corruption. That case is never quarantined,
+ * recloned, checked out, reset, or otherwise touched here — it is preserved
+ * exactly as found and reported as 'preserved' so the caller can skip any
+ * operation that requires the expected branch. This does NOT relax what an
+ * Artifact build is allowed to build from: WorkspaceSourcePreparer::
+ * prepareRemoteCommit() (the only path agent.php ever builds an artifact
+ * through) independently re-verifies the live checked-out branch via its
+ * own assertTrustedPersistentWorkspace() immediately before every build,
+ * regardless of what this class classified the workspace as at sync time.
  */
 final class SourceWorkspaceManager
 {
@@ -26,7 +42,7 @@ final class SourceWorkspaceManager
      * cannot prevent other mappings from becoming usable.
      *
      * @param array<string, array<string, mixed>> $projects
-     * @return array<string, string> project key => created|reused|repaired|failed|skipped
+     * @return array<string, string> project key => created|reused|repaired|preserved|failed|skipped
      */
     public function reconcile(array $projects): array
     {
@@ -54,7 +70,7 @@ final class SourceWorkspaceManager
 
     /**
      * @param array<string, mixed> $project
-     * @return string created|reused|repaired
+     * @return string created|reused|repaired|preserved
      */
     public function reconcileProject(string $projectKey, array $project): string
     {
@@ -103,6 +119,19 @@ final class SourceWorkspaceManager
                 $this->logger->info("Source workspace reused for '{$projectKey}' at {$path} ({$branch} @ {$sha}).");
 
                 return 'reused';
+            }
+
+            // A correct, correctly-remoted repository on an unexpected
+            // branch is a real developer workspace mid-work, not a broken
+            // checkout — never quarantine/reclone/switch it merely for
+            // that. See the class docblock for why this cannot be used to
+            // build the wrong source: WorkspaceSourcePreparer re-checks the
+            // live branch independently at build time.
+            if ($this->isValidRepositoryCheckout($path, $repositoryUrl, $remoteName)) {
+                $actualBranch = $this->git->currentBranch($path);
+                $this->logger->warn("Source workspace for '{$projectKey}' at {$path} is on branch '{$actualBranch}', expected '{$branch}' — preserving it unchanged. Operations that require the expected branch are unavailable for this project until it matches.");
+
+                return 'preserved';
             }
         }
 
@@ -200,6 +229,29 @@ final class SourceWorkspaceManager
 
     private function isExpectedCheckout(string $path, string $repositoryUrl, string $remoteName, string $branch): bool
     {
+        if (!$this->isValidRepositoryCheckout($path, $repositoryUrl, $remoteName)) {
+            return false;
+        }
+
+        try {
+            return $this->git->currentBranch($path) === $branch
+                && preg_match('/^[0-9a-f]{40}$/', $this->git->lastCommitHash($path)) === 1;
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    /**
+     * Branch-independent half of isExpectedCheckout(): is this a real,
+     * writable Git working tree pointed at the correct repository? A path
+     * that fails this check is genuinely invalid (not a Git repo, wrong
+     * repository, or inaccessible) and remains eligible for the existing
+     * quarantine-then-reclone repair. A path that PASSES this check but is
+     * on the wrong branch is not — see reconcileProject()'s 'preserved'
+     * branch.
+     */
+    private function isValidRepositoryCheckout(string $path, string $repositoryUrl, string $remoteName): bool
+    {
         if (!is_dir($path) || !is_writable($path)) {
             return false;
         }
@@ -213,16 +265,8 @@ final class SourceWorkspaceManager
         // url.*.insteadOf rules and can hide the repository identity that is
         // actually recorded in this workspace.
         $remote = $this->git->run(['git', 'config', '--get', 'remote.' . $remoteName . '.url'], $path, $this->git->timeoutFor('status'));
-        if ($remote['exitCode'] !== 0 || $this->normalizeRepository((string) $remote['output']) !== $this->normalizeRepository($repositoryUrl)) {
-            return false;
-        }
 
-        try {
-            return $this->git->currentBranch($path) === $branch
-                && preg_match('/^[0-9a-f]{40}$/', $this->git->lastCommitHash($path)) === 1;
-        } catch (\Throwable) {
-            return false;
-        }
+        return $remote['exitCode'] === 0 && $this->normalizeRepository((string) $remote['output']) === $this->normalizeRepository($repositoryUrl);
     }
 
     private function configureSafeDirectory(string $path, string $cwd): void
