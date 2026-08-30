@@ -41,6 +41,7 @@ class DeploymentDispatcher
 {
     public function __construct(
         private readonly DeploymentTargetResolver $resolver,
+        private readonly DeploymentTaskCreator $taskCreator,
         private readonly ArtifactService $artifacts,
         private readonly AuthoritativeBuildAgentResolver $buildAgents,
     ) {
@@ -281,7 +282,7 @@ class DeploymentDispatcher
         if ($deployment->tasks()->doesntExist()) {
             $targets = $this->resolver->resolveTargetsFor($deployment->project);
             if (!$this->isLegacyTargetSet($targets)) {
-                $this->createTasksForDeployment($deployment, $targets);
+                $this->taskCreator->createForTargets($deployment, $targets);
             }
         }
 
@@ -540,7 +541,7 @@ class DeploymentDispatcher
             // transaction, so no claimable null-artifact task can be created.
 
             if ($autoApprove && $deployment->status === Deployment::STATUS_QUEUED) {
-                $this->createTasksForDeployment($deployment, $targets);
+                $this->taskCreator->createForTargets($deployment, $targets);
             }
 
             $action = $auditAction ?? ($autoApprove ? 'deployment.created_multi_target_and_auto_approved' : 'deployment.created_multi_target_pending_approval');
@@ -561,20 +562,6 @@ class DeploymentDispatcher
 
             return $deployment;
         });
-    }
-
-    /**
-     * @param array<int, TargetView> $targets
-     */
-    private function createTasksForDeployment(Deployment $deployment, array $targets): void
-    {
-        foreach ($targets as $target) {
-            DeploymentTask::create([
-                'deployment_id' => $deployment->id,
-                'deployment_target_id' => $target->deploymentTargetId,
-                'status' => DeploymentTask::STATUS_QUEUED,
-            ]);
-        }
     }
 
     /**

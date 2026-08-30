@@ -12,6 +12,12 @@ use Illuminate\Support\Facades\DB;
 
 class RollbackService
 {
+    public function __construct(
+        private readonly DeploymentTargetResolver $resolver,
+        private readonly DeploymentTaskCreator $taskCreator,
+    ) {
+    }
+
     /**
      * Roll back to a specific prior successful deployment. Reuses the
      * project's normal pipeline — the agent treats a rollback exactly like
@@ -24,10 +30,25 @@ class RollbackService
         return DB::transaction(function () use ($target, $actor) {
             $project = $target->project;
             $currentCommit = $project->latestSuccessfulDeployment()?->commit_hash;
+            $targets = $this->resolver->resolveTargetsFor($project);
+
+            abort_if(
+                count($targets) === 0,
+                422,
+                "Project '{$project->name}' has an Environment configured but no active deployment targets.",
+            );
+
+            $usesPersistedTargets = !($targets[0]->isSynthesized ?? false);
+
+            abort_if(
+                $project->requires_complete_artifact && $target->artifact_id === null,
+                409,
+                'An artifact-required rollback must target a deployment with an available artifact.',
+            );
 
             $rollback = Deployment::create([
                 'project_id' => $project->id,
-                'server_id' => $project->server_id,
+                'server_id' => $usesPersistedTargets ? $targets[0]->serverId : $project->server_id,
                 'action' => Deployment::ACTION_ROLLBACK,
                 'status' => Deployment::STATUS_QUEUED,
                 'commit_hash' => $target->commit_hash,
@@ -39,11 +60,16 @@ class RollbackService
                 'approved_at' => now(),
                 'queued_at' => now(),
                 'rollback_of_deployment_id' => $target->id,
+                'artifact_id' => $target->artifact_id,
                 'http_health_config' => $project->deploymentHttpHealthConfig(),
                 'http_health_status' => $project->requiresHttpHealthVerification()
                     ? Deployment::HTTP_HEALTH_PENDING
                     : Deployment::HTTP_HEALTH_NOT_CONFIGURED,
             ]);
+
+            if ($usesPersistedTargets) {
+                $this->taskCreator->createForTargets($rollback, $targets);
+            }
 
             AuditLogEntry::record(
                 actorType: AuditLogEntry::ACTOR_USER,
@@ -62,7 +88,7 @@ class RollbackService
             // Phase 4-J Task 2: mirrors DeploymentDispatcher::approve()'s own
             // "audit log then event" ordering — purely additive
             // instrumentation, no change to the rollback itself.
-            event(new RollbackStarted($rollback));
+            DB::afterCommit(fn () => event(new RollbackStarted($rollback)));
 
             return $rollback;
         });
@@ -132,11 +158,7 @@ class RollbackService
                     : Deployment::HTTP_HEALTH_NOT_CONFIGURED,
             ]);
 
-            DeploymentTask::create([
-                'deployment_id' => $rollbackDeployment->id,
-                'deployment_target_id' => $target->id,
-                'status' => DeploymentTask::STATUS_QUEUED,
-            ]);
+            $this->taskCreator->createForTargetIds($rollbackDeployment, [$target->id]);
 
             AuditLogEntry::record(
                 actorType: AuditLogEntry::ACTOR_USER,
