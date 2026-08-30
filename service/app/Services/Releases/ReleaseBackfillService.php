@@ -86,6 +86,9 @@ final class ReleaseBackfillService
         if ($release !== null && ($release->metadata['release_ready'] ?? false) === true) {
             $missing[] = 'This commit already has valid, release_ready metadata recorded.';
         }
+        if ($release !== null && ! $release->isLegacyFallbackEligible()) {
+            $missing[] = 'An ordinary exact-commit Release cannot be made ready through admin backfill.';
+        }
 
         $requiredChecks = $this->requiredChecks($migrationFiles);
 
@@ -166,7 +169,13 @@ final class ReleaseBackfillService
         $metadata = $this->validator->validate($project, $metadata);
 
         return DB::transaction(function () use ($project, $metadata, $actorEmail, $confirmedChecks): Release {
-            $release = $this->releases->recordMetadata($project, $metadata);
+            $release = $this->releases->recordLegacyMetadata(
+                $project,
+                $metadata,
+                'admin_backfill',
+                'admin_confirmed_historical_release',
+                $actorEmail,
+            );
 
             AuditLogEntry::record(
                 actorType: AuditLogEntry::ACTOR_USER,

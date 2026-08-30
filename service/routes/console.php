@@ -32,6 +32,15 @@ Schedule::command('deployments:recover-stale')
     ->withoutOverlapping()
     ->onOneServer();
 
+// Root-cause fix: WebhookDelivery's own PROCESSING-lease sweep (120s
+// lease, see WebhookDeliveryOwnershipService::PROCESSING_LEASE_SECONDS) --
+// same tight cadence as the PublishJob sweep above, since a stuck webhook
+// otherwise silently delays Release preparation for that push.
+Schedule::command('webhooks:recover-stale')
+    ->everyMinute()
+    ->withoutOverlapping()
+    ->onOneServer();
+
 // Phase 4-J: same 5-minute cadence DetectOfflineAgents' own sweep-window
 // math assumes (see its docblock) — changing this interval without
 // updating SWEEP_MINUTES there would open a gap where a transition is

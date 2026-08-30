@@ -804,7 +804,10 @@ class PublishJobService
                 // failed (e.g. a multi-target project with no active
                 // targets). Record why, keep the publish terminal, and let
                 // the UI show that no deployment attempt exists.
-                $this->recordDeploymentBridgeFailure($locked, $e->getMessage());
+                $reason = str_contains($e->getMessage(), 'explicit deployment confirmation')
+                    ? 'explicit_confirm_required'
+                    : null;
+                $this->recordDeploymentBridgeFailure($locked, $e->getMessage(), $reason);
 
                 return null;
             }

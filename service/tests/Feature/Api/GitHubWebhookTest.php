@@ -7,6 +7,7 @@ use App\Models\LocalAgent;
 use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use App\Models\PublishJob;
+use App\Models\WebhookDelivery;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -99,6 +100,35 @@ class GitHubWebhookTest extends TestCase
             'reviewed_head_sha' => str_repeat('b1', 20),
             'reviewed_branch' => 'main',
         ]);
+    }
+
+    /**
+     * A missing X-GitHub-Delivery header must still go through ownership/
+     * dedupe rather than dispatching untracked -- otherwise a request
+     * retried by a network layer (or crafted without the header) could
+     * queue an unbounded number of duplicate jobs for the exact same push.
+     */
+    public function test_missing_delivery_header_is_still_deduplicated_not_dispatched_untracked(): void
+    {
+        $project = Project::factory()->create(['branch' => 'main', 'github_webhook_secret' => 'topsecret']);
+        $payload = ['ref' => 'refs/heads/main', 'after' => str_repeat('9', 40), 'pusher' => ['name' => 'octocat']];
+        $body = json_encode($payload);
+        $headers = ['X-GitHub-Event' => 'push', 'X-Hub-Signature-256' => $this->sign($body, 'topsecret')];
+
+        $this->postJson("/api/webhooks/github/{$project->project_key}", $payload, $headers)->assertAccepted();
+
+        $this->assertDatabaseCount('webhook_deliveries', 1);
+        $delivery = WebhookDelivery::sole();
+        $this->assertSame(WebhookDelivery::STATUS_PROCESSED, $delivery->status);
+        $this->assertStringStartsWith('synthetic:', $delivery->delivery_id);
+
+        // An exact retry of the identical body, still without the header,
+        // must be recognized as the SAME delivery and rejected as a
+        // duplicate -- never processed a second time.
+        $second = $this->postJson("/api/webhooks/github/{$project->project_key}", $payload, $headers);
+        $second->assertOk();
+        $second->assertJson(['message' => 'Duplicate delivery, already processed']);
+        $this->assertDatabaseCount('webhook_deliveries', 1);
     }
 
     public function test_invalid_signature_is_rejected(): void

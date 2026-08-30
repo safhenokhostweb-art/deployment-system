@@ -18,6 +18,9 @@ class Release extends Model
     public const STATUS_READY = 'ready';
     public const STATUS_FAILED = 'failed';
 
+    public const READINESS_POLICY_EXACT_COMMIT = 'exact_commit_evidence_v1';
+    public const READINESS_POLICY_LEGACY_FALLBACK = 'legacy_fallback_v1';
+
     protected $fillable = [
         'public_id',
         'project_id',
@@ -25,6 +28,10 @@ class Release extends Model
         'branch',
         'status',
         'source',
+        'readiness_policy',
+        'legacy_fallback_eligible_at',
+        'legacy_fallback_reason',
+        'legacy_fallback_eligible_by',
         'source_received_at',
         'artifact_checked_at',
         'ready_at',
@@ -38,6 +45,7 @@ class Release extends Model
     {
         return [
             'source_received_at' => 'datetime',
+            'legacy_fallback_eligible_at' => 'datetime',
             'artifact_checked_at' => 'datetime',
             'ready_at' => 'datetime',
             'failed_at' => 'datetime',
@@ -76,5 +84,13 @@ class Release extends Model
     public function isReady(): bool
     {
         return $this->status === self::STATUS_READY;
+    }
+
+    public function isLegacyFallbackEligible(): bool
+    {
+        return $this->readiness_policy === self::READINESS_POLICY_LEGACY_FALLBACK
+            && $this->legacy_fallback_eligible_at !== null
+            && is_string($this->legacy_fallback_reason)
+            && $this->legacy_fallback_reason !== '';
     }
 }

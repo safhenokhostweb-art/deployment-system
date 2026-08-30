@@ -3,6 +3,7 @@
 namespace App\Services\Releases;
 
 use App\Models\Artifact;
+use App\Models\AuditLogEntry;
 use App\Models\Project;
 use App\Models\PublishJob;
 use App\Models\Release;
@@ -24,6 +25,7 @@ class ReleaseOrchestrator
                     'branch' => $metadata['branch'],
                     'status' => Release::STATUS_SOURCE_RECEIVED,
                     'source' => 'project_contract',
+                    'readiness_policy' => Release::READINESS_POLICY_EXACT_COMMIT,
                     'source_received_at' => now(),
                 ],
             );
@@ -39,6 +41,48 @@ class ReleaseOrchestrator
             }
             return $this->syncArtifactState($release);
         });
+    }
+
+    /** @param array<string, mixed> $metadata */
+    public function recordLegacyMetadata(Project $project, array $metadata, string $source, string $reason, string $actor): Release
+    {
+        abort_unless(in_array($source, ['project_contract', 'admin_backfill', 'import', 'legacy'], true), 422, 'Unsupported legacy Release source.');
+
+        DB::transaction(function () use ($project, $metadata, $source, $reason, $actor): void {
+            $release = Release::query()
+                ->where('project_id', $project->id)
+                ->where('commit_hash', $metadata['commit_sha'])
+                ->lockForUpdate()
+                ->first();
+
+            if ($release !== null) {
+                abort_unless($release->isLegacyFallbackEligible(), 409, 'An ordinary exact-commit Release cannot be reclassified for legacy fallback.');
+                return;
+            }
+
+            $release = Release::create([
+                'project_id' => $project->id,
+                'commit_hash' => $metadata['commit_sha'],
+                'branch' => $metadata['branch'],
+                'status' => Release::STATUS_SOURCE_RECEIVED,
+                'source' => $source,
+                'readiness_policy' => Release::READINESS_POLICY_LEGACY_FALLBACK,
+                'legacy_fallback_eligible_at' => now(),
+                'legacy_fallback_reason' => $reason,
+                'legacy_fallback_eligible_by' => $actor,
+            ]);
+
+            AuditLogEntry::record(
+                actorType: $source === 'admin_backfill' ? AuditLogEntry::ACTOR_USER : AuditLogEntry::ACTOR_SYSTEM,
+                actorIdentifier: $actor,
+                action: 'release.legacy_fallback_eligibility_created',
+                subjectType: Release::class,
+                subjectId: $release->id,
+                metadata: ['source' => $source, 'reason' => $reason, 'commit_hash' => $metadata['commit_sha']],
+            );
+        });
+
+        return $this->recordMetadata($project, $metadata);
     }
 
     public function createForCommit(
@@ -58,6 +102,7 @@ class ReleaseOrchestrator
                     'branch' => $branch,
                     'status' => Release::STATUS_SOURCE_RECEIVED,
                     'source' => $source,
+                    'readiness_policy' => Release::READINESS_POLICY_EXACT_COMMIT,
                     'source_received_at' => now(),
                     'metadata' => $metadata === [] ? null : $metadata,
                 ]
@@ -155,7 +200,8 @@ class ReleaseOrchestrator
                 $artifact->update(['release_id' => $release->id]);
 
                 $metadata = is_array($release->metadata) ? $release->metadata : [];
-                $signedFallback = ($metadata['release_ready'] ?? false) === true;
+                $legacyFallback = $release->isLegacyFallbackEligible()
+                    && ($metadata['release_ready'] ?? false) === true;
                 $evidenceJob = PublishJob::query()
                     ->where('release_id', $release->id)
                     ->where('action', PublishJob::ACTION_BUILD_ARTIFACT)
@@ -164,11 +210,15 @@ class ReleaseOrchestrator
                     ->where('reviewed_head_sha', $release->commit_hash)
                     ->where('reviewed_branch', $release->branch)
                     ->first();
-                $semanticVerified = $artifact->semantic_status === 'verified'
-                    || ($signedFallback && $artifact->semantic_status === 'legacy');
+                $exactEvidenceReady = $evidenceJob !== null
+                    && $artifact->publish_job_id === $evidenceJob->id
+                    && $artifact->release_id === $release->id
+                    && $artifact->semantic_status === 'verified';
+                $legacyReady = $legacyFallback
+                    && in_array($artifact->semantic_status, ['legacy', 'verified'], true);
 
-                if ($semanticVerified && ($signedFallback || $evidenceJob !== null)) {
-                    if (!$signedFallback && $evidenceJob !== null) {
+                if ($exactEvidenceReady || $legacyReady) {
+                    if ($exactEvidenceReady) {
                         $evidence = $evidenceJob->release_evidence ?? [];
                         $metadata['test_results'] = array_map(
                             fn (array $check): array => ['name' => $check['id'], 'status' => $check['status']],
@@ -196,8 +246,12 @@ class ReleaseOrchestrator
                     ->where('release_id', $release->id)
                     ->whereIn('status', [PublishJob::STATUS_QUEUED, PublishJob::STATUS_APPROVED, PublishJob::STATUS_RUNNING])
                     ->exists();
+                if (!$release->isLegacyFallbackEligible() && array_key_exists('release_ready', $metadata)) {
+                    $metadata['release_ready'] = false;
+                }
                 $release->forceFill([
                     'status' => $activeBuild ? Release::STATUS_ARTIFACT_BUILDING : Release::STATUS_AWAITING_ARTIFACT,
+                    'metadata' => $metadata,
                     'artifact_checked_at' => now(),
                     'ready_at' => null,
                 ])->save();
@@ -205,8 +259,13 @@ class ReleaseOrchestrator
                 return $release->refresh();
             }
 
+            $metadata = is_array($release->metadata) ? $release->metadata : [];
+            if (!$release->isLegacyFallbackEligible() && array_key_exists('release_ready', $metadata)) {
+                $metadata['release_ready'] = false;
+            }
             $release->forceFill([
                 'status' => Release::STATUS_AWAITING_ARTIFACT,
+                'metadata' => $metadata,
                 'artifact_checked_at' => now(),
                 'ready_at' => null,
             ])->save();

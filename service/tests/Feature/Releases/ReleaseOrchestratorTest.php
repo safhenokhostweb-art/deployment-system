@@ -52,7 +52,7 @@ class ReleaseOrchestratorTest extends TestCase
         $this->assertSame('webhook', $second->source);
     }
 
-    public function test_it_attaches_an_existing_available_artifact_and_marks_release_ready(): void
+    public function test_explicit_legacy_release_attaches_an_existing_artifact_and_marks_ready(): void
     {
         $project = Project::factory()->create();
         $commitHash = str_repeat('c', 40);
@@ -63,7 +63,19 @@ class ReleaseOrchestratorTest extends TestCase
             'release_id' => null,
         ]);
 
-        $release = app(ReleaseOrchestrator::class)->createForCommit($project, $commitHash, 'main', 'project_contract', ['release_ready' => true]);
+        Release::factory()->create([
+            'project_id' => $project->id,
+            'commit_hash' => $commitHash,
+            'branch' => 'main',
+            'source' => 'legacy',
+            'readiness_policy' => Release::READINESS_POLICY_LEGACY_FALLBACK,
+            'legacy_fallback_eligible_at' => now(),
+            'legacy_fallback_reason' => 'test_explicit_legacy_release',
+            'legacy_fallback_eligible_by' => 'test',
+            'metadata' => ['release_ready' => true],
+        ]);
+
+        $release = app(ReleaseOrchestrator::class)->syncArtifactState(Release::sole());
 
         $this->assertSame(Release::STATUS_READY, $release->status);
         $this->assertTrue($release->isReady());

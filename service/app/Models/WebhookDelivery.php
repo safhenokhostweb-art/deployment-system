@@ -25,18 +25,26 @@ class WebhookDelivery extends Model
         'status',
         'commit_hash',
         'branch',
+        'dispatch_token',
+        'dispatch_claimed_at',
+        'dispatch_lease_expires_at',
         'dispatched_at',
         'processing_at',
+        'processing_lease_expires_at',
         'processed_at',
         'failed_at',
         'failure_message',
+        'reclaim_count',
     ];
 
     protected function casts(): array
     {
         return [
             'dispatched_at' => 'datetime',
+            'dispatch_claimed_at' => 'datetime',
+            'dispatch_lease_expires_at' => 'datetime',
             'processing_at' => 'datetime',
+            'processing_lease_expires_at' => 'datetime',
             'processed_at' => 'datetime',
             'failed_at' => 'datetime',
         ];

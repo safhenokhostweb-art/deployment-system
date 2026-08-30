@@ -11,6 +11,7 @@ use App\Models\LocalAgent;
 use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use App\Models\PublishJob;
+use App\Models\Release;
 use App\Services\Deployment\Artifact\ArtifactService;
 use App\Services\Publish\AuthoritativeBuildAgentResolver;
 use Illuminate\Support\Facades\DB;
@@ -49,6 +50,7 @@ class DeploymentDispatcher
 
     public function createFromWebhook(Project $project, string $commitHash, string $branch, ?string $pusher): Deployment|PublishJob
     {
+        $this->assertLegacyAutomaticDeploymentEligible($project, $commitHash, $branch, 'legacy_webhook_dispatch', $pusher ?? 'github');
         $artifact = $this->artifacts->findMatching($project, $commitHash, $branch);
         if ($project->requires_complete_artifact && $artifact === null) {
             return $this->queueRequiredArtifactBuild($project, $commitHash, $branch, [
@@ -189,6 +191,7 @@ class DeploymentDispatcher
      */
     public function createFromPublish(Project $project, string $commitHash, string $branch, string $triggeredBy, ?int $publishJobId = null): Deployment|PublishJob
     {
+        $this->assertLegacyAutomaticDeploymentEligible($project, $commitHash, $branch, 'legacy_publish_bridge', $triggeredBy);
         $artifact = $this->artifacts->findMatching($project, $commitHash, $branch);
         if ($project->requires_complete_artifact && $artifact === null) {
             return $this->queueRequiredArtifactBuild($project, $commitHash, $branch, [
@@ -231,6 +234,27 @@ class DeploymentDispatcher
             return null;
         }
 
+        $release = Release::query()
+            ->where('project_id', $job->project_id)
+            ->where('commit_hash', $job->reviewed_head_sha)
+            ->where('branch', $job->reviewed_branch)
+            ->first();
+        if ($release !== null && ! $release->isLegacyFallbackEligible()) {
+            $request['blocked_reason'] = 'explicit_confirm_required';
+            $request['blocked_at'] = now()->toIso8601String();
+            $job->update(['deployment_request' => $request]);
+            AuditLogEntry::record(
+                actorType: AuditLogEntry::ACTOR_SYSTEM,
+                actorIdentifier: null,
+                action: 'publish_job.legacy_deployment_request_blocked',
+                subjectType: PublishJob::class,
+                subjectId: $job->id,
+                metadata: ['release_id' => $release->id, 'reason' => 'explicit_confirm_required'],
+            );
+
+            return null;
+        }
+
         $deployment = match ($request['trigger'] ?? null) {
             Deployment::TRIGGER_WEBHOOK => $this->createFromWebhook($job->project, (string) $job->reviewed_head_sha, (string) $job->reviewed_branch, $request['triggered_by'] ?? null),
             Deployment::TRIGGER_MANUAL => $this->createManual($job->project, (string) $job->reviewed_head_sha, (string) $request['triggered_by'], $request['release'] ?? null),
@@ -245,6 +269,43 @@ class DeploymentDispatcher
         $job->update(['deployment_id' => $deployment->id]);
 
         return $deployment;
+    }
+
+    private function assertLegacyAutomaticDeploymentEligible(Project $project, string $commitHash, string $branch, string $reason, string $actor): Release
+    {
+        return DB::transaction(function () use ($project, $commitHash, $branch, $reason, $actor): Release {
+            $release = Release::query()
+                ->where('project_id', $project->id)
+                ->where('commit_hash', $commitHash)
+                ->lockForUpdate()
+                ->first();
+
+            if ($release === null) {
+                $release = Release::create([
+                    'project_id' => $project->id,
+                    'commit_hash' => $commitHash,
+                    'branch' => $branch,
+                    'status' => Release::STATUS_SOURCE_RECEIVED,
+                    'source' => 'legacy',
+                    'readiness_policy' => Release::READINESS_POLICY_LEGACY_FALLBACK,
+                    'legacy_fallback_eligible_at' => now(),
+                    'legacy_fallback_reason' => $reason,
+                    'legacy_fallback_eligible_by' => $actor,
+                ]);
+                AuditLogEntry::record(
+                    actorType: AuditLogEntry::ACTOR_SYSTEM,
+                    actorIdentifier: $actor,
+                    action: 'release.legacy_automatic_deployment_eligibility_created',
+                    subjectType: Release::class,
+                    subjectId: $release->id,
+                    metadata: ['reason' => $reason, 'commit_hash' => $commitHash, 'branch' => $branch],
+                );
+            }
+
+            abort_unless($release->branch === $branch && $release->isLegacyFallbackEligible(), 409, 'This Release requires explicit deployment confirmation.');
+
+            return $release;
+        });
     }
 
     public function approve(Deployment $deployment, string $approvedBy): Deployment

@@ -3,6 +3,7 @@
 namespace App\Services\Releases;
 
 use App\Models\Artifact;
+use App\Models\PublishJob;
 use App\Models\Release;
 
 final class ReleaseReadiness
@@ -34,6 +35,21 @@ final class ReleaseReadiness
         }
         if ($artifact === null || $release->status !== Release::STATUS_READY) {
             return $this->state('NOT READY', false, 'No physically valid Artifact exists for this exact commit.');
+        }
+        if (! $release->isLegacyFallbackEligible()) {
+            $evidenceJobExists = PublishJob::query()
+                ->whereKey($artifact->publish_job_id)
+                ->where('release_id', $release->id)
+                ->where('project_id', $release->project_id)
+                ->where('action', PublishJob::ACTION_BUILD_ARTIFACT)
+                ->where('status', PublishJob::STATUS_SUCCEEDED)
+                ->whereNotNull('evidence_verified_at')
+                ->where('reviewed_head_sha', $release->commit_hash)
+                ->where('reviewed_branch', $release->branch)
+                ->exists();
+            if ($artifact->semantic_status !== 'verified' || ! $evidenceJobExists) {
+                return $this->state('NOT READY', false, 'The exact-commit evidence and job-bound Artifact contract is incomplete.');
+            }
         }
         return $this->state('READY TO DEPLOY', true, 'All release gates passed; operator confirmation is required.');
     }

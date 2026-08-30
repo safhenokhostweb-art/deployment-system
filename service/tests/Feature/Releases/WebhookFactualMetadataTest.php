@@ -150,8 +150,8 @@ class WebhookFactualMetadataTest extends TestCase
         $this->assertFalse($release->metadata['release_ready'], 'It must never fabricate readiness metadata that no evidence supports.');
     }
 
-    // 8. Release becomes READY only when every required trusted condition is satisfied
-    public function test_webhook_facts_plus_admin_backfill_evidence_reaches_ready(): void
+    // 8. Admin backfill cannot reclassify an ordinary webhook Release.
+    public function test_webhook_release_cannot_be_made_ready_by_admin_backfill(): void
     {
         $project = $this->githubProject();
         $this->dispatch($project, self::HEAD);
@@ -160,15 +160,14 @@ class WebhookFactualMetadataTest extends TestCase
         ]);
         $admin = \App\Models\User::factory()->create(['role' => \App\Models\User::ROLE_ADMIN]);
 
-        // The backfill service re-derives the same facts (mocked identically
-        // above) and layers genuine operator-confirmed evidence on top.
         $this->actingAs($admin)->post(route('projects.release-backfill.store', $project), [
             'confirm' => '1',
             'confirmed_checks' => ['tests_passed', 'lint_passed'],
-        ])->assertRedirect();
+        ])->assertStatus(409);
 
         $release = Release::sole();
-        $this->assertTrue($release->metadata['release_ready']);
+        $this->assertFalse($release->metadata['release_ready']);
+        $this->assertSame(Release::READINESS_POLICY_EXACT_COMMIT, $release->readiness_policy);
         $this->assertSame(self::CHANGED_FILES, $release->metadata['changed_files']);
     }
 
@@ -209,7 +208,6 @@ class WebhookFactualMetadataTest extends TestCase
     public function test_a_webhook_redelivery_never_downgrades_already_ready_metadata(): void
     {
         $project = $this->githubProject();
-        $this->dispatch($project, self::HEAD);
         Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id, 'commit_hash' => self::HEAD, 'branch' => 'main', 'status' => Artifact::STATUS_AVAILABLE,
         ]);
@@ -220,6 +218,7 @@ class WebhookFactualMetadataTest extends TestCase
         ])->assertRedirect();
         $readyMetadata = Release::sole()->metadata;
         $this->assertTrue($readyMetadata['release_ready']);
+        $this->assertTrue(Release::sole()->isLegacyFallbackEligible());
 
         // A duplicate/redelivered webhook for the exact same commit must be
         // a pure no-op against already-ready metadata.

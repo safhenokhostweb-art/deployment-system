@@ -62,23 +62,36 @@ class WebhookIdempotencyTest extends TestCase
         $this->assertDatabaseCount('deployments', 0);
     }
 
-    public function test_missing_delivery_header_still_processes_normally(): void
+    /**
+     * Root-cause fix (Release/Webhook hardening): a missing X-GitHub-Delivery
+     * header must NEVER bypass ownership/dedupe by skipping tracking
+     * entirely -- a network-retried or crafted request without the header
+     * would otherwise queue an unbounded number of duplicate jobs for the
+     * exact same push. A deterministic identity is synthesized from the
+     * verified payload instead, so the push still processes normally AND
+     * an exact retry of the same body is recognized as the same delivery.
+     */
+    public function test_missing_delivery_header_is_still_tracked_and_deduplicated(): void
     {
-        // No X-GitHub-Delivery header at all — matches every pre-existing
-        // GitHubWebhookTest request shape, so behavior must be identical.
         $project = Project::factory()->autoDeploy()->create(['branch' => 'main', 'github_webhook_secret' => 'topsecret']);
 
         $payload = ['ref' => 'refs/heads/main', 'after' => str_repeat('b', 40)];
         $body = json_encode($payload);
+        $headers = ['X-GitHub-Event' => 'push', 'X-Hub-Signature-256' => $this->sign($body, 'topsecret')];
 
-        $this->postJson("/api/webhooks/github/{$project->project_key}", $payload, [
-            'X-GitHub-Event' => 'push',
-            'X-Hub-Signature-256' => $this->sign($body, 'topsecret'),
-        ])->assertAccepted();
+        $this->postJson("/api/webhooks/github/{$project->project_key}", $payload, $headers)->assertAccepted();
 
         $this->assertSame(1, Release::where('project_id', $project->id)->count());
         $this->assertDatabaseCount('deployments', 0);
-        $this->assertDatabaseCount('webhook_deliveries', 0);
+        $this->assertDatabaseCount('webhook_deliveries', 1);
+
+        // An exact retry of the identical body, still without the header,
+        // must be recognized as the SAME delivery -- never a second Release.
+        $this->postJson("/api/webhooks/github/{$project->project_key}", $payload, $headers)
+            ->assertOk()
+            ->assertJson(['message' => 'Duplicate delivery, already processed']);
+        $this->assertSame(1, Release::where('project_id', $project->id)->count());
+        $this->assertDatabaseCount('webhook_deliveries', 1);
     }
 
     public function test_failed_delivery_receipt_is_replayable_and_redelivery_remains_idempotent(): void

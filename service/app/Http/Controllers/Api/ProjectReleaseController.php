@@ -25,7 +25,13 @@ final class ProjectReleaseController extends Controller
         $decoded = json_decode($raw, true);
         abort_unless(is_array($decoded), 422, 'Release metadata must be a JSON object.');
         $metadata = $this->validator->validate($project, $decoded);
-        $release = $this->releases->recordMetadata($project, $metadata);
+        $release = $this->releases->recordLegacyMetadata(
+            $project,
+            $metadata,
+            'project_contract',
+            'signed_project_release_contract',
+            'signed-project:' . $project->project_key,
+        );
 
         return response()->json(['status' => $release->status, 'release_id' => $release->public_id], 202);
     }
