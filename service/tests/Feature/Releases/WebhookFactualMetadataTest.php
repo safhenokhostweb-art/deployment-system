@@ -146,8 +146,8 @@ class WebhookFactualMetadataTest extends TestCase
         app(ReleaseOrchestrator::class)->syncArtifactState(Release::find($releaseId));
 
         $release = Release::find($releaseId);
-        $this->assertSame(Release::STATUS_READY, $release->status, 'Artifact linkage legitimately advances the workflow-stage column.');
-        $this->assertFalse($release->metadata['release_ready'], 'But it must never fabricate readiness metadata that no evidence supports.');
+        $this->assertSame(Release::STATUS_AWAITING_ARTIFACT, $release->status, 'Artifact bytes alone cannot advance the release to READY without trusted evidence.');
+        $this->assertFalse($release->metadata['release_ready'], 'It must never fabricate readiness metadata that no evidence supports.');
     }
 
     // 8. Release becomes READY only when every required trusted condition is satisfied

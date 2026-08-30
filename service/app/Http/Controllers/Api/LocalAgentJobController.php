@@ -8,8 +8,10 @@ use App\Models\LocalProjectMapping;
 use App\Models\PublishJob;
 use App\Services\Publish\PublishJobService;
 use App\Services\Publish\LocalAgentControlJobService;
+use App\Services\Releases\ReleaseEvidenceService;
 use App\Support\Deployment\ArtifactDependencyPolicy;
 use Illuminate\Http\Request;
+use Throwable;
 
 /**
  * Phase 5: sits behind 'local-agent.signed' — the Local Agent equivalent
@@ -24,6 +26,7 @@ class LocalAgentJobController extends Controller
     public function __construct(
         private readonly PublishJobService $publishJobs,
         private readonly LocalAgentControlJobService $controlJobs,
+        private readonly ReleaseEvidenceService $releaseEvidence,
     ) {
     }
 
@@ -123,6 +126,7 @@ class LocalAgentJobController extends Controller
                 'artifact_branch' => $job->action === PublishJob::ACTION_BUILD_ARTIFACT ? $job->reviewed_branch : null,
                 'build_contract_version' => in_array($job->action, [PublishJob::ACTION_BUILD_ARTIFACT, PublishJob::ACTION_PUBLISH], true) ? 2 : null,
                 'dependency_contract' => in_array($job->action, [PublishJob::ACTION_BUILD_ARTIFACT, PublishJob::ACTION_PUBLISH], true) ? ArtifactDependencyPolicy::contract($job->project->project_key) : null,
+                'evidence_contract' => $job->action === PublishJob::ACTION_BUILD_ARTIFACT ? $job->evidence_contract : null,
             ],
         ]);
     }
@@ -173,6 +177,7 @@ class LocalAgentJobController extends Controller
             // from the Hub-inferred `abandoned` deployments:recover-stale
             // produces.
             'failure_code' => 'nullable|string|in:' . implode(',', PublishJob::AGENT_REPORTABLE_FAILURE_CODES),
+            'evidence' => 'nullable|array',
         ]);
 
         if ($validated['status'] === 'failed') {
@@ -183,6 +188,16 @@ class LocalAgentJobController extends Controller
                 $validated['failure_code'] ?? null,
             );
         } else {
+            if ($job->action === PublishJob::ACTION_BUILD_ARTIFACT && $job->release_id !== null) {
+                try {
+                    abort_unless(is_array($validated['evidence'] ?? null), 422, 'A release-linked artifact build must report exact-commit evidence.');
+                    $this->releaseEvidence->validateAndRecord($job, $agent, $validated['evidence']);
+                    $job->refresh();
+                } catch (Throwable $e) {
+                    $this->publishJobs->reportFailure($job, 'Trusted exact-commit evidence validation failed: ' . $e->getMessage(), null, 'release_evidence_invalid');
+                    throw $e;
+                }
+            }
             $updated = $this->publishJobs->reportResult($job, $validated['commit_hash'] ?? null, $validated['output'] ?? '');
         }
 

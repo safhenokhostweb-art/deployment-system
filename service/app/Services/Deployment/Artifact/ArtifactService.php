@@ -33,6 +33,9 @@ use Illuminate\Support\Facades\Storage;
  */
 class ArtifactService
 {
+    public function __construct(private readonly ArtifactSemanticValidator $semanticValidator)
+    {
+    }
     /** Hard ceiling regardless of any project/config override — a bug or a misbehaving agent must never be able to fill the disk. */
     public const MAX_ARTIFACT_SIZE_BYTES = 500 * 1024 * 1024;
 
@@ -52,7 +55,7 @@ class ArtifactService
      * a normal signed JSON request. No file bytes exist yet — status
      * stays `uploading` until finalizeUpload() succeeds.
      */
-    public function createPending(Project $project, string $commitHash, string $branch, string $claimedChecksum, int $claimedSizeBytes, ?string $uploadedBy, array $requiredPaths = []): Artifact
+    public function createPending(Project $project, string $commitHash, string $branch, string $claimedChecksum, int $claimedSizeBytes, ?string $uploadedBy, array $requiredPaths = [], ?int $publishJobId = null): Artifact
     {
         abort_unless(preg_match('/^[0-9a-f]{40}$/', $commitHash) === 1, 422, 'commit_hash must be a 40-character hex SHA.');
         abort_unless(preg_match('/^[0-9a-f]{64}$/', $claimedChecksum) === 1, 422, 'checksum must be a 64-character hex SHA-256.');
@@ -60,19 +63,53 @@ class ArtifactService
 
         $diskPath = "{$project->project_key}/{$commitHash}.zip";
 
-        return DB::transaction(function () use ($project, $commitHash, $branch, $claimedChecksum, $claimedSizeBytes, $uploadedBy, $requiredPaths, $diskPath) {
+        return DB::transaction(function () use ($project, $commitHash, $branch, $claimedChecksum, $claimedSizeBytes, $uploadedBy, $requiredPaths, $diskPath, $publishJobId) {
             $existing = Artifact::where('project_id', $project->id)->where('commit_hash', $commitHash)->lockForUpdate()->first();
             if ($existing !== null) {
+                if ($existing->status === Artifact::STATUS_FAILED && $publishJobId !== null) {
+                    $existing->update([
+                        'publish_job_id' => $publishJobId,
+                        'branch' => $branch,
+                        'checksum_sha256' => $claimedChecksum,
+                        'size_bytes' => $claimedSizeBytes,
+                        'required_paths' => array_values(array_unique($requiredPaths)),
+                        'status' => Artifact::STATUS_UPLOADING,
+                        'semantic_status' => 'pending',
+                        'semantic_verified_at' => null,
+                        'semantic_failure' => null,
+                        'uploaded_by' => $uploadedBy,
+                        'failure_message' => null,
+                        'expires_at' => now()->addDays((int) config('deployment.artifact_retention_days')),
+                    ]);
+
+                    return $existing->refresh();
+                }
                 abort_if($existing->checksum_sha256 !== $claimedChecksum, 409, 'artifact_checksum_conflict: this project and commit already have an artifact with a different checksum.');
+                abort_if($existing->branch !== $branch, 409, 'artifact_branch_conflict: this project and commit artifact belongs to a different branch.');
+                abort_if($publishJobId !== null && $existing->publish_job_id !== null && $existing->publish_job_id !== $publishJobId, 409, 'artifact_job_conflict: this artifact belongs to a different PublishJob.');
 
                 // Same canonical identity: preserve both the public ID and
                 // an already-verified file. This is safe for a lost create
                 // response and for concurrent retry callers.
-                return $existing;
+                if ($publishJobId !== null && $existing->publish_job_id === null && !$existing->isAvailable()) {
+                    $existing->update(['publish_job_id' => $publishJobId]);
+                }
+                if ($publishJobId !== null && $existing->publish_job_id === null && $existing->isAvailable()) {
+                    $this->semanticValidator->validate($existing);
+                    $existing->update([
+                        'publish_job_id' => $publishJobId,
+                        'semantic_status' => 'verified',
+                        'semantic_verified_at' => now(),
+                        'semantic_failure' => null,
+                    ]);
+                }
+
+                return $existing->refresh();
             }
 
             $artifact = Artifact::create([
                 'project_id' => $project->id,
+                'publish_job_id' => $publishJobId,
                 'commit_hash' => $commitHash,
                 'branch' => $branch,
                 'checksum_sha256' => $claimedChecksum,
@@ -144,7 +181,23 @@ class ArtifactService
             $this->rejectUpload($artifact, $contentIssue['reason'], $contentIssue['message'], []);
         }
 
-        $artifact->update(['status' => Artifact::STATUS_AVAILABLE, 'size_bytes' => strlen($rawBytes)]);
+        try {
+            if ($artifact->publish_job_id !== null) {
+                $this->semanticValidator->validate($artifact);
+            }
+        } catch (ArtifactValidationException $e) {
+            Storage::disk('artifacts')->delete($artifact->disk_path);
+            $artifact->update(['semantic_status' => 'failed', 'semantic_failure' => $e->reason]);
+            $this->rejectUpload($artifact, $e->reason, $e->getMessage(), []);
+        }
+
+        $artifact->update([
+            'status' => Artifact::STATUS_AVAILABLE,
+            'size_bytes' => strlen($rawBytes),
+            'semantic_status' => $artifact->publish_job_id !== null ? 'verified' : 'legacy',
+            'semantic_verified_at' => $artifact->publish_job_id !== null ? now() : null,
+            'semantic_failure' => null,
+        ]);
 
         AuditLogEntry::record(
             actorType: AuditLogEntry::ACTOR_AGENT,

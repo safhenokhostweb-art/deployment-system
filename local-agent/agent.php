@@ -59,6 +59,7 @@ require __DIR__ . '/lib/WorkspaceSourcePreparer.php';
 require __DIR__ . '/lib/PinnedDependencyMaterializer.php';
 require __DIR__ . '/lib/ArtifactBuilder.php';
 require __DIR__ . '/lib/ArtifactUploader.php';
+require __DIR__ . '/lib/ExactCommitEvidence.php';
 require __DIR__ . '/lib/PublishJobHeartbeatWorker.php';
 require __DIR__ . '/lib/LocalBuildFailedException.php';
 require __DIR__ . '/lib/ArtifactSourceResolver.php';
@@ -205,6 +206,7 @@ $artifactUploader = new ArtifactUploader(
     $workspaceBaseDir,
     $workspaceTtlSeconds,
     agentVersion: LOCAL_AGENT_VERSION,
+    agentId: (string) $config['local_agent_id'],
 );
 $jobMaxRuntimeSeconds = (int) ($config['job_max_runtime_seconds'] ?? 1800);
 // This is deliberately capped well below the Hub's default 120-second
@@ -461,7 +463,8 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
             foreach ($projects as $mappedKey => $mappedProject) {
                 if (is_string($mappedProject['repository_url'] ?? null)) $mappings[$mappedKey] = ['repository_url' => $mappedProject['repository_url']];
             }
-            $artifactResult = $artifactUploader->buildAndUploadRemoteCommit($projectKey, $repositoryPath, $repositoryUrl, $remoteName, $commitHash, $artifactBranch, (string) $job['id'], $onTick, $projectConfig['application_root'] ?? '.', $contract, $projectConfig['dependency_allowlist'] ?? [], $mappings);
+            $evidenceContract = is_array($job['evidence_contract'] ?? null) ? $job['evidence_contract'] : [];
+            $artifactResult = $artifactUploader->buildAndUploadRemoteCommit($projectKey, $repositoryPath, $repositoryUrl, $remoteName, $commitHash, $artifactBranch, (string) $job['id'], $onTick, $projectConfig['application_root'] ?? '.', $contract, $projectConfig['dependency_allowlist'] ?? [], $mappings, $evidenceContract);
 
             if (!$artifactResult['succeeded']) {
                 $logger->error("Job {$job['id']}: artifact build failed [{$artifactResult['failureCode']}]: {$artifactResult['message']}");
@@ -475,7 +478,7 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
                 return;
             }
 
-            $reportTerminal(['status' => 'succeeded', 'commit_hash' => $commitHash, 'output' => '[artifact] uploaded: ' . $artifactResult['message']]);
+            $reportTerminal(['status' => 'succeeded', 'commit_hash' => $commitHash, 'output' => '[artifact] uploaded: ' . $artifactResult['message'], 'evidence' => $artifactResult['evidence'] ?? null]);
             $logger->info("Job {$job['id']}: artifact built for {$commitHash}");
 
             return;

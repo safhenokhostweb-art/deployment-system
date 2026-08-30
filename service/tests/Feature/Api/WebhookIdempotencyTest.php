@@ -4,6 +4,7 @@ namespace Tests\Feature\Api;
 
 use App\Models\Project;
 use App\Models\Release;
+use App\Models\WebhookDelivery;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -78,5 +79,26 @@ class WebhookIdempotencyTest extends TestCase
         $this->assertSame(1, Release::where('project_id', $project->id)->count());
         $this->assertDatabaseCount('deployments', 0);
         $this->assertDatabaseCount('webhook_deliveries', 0);
+    }
+
+    public function test_failed_delivery_receipt_is_replayable_and_redelivery_remains_idempotent(): void
+    {
+        $project = Project::factory()->create(['branch' => 'main', 'github_webhook_secret' => 'topsecret']);
+        $payload = ['ref' => 'refs/heads/main', 'after' => str_repeat('c', 40)];
+        $body = json_encode($payload);
+        $headers = [
+            'X-GitHub-Event' => 'push', 'X-GitHub-Delivery' => 'delivery-replayable',
+            'X-Hub-Signature-256' => $this->sign($body, 'topsecret'),
+        ];
+
+        $this->postJson("/api/webhooks/github/{$project->project_key}", $payload, $headers)->assertAccepted();
+        WebhookDelivery::where('delivery_id', 'delivery-replayable')->update([
+            'status' => WebhookDelivery::STATUS_FAILED, 'failed_at' => now(), 'failure_message' => 'simulated enqueue failure',
+        ]);
+
+        $this->postJson("/api/webhooks/github/{$project->project_key}", $payload, $headers)->assertAccepted();
+        $this->assertDatabaseHas('webhook_deliveries', ['delivery_id' => 'delivery-replayable', 'status' => WebhookDelivery::STATUS_PROCESSED]);
+        $this->assertSame(1, Release::where('project_id', $project->id)->count());
+        $this->assertDatabaseCount('deployments', 0);
     }
 }

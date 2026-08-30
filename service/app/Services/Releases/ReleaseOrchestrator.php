@@ -4,6 +4,7 @@ namespace App\Services\Releases;
 
 use App\Models\Artifact;
 use App\Models\Project;
+use App\Models\PublishJob;
 use App\Models\Release;
 use Illuminate\Support\Facades\DB;
 
@@ -145,6 +146,7 @@ class ReleaseOrchestrator
             $artifact = Artifact::query()
                 ->where('project_id', $release->project_id)
                 ->where('commit_hash', $release->commit_hash)
+                ->where('branch', $release->branch)
                 ->where('status', Artifact::STATUS_AVAILABLE)
                 ->lockForUpdate()
                 ->first();
@@ -152,13 +154,52 @@ class ReleaseOrchestrator
             if ($artifact !== null) {
                 $artifact->update(['release_id' => $release->id]);
 
+                $metadata = is_array($release->metadata) ? $release->metadata : [];
+                $signedFallback = ($metadata['release_ready'] ?? false) === true;
+                $evidenceJob = PublishJob::query()
+                    ->where('release_id', $release->id)
+                    ->where('action', PublishJob::ACTION_BUILD_ARTIFACT)
+                    ->where('status', PublishJob::STATUS_SUCCEEDED)
+                    ->whereNotNull('evidence_verified_at')
+                    ->where('reviewed_head_sha', $release->commit_hash)
+                    ->where('reviewed_branch', $release->branch)
+                    ->first();
+                $semanticVerified = $artifact->semantic_status === 'verified'
+                    || ($signedFallback && $artifact->semantic_status === 'legacy');
+
+                if ($semanticVerified && ($signedFallback || $evidenceJob !== null)) {
+                    if (!$signedFallback && $evidenceJob !== null) {
+                        $evidence = $evidenceJob->release_evidence ?? [];
+                        $metadata['test_results'] = array_map(
+                            fn (array $check): array => ['name' => $check['id'], 'status' => $check['status']],
+                            is_array($evidence['checks'] ?? null) ? $evidence['checks'] : [],
+                        );
+                        $metadata['build_result'] = ['required' => true, 'status' => 'passed', 'contract' => 'hub-exact-commit-evidence-v1'];
+                        $metadata['release_ready'] = true;
+                        $metadata['evidence_digest'] = $evidenceJob->evidence_digest;
+                    }
+
+                    $release->forceFill([
+                        'status' => Release::STATUS_READY,
+                        'metadata' => $metadata,
+                        'artifact_checked_at' => now(),
+                        'ready_at' => now(),
+                        'failed_at' => null,
+                        'failure_code' => null,
+                        'failure_message' => null,
+                    ])->save();
+
+                    return $release->refresh();
+                }
+
+                $activeBuild = PublishJob::query()
+                    ->where('release_id', $release->id)
+                    ->whereIn('status', [PublishJob::STATUS_QUEUED, PublishJob::STATUS_APPROVED, PublishJob::STATUS_RUNNING])
+                    ->exists();
                 $release->forceFill([
-                    'status' => Release::STATUS_READY,
+                    'status' => $activeBuild ? Release::STATUS_ARTIFACT_BUILDING : Release::STATUS_AWAITING_ARTIFACT,
                     'artifact_checked_at' => now(),
-                    'ready_at' => now(),
-                    'failed_at' => null,
-                    'failure_code' => null,
-                    'failure_message' => null,
+                    'ready_at' => null,
                 ])->save();
 
                 return $release->refresh();

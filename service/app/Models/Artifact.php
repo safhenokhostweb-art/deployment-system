@@ -28,6 +28,7 @@ class Artifact extends Model
         'public_id',
         'project_id',
         'release_id',
+        'publish_job_id',
         'commit_hash',
         'branch',
         'checksum_sha256',
@@ -35,6 +36,9 @@ class Artifact extends Model
         'required_paths',
         'disk_path',
         'status',
+        'semantic_status',
+        'semantic_verified_at',
+        'semantic_failure',
         'uploaded_by',
         'failure_message',
         'expires_at',
@@ -46,6 +50,7 @@ class Artifact extends Model
             'expires_at' => 'datetime',
             'size_bytes' => 'integer',
             'required_paths' => 'array',
+            'semantic_verified_at' => 'datetime',
         ];
     }
 
@@ -64,6 +69,11 @@ class Artifact extends Model
     public function release(): BelongsTo
     {
         return $this->belongsTo(Release::class);
+    }
+
+    public function publishJob(): BelongsTo
+    {
+        return $this->belongsTo(PublishJob::class);
     }
 
     /**

@@ -12,11 +12,33 @@ use Illuminate\Database\Eloquent\Model;
  */
 class WebhookDelivery extends Model
 {
-    public const UPDATED_AT = null;
+    public const STATUS_ACCEPTED = 'accepted';
+    public const STATUS_PENDING = 'pending';
+    public const STATUS_PROCESSING = 'processing';
+    public const STATUS_PROCESSED = 'processed';
+    public const STATUS_FAILED = 'failed';
 
     protected $fillable = [
         'delivery_id',
         'project_id',
         'event',
+        'status',
+        'commit_hash',
+        'branch',
+        'dispatched_at',
+        'processing_at',
+        'processed_at',
+        'failed_at',
+        'failure_message',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            'dispatched_at' => 'datetime',
+            'processing_at' => 'datetime',
+            'processed_at' => 'datetime',
+            'failed_at' => 'datetime',
+        ];
+    }
 }

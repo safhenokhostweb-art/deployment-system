@@ -6,6 +6,7 @@ use App\Models\AuditLogEntry;
 use App\Models\Project;
 use App\Models\PublishJob;
 use App\Models\Release;
+use App\Models\WebhookDelivery;
 use App\Services\Publish\AuthoritativeBuildAgentResolver;
 use App\Services\Publish\PublishJobService;
 use App\Services\Releases\ReleaseGitFactsResolver;
@@ -43,6 +44,7 @@ class ProcessGitHubWebhookPush implements ShouldQueue
         public readonly string $commitHash,
         public readonly string $branch,
         public readonly ?string $pusher,
+        public readonly ?int $webhookDeliveryId = null,
     ) {
     }
 
@@ -53,6 +55,13 @@ class ProcessGitHubWebhookPush implements ShouldQueue
         PublishJobService $publishJobs,
     ): void
     {
+        if ($this->webhookDeliveryId !== null) {
+            WebhookDelivery::whereKey($this->webhookDeliveryId)->update([
+                'status' => WebhookDelivery::STATUS_PROCESSING,
+                'processing_at' => now(),
+                'failure_message' => null,
+            ]);
+        }
         // A branch advance prepares a Release; it never creates a production
         // Deployment. Deployment remains an explicit operator-confirmed act.
         $commitHash = strtolower($this->commitHash);
@@ -85,17 +94,7 @@ class ProcessGitHubWebhookPush implements ShouldQueue
         }
 
         if ($release->status !== Release::STATUS_AWAITING_ARTIFACT || ! $this->project->requires_complete_artifact) {
-            return;
-        }
-        $existingBuild = PublishJob::query()
-            ->where('project_id', $this->project->id)
-            ->where('action', PublishJob::ACTION_BUILD_ARTIFACT)
-            ->where('reviewed_head_sha', strtolower($this->commitHash))
-            ->whereNotIn('status', [PublishJob::STATUS_FAILED, PublishJob::STATUS_TIMED_OUT, PublishJob::STATUS_ABANDONED])
-            ->first();
-        if ($existingBuild !== null) {
-            $existingBuild->update(['release_id' => $release->id]);
-            $releases->markArtifactBuilding($release);
+            $this->markDeliveryProcessed();
             return;
         }
         try {
@@ -106,17 +105,26 @@ class ProcessGitHubWebhookPush implements ShouldQueue
                 strtolower($this->commitHash),
                 $this->branch,
                 'system:release-orchestrator',
+                $release,
             );
-            $job->update(['release_id' => $release->id]);
             $releases->markArtifactBuilding($release);
         } catch (HttpExceptionInterface) {
             // No valid build agent is a visible awaiting_artifact state. The
             // dashboard offers remediation; it never falls back to a random agent.
         }
+
+        $this->markDeliveryProcessed();
     }
 
     public function failed(Throwable $exception): void
     {
+        if ($this->webhookDeliveryId !== null) {
+            WebhookDelivery::whereKey($this->webhookDeliveryId)->update([
+                'status' => WebhookDelivery::STATUS_FAILED,
+                'failed_at' => now(),
+                'failure_message' => mb_substr($exception->getMessage(), 0, 2000),
+            ]);
+        }
         AuditLogEntry::record(
             actorType: AuditLogEntry::ACTOR_SYSTEM,
             actorIdentifier: null,
@@ -129,5 +137,18 @@ class ProcessGitHubWebhookPush implements ShouldQueue
                 'error' => $exception->getMessage(),
             ],
         );
+    }
+
+    private function markDeliveryProcessed(): void
+    {
+        if ($this->webhookDeliveryId === null) {
+            return;
+        }
+        WebhookDelivery::whereKey($this->webhookDeliveryId)->update([
+            'status' => WebhookDelivery::STATUS_PROCESSED,
+            'processed_at' => now(),
+            'failed_at' => null,
+            'failure_message' => null,
+        ]);
     }
 }

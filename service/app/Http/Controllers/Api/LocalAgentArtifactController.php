@@ -7,6 +7,7 @@ use App\Models\Artifact;
 use App\Models\LocalAgent;
 use App\Models\LocalProjectMapping;
 use App\Models\Project;
+use App\Models\PublishJob;
 use App\Services\Deployment\Artifact\ArtifactService;
 use App\Services\Deployment\Artifact\ArtifactValidationException;
 use App\Services\Releases\ReleaseOrchestrator;
@@ -62,9 +63,24 @@ class LocalAgentArtifactController extends Controller
             // validator, so keep this rule as an array just like
             // ProjectController's application_root validation rule.
             'required_paths.*' => ['string', 'max:500', 'regex:/^(?!.*(?:^|\\/)\\.\\.(?:\\/|$))[A-Za-z0-9._\\/-]+$/'],
+            'publish_job_id' => 'nullable|string|uuid',
         ]);
 
         $project = $this->resolveMappedProject($agent, $validated['project_key']);
+        $job = null;
+        if (isset($validated['publish_job_id'])) {
+            $job = PublishJob::where('public_id', $validated['publish_job_id'])->firstOrFail();
+            $this->assertAssignedJob($job, $agent, $project, $validated['commit_hash'], $validated['branch']);
+        } else {
+            $assignedBuildExists = PublishJob::query()
+                ->where('project_id', $project->id)
+                ->where('action', PublishJob::ACTION_BUILD_ARTIFACT)
+                ->where('reviewed_head_sha', $validated['commit_hash'])
+                ->where('reviewed_branch', $validated['branch'])
+                ->whereIn('status', [PublishJob::STATUS_APPROVED, PublishJob::STATUS_RUNNING])
+                ->exists();
+            abort_if($assignedBuildExists, 422, 'publish_job_id is required for an assigned artifact build.');
+        }
 
         $artifact = $this->artifacts->createPending(
             project: $project,
@@ -74,7 +90,12 @@ class LocalAgentArtifactController extends Controller
             claimedSizeBytes: $validated['size_bytes'],
             uploadedBy: $agent->public_id,
             requiredPaths: $validated['required_paths'] ?? [],
+            publishJobId: $job?->id,
         );
+        if ($job !== null) {
+            abort_if($artifact->release_id !== null && $artifact->release_id !== $job->release_id, 409, 'Artifact is already bound to a different Release.');
+            $artifact->update(['release_id' => $job->release_id]);
+        }
 
         return response()->json(['status' => 'ok', 'artifact_id' => $artifact->public_id], 201);
     }
@@ -87,6 +108,9 @@ class LocalAgentArtifactController extends Controller
         $artifact = Artifact::where('public_id', $publicId)->firstOrFail();
         $this->resolveMappedProject($agent, $artifact->project->project_key);
         abort_unless($artifact->uploaded_by === $agent->public_id, 403, 'This artifact upload was not started by the authenticated Local Agent.');
+        if ($artifact->publishJob !== null) {
+            $this->assertAssignedJob($artifact->publishJob, $agent, $artifact->project, $artifact->commit_hash, $artifact->branch, allowSucceeded: true);
+        }
 
         try {
             $finalized = $this->artifacts->finalizeUpload(
@@ -123,5 +147,24 @@ class LocalAgentArtifactController extends Controller
         abort_unless($isMapped, 403, "This Local Agent is not mapped to project '{$projectKey}'.");
 
         return $project;
+    }
+
+    private function assertAssignedJob(PublishJob $job, LocalAgent $agent, Project $project, string $commitHash, string $branch, bool $allowSucceeded = false): void
+    {
+        abort_unless($job->local_agent_id === $agent->id, 403, 'This artifact PublishJob is assigned to a different Local Agent.');
+        abort_unless($job->project_id === $project->id, 422, 'Artifact project does not match its PublishJob.');
+        $statuses = [PublishJob::STATUS_RUNNING];
+        if ($allowSucceeded) {
+            $statuses[] = PublishJob::STATUS_SUCCEEDED;
+        }
+        abort_unless(in_array($job->status, $statuses, true), 409, 'Artifact PublishJob is not active.');
+        if ($job->action === PublishJob::ACTION_BUILD_ARTIFACT) {
+            abort_unless($job->release_id !== null, 422, 'Artifact build is not linked to a Release.');
+            abort_unless($job->reviewed_head_sha === $commitHash, 422, 'Artifact SHA does not match its PublishJob.');
+            abort_unless($job->reviewed_branch === $branch, 422, 'Artifact branch does not match its PublishJob.');
+            abort_unless($job->release?->commit_hash === $commitHash && $job->release?->branch === $branch, 422, 'Artifact provenance does not match its Release.');
+        } else {
+            abort_unless($job->action === PublishJob::ACTION_PUBLISH, 422, 'Artifact upload is not associated with a build-capable PublishJob.');
+        }
     }
 }

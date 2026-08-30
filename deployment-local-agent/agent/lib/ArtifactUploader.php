@@ -43,6 +43,7 @@ final class ArtifactUploader
         private readonly ?RetryPolicy $retryPolicy = null,
         /** Agent build that produced the artifact — written into the artifact's release manifest. */
         private readonly ?string $agentVersion = null,
+        private readonly ?string $agentId = null,
     ) {
     }
 
@@ -66,7 +67,7 @@ final class ArtifactUploader
     /**
      * @return array{succeeded: bool, message: string, failureCode: ?string}
      */
-    public function buildAndUploadRemoteCommit(string $projectKey, string $repositoryPath, string $repositoryUrl, string $remoteName, string $commitHash, string $branch, string $jobId, ?callable $onTick = null, string $applicationRoot = '.', array $dependencyContract = [], array $dependencyAllowlist = [], array $repositoryMappings = []): array
+    public function buildAndUploadRemoteCommit(string $projectKey, string $repositoryPath, string $repositoryUrl, string $remoteName, string $commitHash, string $branch, string $jobId, ?callable $onTick = null, string $applicationRoot = '.', array $dependencyContract = [], array $dependencyAllowlist = [], array $repositoryMappings = [], array $evidenceContract = []): array
     {
         return $this->buildAndUploadFromPreparedSource(
             $projectKey,
@@ -77,6 +78,7 @@ final class ArtifactUploader
             fn (BuildWorkspace $workspace) => $this->sourcePreparer->prepareRemoteCommit($workspace, $repositoryPath, $repositoryUrl, $remoteName, $branch, $commitHash, $onTick, $dependencyContract, $dependencyAllowlist, $repositoryMappings),
             $onTick,
             $applicationRoot,
+            $evidenceContract,
         );
     }
 
@@ -84,7 +86,7 @@ final class ArtifactUploader
      * @param callable(BuildWorkspace): array{commitTimestamp: int} $prepareSource
      * @return array{succeeded: bool, message: string, failureCode: ?string}
      */
-    private function buildAndUploadFromPreparedSource(string $projectKey, string $repositoryPath, string $commitHash, string $branch, string $jobId, callable $prepareSource, ?callable $onTick = null, string $applicationRoot = '.'): array
+    private function buildAndUploadFromPreparedSource(string $projectKey, string $repositoryPath, string $commitHash, string $branch, string $jobId, callable $prepareSource, ?callable $onTick = null, string $applicationRoot = '.', array $evidenceContract = []): array
     {
         BuildWorkspace::pruneStale($this->workspaceBaseDir, $this->workspaceTtlSeconds, $this->logger);
 
@@ -96,6 +98,14 @@ final class ArtifactUploader
             $workspace = BuildWorkspace::create($this->workspaceBaseDir, $projectKey, $jobId);
             $prepared = $prepareSource($workspace);
             $this->logger->info("Artifact {$jobId}: workspace preparation completed.");
+            $evidence = null;
+            if ($evidenceContract !== []) {
+                if ($this->agentId === null || $this->agentVersion === null) {
+                    throw new LocalBuildFailedException('artifact_build_failed', 'Agent identity/version is unavailable for required release evidence.');
+                }
+                $evidence = new ExactCommitEvidence($evidenceContract, $projectKey, $jobId, $commitHash, $branch, $this->agentId, $this->agentVersion);
+                $evidence->verifySource($workspace, $commitHash);
+            }
 
             $applicationDirectory = ApplicationRoot::resolve($workspace->projectDir(), $this->buildProfiles[$projectKey]['application_root'] ?? $applicationRoot);
             $this->logger->info("Artifact {$jobId}: local build started.");
@@ -121,6 +131,7 @@ final class ArtifactUploader
                 ],
             );
             $archivePath = $archive['path'];
+            $evidence?->verifyBuildAndManifest($applicationDirectory . '/.deployment/release-manifest.json', $buildResult);
             $this->logger->info("Artifact {$jobId}: artifact creation completed.");
 
             $createResponse = $this->retryHub(fn () => $this->client->request('POST', '/api/local-agent/artifacts', [
@@ -130,6 +141,7 @@ final class ArtifactUploader
                 'checksum_sha256' => $archive['checksum'],
                 'size_bytes' => $archive['size'],
                 'required_paths' => $archive['requiredPaths'],
+                'publish_job_id' => $jobId,
             ]));
 
             if ($createResponse['status'] !== 201) {
@@ -175,7 +187,7 @@ final class ArtifactUploader
             $this->logger->info("Artifact {$jobId}: upload completed.");
             $this->logger->info("Artifact uploaded for commit {$commitHash} ({$archive['size']} bytes, checksum {$archive['checksum']}).");
 
-            return ['succeeded' => true, 'message' => "Uploaded ({$archive['size']} bytes).", 'failureCode' => null];
+            return ['succeeded' => true, 'message' => "Uploaded ({$archive['size']} bytes).", 'failureCode' => null, 'evidence' => $evidence?->finish()];
         } catch (LocalBuildFailedException $e) {
             $this->logger->error("Local build/artifact failed for commit {$commitHash} [{$e->failureCode}]: " . $e->getMessage());
 

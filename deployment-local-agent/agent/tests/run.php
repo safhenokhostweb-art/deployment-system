@@ -37,6 +37,8 @@ $preparer = (string) file_get_contents(__DIR__ . '/../lib/WorkspaceSourcePrepare
 $uploader = (string) file_get_contents(__DIR__ . '/../lib/ArtifactUploader.php');
 $agent = (string) file_get_contents(__DIR__ . '/../agent.php');
 $buildWorkspace = (string) file_get_contents(__DIR__ . '/../lib/BuildWorkspace.php');
+$evidence = (string) file_get_contents(__DIR__ . '/../lib/ExactCommitEvidence.php');
+$artifactUploader = (string) file_get_contents(__DIR__ . '/../lib/ArtifactUploader.php');
 
 // --- Root cause: the wired-up build_artifact path must be the safe
 // fetch-and-verify-then-isolated-checkout method, never the strict
@@ -87,6 +89,15 @@ check('the isolated workspace is a fresh git init with its own origin, never a c
 
 // --- Concurrency: every build gets its own isolated workspace keyed by job id.
 check('every build gets a fresh, job-keyed isolated workspace so concurrent builds cannot collide', str_contains($buildWorkspace, 'function create(string $baseDir, string $projectKey, string $jobId)'), $failures, $passCount);
+
+// Exact-commit release evidence is Hub-issued, identity-bound, and collected
+// only from that isolated workspace before dependencies can affect the scan.
+check('Hub evidence contract is passed into the remote exact-commit build path', str_contains($agent, "\$job['evidence_contract']") && str_contains($agent, '$evidenceContract'), $failures, $passCount);
+check('evidence contract binds project, release job, SHA, branch, and Agent identity', str_contains($evidence, "\$contract['project_key']") && str_contains($evidence, "\$contract['release_id']") && str_contains($evidence, "\$contract['publish_job_id']") && str_contains($evidence, "\$contract['commit_sha']") && str_contains($evidence, "\$contract['branch']") && str_contains($evidence, "\$contract['agent_id']"), $failures, $passCount);
+check('unknown or missing required evidence checks fail closed', str_contains($evidence, 'missing or unsupported required checks'), $failures, $passCount);
+check('PHP syntax evidence scans the isolated project directory and excludes installed dependencies', str_contains($evidence, '$workspace->projectDir()') && str_contains($evidence, "['.git', 'vendor', 'node_modules']") && str_contains($evidence, 'TOKEN_PARSE'), $failures, $passCount);
+check('artifact metadata upload is bound to the claimed PublishJob', str_contains($artifactUploader, "'publish_job_id' => \$jobId"), $failures, $passCount);
+check('successful build report returns deterministic structured evidence', str_contains($artifactUploader, "'evidence' => \$evidence?->finish()") && str_contains($evidence, "'evidence_digest'"), $failures, $passCount);
 
 echo "\n";
 foreach ($failures as $failure) {

@@ -63,7 +63,7 @@ class ReleaseOrchestratorTest extends TestCase
             'release_id' => null,
         ]);
 
-        $release = app(ReleaseOrchestrator::class)->createForCommit($project, $commitHash, 'main', 'publish');
+        $release = app(ReleaseOrchestrator::class)->createForCommit($project, $commitHash, 'main', 'project_contract', ['release_ready' => true]);
 
         $this->assertSame(Release::STATUS_READY, $release->status);
         $this->assertTrue($release->isReady());

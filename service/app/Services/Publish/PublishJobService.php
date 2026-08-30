@@ -13,8 +13,12 @@ use App\Models\LocalChangeDetectionJob;
 use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use App\Models\PublishJob;
+use App\Models\Release;
 use App\Services\Deployment\DeploymentDispatcher;
+use App\Services\Releases\ReleaseEvidenceService;
+use App\Services\Releases\ReleaseOrchestrator;
 use App\Services\Security\SecretRedactor;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -39,6 +43,8 @@ class PublishJobService
         private readonly SecretRedactor $redactor,
         private readonly DeploymentDispatcher $deployments,
         private readonly AuthoritativeBuildAgentResolver $buildAgents,
+        private readonly ReleaseEvidenceService $releaseEvidence,
+        private readonly ReleaseOrchestrator $releases,
     ) {
     }
 
@@ -70,14 +76,22 @@ class PublishJobService
         return $job;
     }
 
-    public function queueArtifactBuild(LocalAgent $localAgent, Project $project, string $commitHash, string $branch, string $requestedBy): PublishJob
+    public function queueArtifactBuild(LocalAgent $localAgent, Project $project, string $commitHash, string $branch, string $requestedBy, ?Release $release = null): PublishJob
     {
         abort_unless(preg_match('/^[0-9a-f]{40}$/', $commitHash) === 1, 422, 'Artifact build requires a valid 40-character commit SHA.');
         abort_unless($branch !== '', 422, 'Artifact build requires a branch.');
         $mapping = $this->buildAgents->resolve($project, $branch);
         abort_unless($mapping->local_agent_id === $localAgent->id, 409, 'Artifact builds must use the project authoritative production build Agent.');
+        $release ??= Release::query()
+            ->where('project_id', $project->id)
+            ->where('commit_hash', $commitHash)
+            ->where('branch', $branch)
+            ->first();
 
-        return DB::transaction(function () use ($localAgent, $project, $commitHash, $branch, $requestedBy): PublishJob {
+        $activeBuildKey = "artifact:{$project->id}:{$commitHash}";
+
+        try {
+            $job = DB::transaction(function () use ($localAgent, $project, $commitHash, $branch, $requestedBy, $release, $activeBuildKey): PublishJob {
             // Concurrency: a build for this exact project+commit may already
             // be in flight (a double click, a webhook-triggered auto-build,
             // or a racing request) — reuse it instead of racing the same
@@ -92,12 +106,20 @@ class PublishJobService
                 ->lockForUpdate()
                 ->first();
             if ($existingBuild !== null) {
+                if ($release !== null && ($existingBuild->release_id === null || $existingBuild->evidence_contract === null)) {
+                    abort_if($existingBuild->release_id !== null && $existingBuild->release_id !== $release->id, 409, 'Active artifact build belongs to a different Release.');
+                    $existingBuild->release()->associate($release);
+                    $existingBuild->evidence_contract = $this->releaseEvidence->issue($existingBuild, $release, $localAgent);
+                    $existingBuild->save();
+                }
                 return $existingBuild;
             }
 
             $job = PublishJob::create([
                 'local_agent_id' => $localAgent->id,
                 'project_id' => $project->id,
+                'release_id' => $release?->id,
+                'active_build_key' => $activeBuildKey,
                 'action' => PublishJob::ACTION_BUILD_ARTIFACT,
                 'status' => PublishJob::STATUS_APPROVED,
                 'requested_by' => $requestedBy,
@@ -107,6 +129,10 @@ class PublishJobService
                 'reviewed_branch' => $branch,
                 'reviewed_working_tree_clean' => true,
             ]);
+
+            if ($release !== null) {
+                $job->update(['evidence_contract' => $this->releaseEvidence->issue($job, $release, $localAgent)]);
+            }
 
             AuditLogEntry::record(
                 actorType: AuditLogEntry::ACTOR_USER,
@@ -118,7 +144,21 @@ class PublishJobService
             );
 
             return $job;
-        });
+            });
+            if ($release !== null) {
+                $this->releases->markArtifactBuilding($release);
+            }
+            return $job;
+        } catch (QueryException $e) {
+            $existing = PublishJob::query()->where('active_build_key', $activeBuildKey)->first();
+            if ($existing !== null) {
+                if ($release !== null) {
+                    $this->releases->markArtifactBuilding($release);
+                }
+                return $existing;
+            }
+            throw $e;
+        }
     }
 
     /**
@@ -624,6 +664,20 @@ class PublishJobService
         if ($job->action === PublishJob::ACTION_BUILD_ARTIFACT) {
             abort_unless($commitHash !== null && hash_equals((string) $job->reviewed_head_sha, $commitHash), 422, 'An artifact build job must report the requested commit exactly.');
 
+            if ($job->release_id !== null) {
+                abort_unless($job->evidence_verified_at !== null, 422, 'A release-linked artifact build cannot succeed without validated exact-commit evidence.');
+                $verifiedArtifact = Artifact::query()
+                    ->where('publish_job_id', $job->id)
+                    ->where('release_id', $job->release_id)
+                    ->where('project_id', $job->project_id)
+                    ->where('commit_hash', $commitHash)
+                    ->where('branch', $job->reviewed_branch)
+                    ->where('status', Artifact::STATUS_AVAILABLE)
+                    ->where('semantic_status', 'verified')
+                    ->first();
+                abort_if($verifiedArtifact === null, 409, 'The release build cannot succeed until its exact job-bound Artifact is semantically verified.');
+            }
+
             if ($job->deployment_request !== null) {
                 $artifact = Artifact::query()
                     ->where('project_id', $job->project_id)
@@ -640,6 +694,7 @@ class PublishJobService
 
         $job->update([
             'status' => PublishJob::STATUS_SUCCEEDED,
+            'active_build_key' => null,
             'result_commit_hash' => $commitHash,
             'output' => $this->redactor->redact($output),
             'error_message' => null,
@@ -672,6 +727,10 @@ class PublishJobService
         $this->bridgeNoSourceChangeDeployment($job);
 
         event(new PublishJobSucceeded($job->refresh()));
+
+        if ($job->action === PublishJob::ACTION_BUILD_ARTIFACT && $job->release_id !== null) {
+            $this->releases->syncArtifactState($job->release);
+        }
 
         return $job;
     }
@@ -806,6 +865,7 @@ class PublishJobService
 
         $job->update([
             'status' => $status,
+            'active_build_key' => null,
             'error_message' => $this->redactor->redact($message),
             'output' => $output !== null ? $this->redactor->redact($output) : $job->output,
             'failure_code' => $failureCode,
@@ -825,6 +885,8 @@ class PublishJobService
 
         event(new PublishJobFailed($job->refresh()));
 
+        $this->syncFailedBuildRelease($job, $status, $failureCode, $message);
+
         return $job;
     }
 
@@ -842,6 +904,7 @@ class PublishJobService
 
         $job->update([
             'status' => PublishJob::STATUS_ABANDONED,
+            'active_build_key' => null,
             'error_message' => $message,
             'failure_code' => $failureCode,
             'recovery_metadata' => $recoveryMetadata,
@@ -860,6 +923,8 @@ class PublishJobService
         );
 
         event(new PublishJobAbandoned($job->refresh()));
+
+        $this->syncFailedBuildRelease($job, PublishJob::STATUS_ABANDONED, $failureCode, $message);
 
         return $job;
     }
@@ -882,6 +947,7 @@ class PublishJobService
 
         $job->update([
             'status' => PublishJob::STATUS_TIMED_OUT,
+            'active_build_key' => null,
             'error_message' => $message,
             'failure_code' => $failureCode,
             'recovery_metadata' => $recoveryMetadata,
@@ -905,7 +971,21 @@ class PublishJobService
         // deserves the same alert as a plain failure.
         event(new PublishJobFailed($job->refresh()));
 
+        $this->syncFailedBuildRelease($job, PublishJob::STATUS_TIMED_OUT, $failureCode, $message);
+
         return $job;
+    }
+
+    private function syncFailedBuildRelease(PublishJob $job, string $status, ?string $failureCode, string $message): void
+    {
+        if ($job->action !== PublishJob::ACTION_BUILD_ARTIFACT || $job->release_id === null) {
+            return;
+        }
+        $this->releases->markFailed(
+            $job->release,
+            'artifact_build_' . ($failureCode ?: $status),
+            $this->redactor->redact($message),
+        );
     }
 
     /**
