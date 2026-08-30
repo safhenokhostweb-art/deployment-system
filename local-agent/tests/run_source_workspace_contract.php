@@ -139,6 +139,144 @@ try {
         $forbidden->cleanup();
     }
 
+    // ============================================================
+    // Regression (production incident): a Composer "path" repository must
+    // be validated and resolved against the FULLY PREPARED exact-commit
+    // build source (the isolated checkout in the BuildWorkspace), never
+    // against an older, stale persistent source workspace HEAD — even
+    // when that persistent workspace is clean and correctly remoted/
+    // branched. Covers scenarios A-F from the audit.
+    // ============================================================
+    $pkgSeed = $root . '/pkg-seed';
+    $pkgRemote = $root . '/pkg-remote.git';
+    $pkgSource = $root . '/pkg-authoritative-source';
+    mkdir($pkgSeed, 0700, true);
+    $run(['git', 'init', '--initial-branch=main'], $pkgSeed);
+    $run(['git', 'config', 'user.email', 'agent@example.test'], $pkgSeed);
+    $run(['git', 'config', 'user.name', 'Deployment Agent Test'], $pkgSeed);
+    file_put_contents($pkgSeed . '/composer.json', json_encode(['name' => 'fixture/app'], JSON_PRETTY_PRINT));
+    $run(['git', 'add', '-A'], $pkgSeed);
+    $run(['git', 'commit', '-m', 'old commit, no path repository yet'], $pkgSeed);
+    $pkgCommitOld = $git->lastCommitHash($pkgSeed);
+
+    $run(['git', 'clone', '--bare', $pkgSeed, $pkgRemote], $root);
+    $run(['git', 'clone', '--branch', 'main', $pkgRemote, $pkgSource], $root);
+    $run(['git', 'remote', 'add', 'publish', $pkgRemote], $pkgSeed);
+
+    // Advance the remote past the point the persistent source was cloned
+    // at: the new commit introduces a Composer "path" repository nested
+    // INSIDE the same repository tree (a monorepo package layout) — never
+    // a sibling directory outside it. The persistent workspace above is
+    // never touched again, so it structurally cannot have this directory.
+    mkdir($pkgSeed . '/packages/theme-runtime/src', 0700, true);
+    file_put_contents($pkgSeed . '/packages/theme-runtime/composer.json', json_encode(['name' => 'fixture/theme-runtime'], JSON_PRETTY_PRINT));
+    file_put_contents($pkgSeed . '/packages/theme-runtime/src/Widget.php', "<?php\nclass Widget {}\n");
+    file_put_contents($pkgSeed . '/composer.json', json_encode([
+        'name' => 'fixture/app',
+        'repositories' => [['type' => 'path', 'url' => 'packages/theme-runtime']],
+        'require' => ['fixture/theme-runtime' => '*'],
+        'minimum-stability' => 'dev',
+    ], JSON_PRETTY_PRINT));
+    $run(['git', 'add', '-A'], $pkgSeed);
+    $run(['git', 'commit', '-m', 'introduce theme-runtime path repository'], $pkgSeed);
+    $pkgCommitNew = $git->lastCommitHash($pkgSeed);
+    $run(['git', 'push', 'publish', 'main'], $pkgSeed);
+
+    $check('regression fixture: persistent workspace is stale and predates the path repository', $git->lastCommitHash($pkgSource) === $pkgCommitOld && !is_dir($pkgSource . '/packages/theme-runtime'));
+
+    // A: persistent workspace is old and lacks the path package; the
+    // target commit introduces it. Build must succeed from the exact
+    // target checkout.
+    $pkgWorkspace = BuildWorkspace::create($root . '/builds', 'saas-platform', 'stale-path-repo');
+    $pkgThrew = null;
+    try {
+        $preparer->prepareRemoteCommit($pkgWorkspace, $pkgSource, $pkgRemote, 'origin', 'main', $pkgCommitNew);
+    } catch (\Throwable $e) {
+        $pkgThrew = $e;
+    }
+    $check('A: build succeeds from the exact target commit even though the persistent workspace never advanced', $pkgThrew === null);
+    if ($pkgThrew !== null) {
+        fwrite(STDERR, 'Unexpected failure in scenario A: ' . $pkgThrew->getMessage() . "\n");
+    }
+    $check('A: the path repository is materialized in the isolated build workspace from the exact target commit', is_file($pkgWorkspace->projectDir() . '/packages/theme-runtime/src/Widget.php'));
+    $check('A: the isolated workspace content matches the exact target commit', str_contains((string) file_get_contents($pkgWorkspace->projectDir() . '/packages/theme-runtime/src/Widget.php'), 'class Widget'));
+
+    // E: the persistent source workspace is never required to track remote
+    // HEAD — it is completely untouched by a successful build.
+    $check('E: persistent workspace HEAD is unchanged after a successful build', $git->lastCommitHash($pkgSource) === $pkgCommitOld);
+    $check('E: persistent workspace working tree still lacks the package the build did not need from it', !is_dir($pkgSource . '/packages/theme-runtime'));
+    $check('E: persistent workspace remains clean (no operator git pull/reset/checkout ever required)', $git->changedFiles($pkgSource) === []);
+
+    $pkgWorkspace->cleanup();
+
+    // B: the TARGET commit itself genuinely lacks the declared path
+    // repository (not tracked in-repo, no external sibling either) — must
+    // fail closed, never silently skipped.
+    file_put_contents($pkgSeed . '/composer.json', json_encode([
+        'name' => 'fixture/app',
+        'repositories' => [['type' => 'path', 'url' => 'packages/does-not-exist']],
+        'require' => ['fixture/missing' => '*'],
+        'minimum-stability' => 'dev',
+    ], JSON_PRETTY_PRINT));
+    $run(['git', 'add', '-A'], $pkgSeed);
+    $run(['git', 'commit', '-m', 'declare a path repository that genuinely does not exist'], $pkgSeed);
+    $pkgCommitMissing = $git->lastCommitHash($pkgSeed);
+    $run(['git', 'push', 'publish', 'main'], $pkgSeed);
+
+    $missingWorkspace = BuildWorkspace::create($root . '/builds', 'saas-platform', 'missing-path-repo');
+    $expectPrepareFailure(
+        fn () => $preparer->prepareRemoteCommit($missingWorkspace, $pkgSource, $pkgRemote, 'origin', 'main', $pkgCommitMissing),
+        "declares a path repository ('packages/does-not-exist') that does not exist",
+    );
+    $missingWorkspace->cleanup();
+
+    // C: the requested target SHA cannot be resolved at all (never pushed,
+    // does not exist anywhere) — must fail closed before any Composer/
+    // build step ever runs.
+    $bogusCommit = str_repeat('a', 40);
+    $bogusWorkspace = BuildWorkspace::create($root . '/builds', 'saas-platform', 'bogus-sha');
+    $bogusThrew = null;
+    try {
+        $preparer->prepareRemoteCommit($bogusWorkspace, $pkgSource, $pkgRemote, 'origin', 'main', $bogusCommit);
+    } catch (\Throwable $e) {
+        $bogusThrew = $e;
+    }
+    $check('C: an unresolvable target SHA fails closed before any build step', $bogusThrew !== null && str_contains($bogusThrew->getMessage(), 'is not present'));
+    $check('C: the isolated workspace for an unresolvable commit is never populated with project files', !is_file($bogusWorkspace->projectDir() . '/composer.json'));
+    $bogusWorkspace->cleanup();
+
+    // D: the exact-commit checkout resolving to the WRONG SHA must fail
+    // closed. Exercised directly against WorkspaceSourcePreparer's own
+    // post-checkout self-verification (real repo, real checkout, a
+    // deliberately wrong expected SHA) since a `git checkout --force`
+    // landing on the wrong commit is not reproducible through real git
+    // behavior.
+    $verifyMethod = new ReflectionMethod(WorkspaceSourcePreparer::class, 'assertCheckedOutAtExactCommit');
+    $verifyMethod->setAccessible(true);
+    $check('D: checkout-verification passes when the checked-out HEAD matches the expected commit', (function () use ($verifyMethod, $preparer, $pkgSource, $pkgCommitOld) {
+        try {
+            $verifyMethod->invoke($preparer, $pkgSource, $pkgCommitOld);
+
+            return true;
+        } catch (\Throwable) {
+            return false;
+        }
+    })());
+    $check('D: checkout-verification fails closed when the checked-out HEAD does not match the expected commit', (function () use ($verifyMethod, $preparer, $pkgSource) {
+        try {
+            $verifyMethod->invoke($preparer, $pkgSource, str_repeat('b', 40));
+
+            return false;
+        } catch (LocalBuildFailedException $e) {
+            return $e->failureCode === 'local_workspace_prepare_failed' && str_contains($e->getMessage(), 'checkout mismatch');
+        }
+    })());
+
+    // F: no commit/push is ever issued by the Local Agent build pipeline.
+    $sourceCode = (string) file_get_contents(__DIR__ . '/../lib/WorkspaceSourcePreparer.php');
+    $check('F: WorkspaceSourcePreparer never issues a git commit', preg_match("/'git',\s*'commit'/", $sourceCode) === 0);
+    $check('F: WorkspaceSourcePreparer never issues a git push', preg_match("/'git',\s*'push'/", $sourceCode) === 0);
+
     $mirror = __DIR__ . '/../../deployment-local-agent/agent/lib/WorkspaceSourcePreparer.php';
     $check('shipped WorkspaceSourcePreparer mirrors source implementation', hash_file('sha256', __DIR__ . '/../lib/WorkspaceSourcePreparer.php') === hash_file('sha256', $mirror));
 } finally {

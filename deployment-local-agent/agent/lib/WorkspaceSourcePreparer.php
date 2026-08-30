@@ -23,11 +23,14 @@ namespace LocalAgent;
  *    workspace's project directory (SafeFilesystem — ZIP-Slip guarded).
  * 3. Read composer.json FROM THE ARCHIVED COPY (not the live working
  *    tree — the exact same commit-fidelity reasoning as step 2) for any
- *    `"repositories": [{"type": "path", "url": "..."}]` entries, and
- *    copy each referenced directory from the real, live location (path
- *    repository URLs are resolved relative to the real project
- *    directory, since that's the only place they actually exist) into
- *    the workspace at the SAME relative position — see
+ *    `"repositories": [{"type": "path", "url": "..."}]` entries. A
+ *    declared path that resolves to somewhere already inside the
+ *    checked-out tree (a monorepo package tracked by this same commit,
+ *    e.g. `packages/*`) needs nothing further — the checkout above
+ *    already put it there, at the exact requested commit. Only a path
+ *    that resolves OUTSIDE the checked-out tree (a genuinely external
+ *    sibling, never tracked by this repository) is copied in from its
+ *    real, live location next to the persistent source workspace — see
  *    BuildWorkspace::resolvePathDependencyTarget(). Generic: works for
  *    however many path repositories a project declares, wherever they
  *    point, without hardcoding any project's own package names or paths.
@@ -83,11 +86,7 @@ final class WorkspaceSourcePreparer
         $this->runOrFail(['git', 'cat-file', '-e', "{$commitHash}^{commit}"], $workspace->projectDir(), 30, 'validating the requested commit', $onTick);
         $this->runOrFail(['git', 'merge-base', '--is-ancestor', $commitHash, "refs/remotes/origin/{$branch}"], $workspace->projectDir(), 30, 'validating commit reachability', $onTick);
         $this->runOrFail(['git', 'checkout', '--detach', '--force', $commitHash], $workspace->projectDir(), 60, 'checking out the exact commit', $onTick);
-
-        $checkedOut = $this->git->lastCommitHash($workspace->projectDir());
-        if (!hash_equals($commitHash, $checkedOut)) {
-            throw new LocalBuildFailedException('local_workspace_prepare_failed', "Workspace checkout mismatch: expected {$commitHash}, got {$checkedOut}.");
-        }
+        $this->assertCheckedOutAtExactCommit($workspace->projectDir(), $commitHash);
 
         $dependencyLocks = [];
         $pinningRequired = ($dependencyContract['required'] ?? false) === true;
@@ -110,6 +109,22 @@ final class WorkspaceSourcePreparer
         }
 
         return ['commitTimestamp' => $this->commitTimestamp($workspace->projectDir(), $commitHash), 'dependencyLocks' => $dependencyLocks];
+    }
+
+    /**
+     * Last self-consistency check before anything ever reads composer.json
+     * or copies a path repository out of the isolated workspace: proves
+     * the checkout that just ran actually landed on the exact requested
+     * commit, not merely "some commit". Fails closed rather than letting a
+     * silently wrong checkout (e.g. a `git checkout` that partially failed
+     * without a non-zero exit code) build an artifact from the wrong code.
+     */
+    private function assertCheckedOutAtExactCommit(string $projectDir, string $commitHash): void
+    {
+        $checkedOut = $this->git->lastCommitHash($projectDir);
+        if (!hash_equals($commitHash, $checkedOut)) {
+            throw new LocalBuildFailedException('local_workspace_prepare_failed', "Workspace checkout mismatch: expected {$commitHash}, got {$checkedOut}.");
+        }
     }
 
     private function assertTrustedPersistentWorkspace(string $repositoryPath, string $repositoryUrl, string $remoteName, string $branch): void
@@ -327,6 +342,25 @@ final class WorkspaceSourcePreparer
             );
         }
 
+        $target = $workspace->resolvePathDependencyTarget($url);
+
+        // A path repository declared relative to composer.json (no `..`
+        // escaping the project root) may live INSIDE the same Git tree as
+        // the rest of the project (a monorepo package under e.g.
+        // packages/*) rather than in a genuinely external sibling
+        // directory. When that's the case, the exact-commit checkout
+        // already placed it at this exact target as part of the commit
+        // that was just verified and checked out above — it is already a
+        // faithful, self-contained copy of the requested commit, so there
+        // is nothing to copy and nothing to validate against any other
+        // location. Only a path repository that resolves OUTSIDE the
+        // checked-out tree (a real external sibling, never tracked by
+        // this commit) needs to be copied in from the live persistent
+        // source workspace.
+        if (is_dir($target)) {
+            return;
+        }
+
         $realSource = realpath(rtrim($repositoryPath, '\\/') . '/' . $url);
         if ($realSource === false || !is_dir($realSource)) {
             throw new LocalBuildFailedException(
@@ -335,7 +369,6 @@ final class WorkspaceSourcePreparer
             );
         }
 
-        $target = $workspace->resolvePathDependencyTarget($url);
         SafeFilesystem::copyRecursiveSafely($realSource, $realSource, $target);
     }
 
