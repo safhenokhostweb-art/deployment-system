@@ -7,6 +7,7 @@ use App\Models\Agent;
 use App\Models\Deployment;
 use App\Models\DeploymentLogEntry;
 use App\Models\Project;
+use App\Models\Release;
 use App\Models\User;
 use App\Services\Deployment\AgentJobService;
 use App\Services\Deployment\DeploymentDispatcher;
@@ -134,6 +135,16 @@ class DeploymentHttpHealthStateTest extends TestCase
         ]);
 
         $manual = app(DeploymentDispatcher::class)->createManual($project, str_repeat('1', 40), 'admin@example.test');
+        Release::query()->create([
+            'project_id' => $project->id,
+            'commit_hash' => str_repeat('2', 40),
+            'branch' => 'main',
+            'source' => 'admin_backfill',
+            'readiness_policy' => Release::READINESS_POLICY_LEGACY_FALLBACK,
+            'legacy_fallback_eligible_at' => now(),
+            'legacy_fallback_reason' => 'test_fixture_explicit_legacy_grant',
+            'legacy_fallback_eligible_by' => 'test-harness',
+        ]);
         $webhook = app(DeploymentDispatcher::class)->createFromWebhook($project, str_repeat('2', 40), 'main', 'github');
         $successful = Deployment::factory()->create([
             'project_id' => $project->id,

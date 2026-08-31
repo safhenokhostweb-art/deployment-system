@@ -8,6 +8,7 @@ use App\Models\Deployment;
 use App\Models\DeploymentTarget;
 use App\Models\Environment;
 use App\Models\Project;
+use App\Models\Release;
 use App\Models\User;
 use App\Services\Deployment\AgentTaskService;
 use App\Services\Deployment\DeploymentDispatcher;
@@ -44,6 +45,29 @@ class DeploymentDetailsTimelineTest extends TestCase
     }
 
     /**
+     * These tests exercise Deployment timeline/lifecycle stamping
+     * (started_at/finished_at/deployed_at, task claim/retry semantics) via
+     * createFromWebhook -- none of them are about authorization. Under the
+     * new Release contract that lifecycle is reachable only through an
+     * explicit, auditable LEGACY_FALLBACK grant, so each dispatch is given
+     * one for its exact project/commit/branch.
+     */
+    private function grantLegacyFallback(Project $project, string $commitHash, ?string $branch = null): Release
+    {
+        return Release::query()->firstOrCreate(
+            ['project_id' => $project->id, 'commit_hash' => $commitHash],
+            [
+                'branch' => $branch ?? $project->branch,
+                'source' => 'admin_backfill',
+                'readiness_policy' => Release::READINESS_POLICY_LEGACY_FALLBACK,
+                'legacy_fallback_eligible_at' => now(),
+                'legacy_fallback_reason' => 'test_fixture_explicit_legacy_grant',
+                'legacy_fallback_eligible_by' => 'test-harness',
+            ],
+        );
+    }
+
+    /**
      * The real production shape of the reported deployment: webhook-created,
      * human-approved, queued with one claimable task on the agent's server.
      *
@@ -59,6 +83,7 @@ class DeploymentDetailsTimelineTest extends TestCase
             'server_id' => $agent->server_id,
             'name' => 'web-01',
         ]);
+        $this->grantLegacyFallback($project, str_repeat('a', 40));
 
         $deployment = $this->dispatcher()->createFromWebhook($project, str_repeat('a', 40), $project->branch, 'octocat');
         $this->dispatcher()->approve($deployment, 'admin@example.test');
@@ -73,6 +98,7 @@ class DeploymentDetailsTimelineTest extends TestCase
         $project = Project::factory()->create(['auto_deploy' => false]);
         $environment = Environment::factory()->create(['project_id' => $project->id]);
         DeploymentTarget::factory()->create(['environment_id' => $environment->id]);
+        $this->grantLegacyFallback($project, str_repeat('a', 40));
 
         $deployment = $this->dispatcher()->createFromWebhook($project, str_repeat('a', 40), $project->branch, 'octocat');
 
@@ -108,6 +134,7 @@ class DeploymentDetailsTimelineTest extends TestCase
         $project = Project::factory()->create(['auto_deploy' => true]);
         $environment = Environment::factory()->create(['project_id' => $project->id]);
         DeploymentTarget::factory()->create(['environment_id' => $environment->id]);
+        $this->grantLegacyFallback($project, str_repeat('b', 40));
 
         $deployment = $this->dispatcher()->createFromWebhook($project, str_repeat('b', 40), $project->branch, 'octocat');
 
@@ -128,6 +155,7 @@ class DeploymentDetailsTimelineTest extends TestCase
         $environment = Environment::factory()->create(['project_id' => $project->id]);
         DeploymentTarget::factory()->create(['environment_id' => $environment->id, 'server_id' => $agent->server_id, 'name' => 'web-01']);
         DeploymentTarget::factory()->create(['environment_id' => $environment->id, 'server_id' => $agent->server_id, 'name' => 'web-02']);
+        $this->grantLegacyFallback($project, str_repeat('c', 40));
 
         $deployment = $this->dispatcher()->createFromWebhook($project, str_repeat('c', 40), $project->branch, 'octocat');
         $this->dispatcher()->approve($deployment, 'admin@example.test');
@@ -246,6 +274,7 @@ class DeploymentDetailsTimelineTest extends TestCase
         $environment = Environment::factory()->create(['project_id' => $project->id]);
         DeploymentTarget::factory()->create(['environment_id' => $environment->id, 'server_id' => $agent->server_id, 'name' => 'web-01']);
         DeploymentTarget::factory()->create(['environment_id' => $environment->id, 'server_id' => $agent->server_id, 'name' => 'web-02']);
+        $this->grantLegacyFallback($project, str_repeat('d', 40));
 
         $deployment = $this->dispatcher()->createFromWebhook($project, str_repeat('d', 40), $project->branch, 'octocat');
         $this->dispatcher()->approve($deployment, 'admin@example.test');
@@ -280,6 +309,7 @@ class DeploymentDetailsTimelineTest extends TestCase
         $project = Project::factory()->create(['auto_deploy' => false]);
         $environment = Environment::factory()->create(['project_id' => $project->id]);
         DeploymentTarget::factory()->create(['environment_id' => $environment->id, 'server_id' => $agent->server_id, 'name' => 'web-01']);
+        $this->grantLegacyFallback($project, str_repeat('e', 40));
 
         $deployment = $this->dispatcher()->createFromWebhook($project, str_repeat('e', 40), $project->branch, 'octocat');
         $this->dispatcher()->approve($deployment, 'admin@example.test');

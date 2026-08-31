@@ -50,7 +50,7 @@ class DeploymentDispatcher
 
     public function createFromWebhook(Project $project, string $commitHash, string $branch, ?string $pusher): Deployment|PublishJob
     {
-        $this->assertLegacyAutomaticDeploymentEligible($project, $commitHash, $branch, 'legacy_webhook_dispatch', $pusher ?? 'github');
+        $this->requireAutomaticDeploymentContract($project, $commitHash, $branch);
         $artifact = $this->artifacts->findMatching($project, $commitHash, $branch);
         if ($project->requires_complete_artifact && $artifact === null) {
             return $this->queueRequiredArtifactBuild($project, $commitHash, $branch, [
@@ -191,7 +191,7 @@ class DeploymentDispatcher
      */
     public function createFromPublish(Project $project, string $commitHash, string $branch, string $triggeredBy, ?int $publishJobId = null): Deployment|PublishJob
     {
-        $this->assertLegacyAutomaticDeploymentEligible($project, $commitHash, $branch, 'legacy_publish_bridge', $triggeredBy);
+        $this->requireAutomaticDeploymentContract($project, $commitHash, $branch);
         $artifact = $this->artifacts->findMatching($project, $commitHash, $branch);
         if ($project->requires_complete_artifact && $artifact === null) {
             return $this->queueRequiredArtifactBuild($project, $commitHash, $branch, [
@@ -234,12 +234,8 @@ class DeploymentDispatcher
             return null;
         }
 
-        $release = Release::query()
-            ->where('project_id', $job->project_id)
-            ->where('commit_hash', $job->reviewed_head_sha)
-            ->where('branch', $job->reviewed_branch)
-            ->first();
-        if ($release !== null && ! $release->isLegacyFallbackEligible()) {
+        $release = $this->resolveAutomaticDeploymentContract($job->project, (string) $job->reviewed_head_sha);
+        if ($release === null || $release->branch !== $job->reviewed_branch || ! $release->isLegacyFallbackEligible()) {
             $request['blocked_reason'] = 'explicit_confirm_required';
             $request['blocked_at'] = now()->toIso8601String();
             $job->update(['deployment_request' => $request]);
@@ -249,7 +245,7 @@ class DeploymentDispatcher
                 action: 'publish_job.legacy_deployment_request_blocked',
                 subjectType: PublishJob::class,
                 subjectId: $job->id,
-                metadata: ['release_id' => $release->id, 'reason' => 'explicit_confirm_required'],
+                metadata: ['release_id' => $release?->id, 'reason' => 'explicit_confirm_required'],
             );
 
             return null;
@@ -271,41 +267,42 @@ class DeploymentDispatcher
         return $deployment;
     }
 
-    private function assertLegacyAutomaticDeploymentEligible(Project $project, string $commitHash, string $branch, string $reason, string $actor): Release
+    /**
+     * Automatic webhook/publish compatibility is intentionally disjoint
+     * from the explicit-confirm path (Git/event -> Release -> trusted
+     * evidence -> exact Artifact -> READY -> explicit Confirm ->
+     * Deployment). auto_deploy alone is never sufficient authorization
+     * under that contract: only a pre-existing, EXPLICIT, complete legacy
+     * eligibility contract may proceed through this automatic surface.
+     * Absence of a Release is not a softer case than an exact-commit one
+     * -- both fail closed, identically, before any Deployment (or Release)
+     * is ever created.
+     */
+    private function requireAutomaticDeploymentContract(Project $project, string $commitHash, string $branch): Release
     {
-        return DB::transaction(function () use ($project, $commitHash, $branch, $reason, $actor): Release {
-            $release = Release::query()
-                ->where('project_id', $project->id)
-                ->where('commit_hash', $commitHash)
-                ->lockForUpdate()
-                ->first();
+        $release = $this->resolveAutomaticDeploymentContract($project, $commitHash);
 
-            if ($release === null) {
-                $release = Release::create([
-                    'project_id' => $project->id,
-                    'commit_hash' => $commitHash,
-                    'branch' => $branch,
-                    'status' => Release::STATUS_SOURCE_RECEIVED,
-                    'source' => 'legacy',
-                    'readiness_policy' => Release::READINESS_POLICY_LEGACY_FALLBACK,
-                    'legacy_fallback_eligible_at' => now(),
-                    'legacy_fallback_reason' => $reason,
-                    'legacy_fallback_eligible_by' => $actor,
-                ]);
-                AuditLogEntry::record(
-                    actorType: AuditLogEntry::ACTOR_SYSTEM,
-                    actorIdentifier: $actor,
-                    action: 'release.legacy_automatic_deployment_eligibility_created',
-                    subjectType: Release::class,
-                    subjectId: $release->id,
-                    metadata: ['reason' => $reason, 'commit_hash' => $commitHash, 'branch' => $branch],
-                );
-            }
+        abort_unless(
+            $release !== null && $release->branch === $branch && $release->isLegacyFallbackEligible(),
+            409,
+            'This Release requires explicit deployment confirmation.',
+        );
 
-            abort_unless($release->branch === $branch && $release->isLegacyFallbackEligible(), 409, 'This Release requires explicit deployment confirmation.');
+        return $release;
+    }
 
-            return $release;
-        });
+    /**
+     * Resolves the EXISTING explicit Release contract for this project and
+     * commit -- never creates one. Absence IS the fail-closed answer: an
+     * uncontracted commit must never be able to manufacture its own
+     * eligibility (exact-commit or legacy) merely by being looked up here.
+     */
+    private function resolveAutomaticDeploymentContract(Project $project, string $commitHash): ?Release
+    {
+        return Release::query()
+            ->where('project_id', $project->id)
+            ->where('commit_hash', $commitHash)
+            ->first();
     }
 
     public function approve(Deployment $deployment, string $approvedBy): Deployment

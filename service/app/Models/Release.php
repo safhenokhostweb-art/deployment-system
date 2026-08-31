@@ -89,8 +89,11 @@ class Release extends Model
     public function isLegacyFallbackEligible(): bool
     {
         return $this->readiness_policy === self::READINESS_POLICY_LEGACY_FALLBACK
+            && in_array($this->source, ['project_contract', 'admin_backfill', 'import', 'legacy'], true)
             && $this->legacy_fallback_eligible_at !== null
             && is_string($this->legacy_fallback_reason)
-            && $this->legacy_fallback_reason !== '';
+            && $this->legacy_fallback_reason !== ''
+            && is_string($this->legacy_fallback_eligible_by)
+            && $this->legacy_fallback_eligible_by !== '';
     }
 }

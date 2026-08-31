@@ -11,6 +11,7 @@ use App\Models\LocalAgent;
 use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use App\Models\PublishJob;
+use App\Models\Release;
 use App\Models\User;
 use App\Services\Deployment\DeploymentDispatcher;
 use App\Services\Publish\PublishJobService;
@@ -52,6 +53,32 @@ class PublishNoSourceChangeDeploymentTest extends TestCase
     }
 
     /**
+     * The no-source-change bridge dispatches through
+     * DeploymentDispatcher::createFromPublish(), which under the new
+     * Release contract requires an explicit, auditable LEGACY_FALLBACK
+     * grant (auto_deploy alone no longer suffices) -- these tests are
+     * about bridge/correlation/artifact-attachment mechanics, not
+     * authorization, so each dispatch is given one for its exact
+     * project/commit/branch. firstOrCreate() so a test that also dispatches
+     * a separate webhook deployment for the same commit can call this
+     * itself first without creating a duplicate row.
+     */
+    private function grantLegacyFallback(Project $project, string $commitHash, string $branch = 'main'): Release
+    {
+        return Release::query()->firstOrCreate(
+            ['project_id' => $project->id, 'commit_hash' => $commitHash],
+            [
+                'branch' => $branch,
+                'source' => 'admin_backfill',
+                'readiness_policy' => Release::READINESS_POLICY_LEGACY_FALLBACK,
+                'legacy_fallback_eligible_at' => now(),
+                'legacy_fallback_reason' => 'test_fixture_explicit_legacy_grant',
+                'legacy_fallback_eligible_by' => 'test-harness',
+            ],
+        );
+    }
+
+    /**
      * Runs the full no-source-change publish lifecycle to success: clean
      * status_check on the verified existing commit -> approved -> claimed ->
      * reported succeeded (no push). The matching AVAILABLE artifact is
@@ -65,6 +92,7 @@ class PublishNoSourceChangeDeploymentTest extends TestCase
             'remote_tracking_sha' => $commit,
             'working_tree_dirty' => false,
         ]);
+        $this->grantLegacyFallback($project, $commit);
 
         if ($withArtifact) {
             Artifact::factory()->physicallyAvailable()->create([
@@ -209,6 +237,7 @@ class PublishNoSourceChangeDeploymentTest extends TestCase
         $commit = str_repeat('a', 40);
 
         // A webhook deployment exists (or arrives) for the same commit.
+        $this->grantLegacyFallback($project, $commit);
         $webhookDeployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commit, 'main', 'dev@example.test');
 
         $job = $this->succeedNoSourceChangePublish($project, $agent, $commit);

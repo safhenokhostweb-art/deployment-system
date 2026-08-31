@@ -11,6 +11,7 @@ use App\Models\LocalAgent;
 use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use App\Models\PublishJob;
+use App\Models\Release;
 use App\Models\Server;
 use App\Models\Agent;
 use App\Services\Deployment\AgentJobService;
@@ -42,6 +43,32 @@ class ArtifactDeploymentLinkingTest extends TestCase
         Storage::fake('artifacts');
     }
 
+    /**
+     * These tests exercise DeploymentDispatcher's artifact-attachment
+     * mechanics (createFromWebhook's legacy/pending-approval lifecycle,
+     * approve()'s late-attach behavior) -- none of them are about
+     * authorization itself. Under the new Release contract that lifecycle
+     * is reachable only through an explicit, auditable LEGACY_FALLBACK
+     * grant (auto_deploy alone no longer suffices), so each test is given
+     * one for the exact project/commit/branch it dispatches -- never
+     * fabricated silently, always the full policy+source+reason+actor+
+     * timestamp contract Release::isLegacyFallbackEligible() requires.
+     */
+    private function grantLegacyFallback(Project $project, string $commitHash, string $branch = 'main'): Release
+    {
+        return Release::query()->firstOrCreate(
+            ['project_id' => $project->id, 'commit_hash' => $commitHash],
+            [
+                'branch' => $branch,
+                'source' => 'admin_backfill',
+                'readiness_policy' => Release::READINESS_POLICY_LEGACY_FALLBACK,
+                'legacy_fallback_eligible_at' => now(),
+                'legacy_fallback_reason' => 'test_fixture_explicit_legacy_grant',
+                'legacy_fallback_eligible_by' => 'test-harness',
+            ],
+        );
+    }
+
     public function test_webhook_created_deployment_attaches_a_matching_artifact(): void
     {
         $project = Project::factory()->create(['auto_deploy' => true]);
@@ -51,6 +78,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
             'commit_hash' => $commitHash,
             'status' => Artifact::STATUS_AVAILABLE,
         ]);
+        $this->grantLegacyFallback($project, $commitHash);
 
         $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
 
@@ -60,8 +88,10 @@ class ArtifactDeploymentLinkingTest extends TestCase
     public function test_webhook_created_deployment_has_no_artifact_when_none_matches(): void
     {
         $project = Project::factory()->create(['auto_deploy' => true]);
+        $commitHash = str_repeat('b', 40);
+        $this->grantLegacyFallback($project, $commitHash);
 
-        $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, str_repeat('b', 40), 'main', 'dev@example.test');
+        $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
 
         $this->assertNull($deployment->artifact_id);
     }
@@ -70,6 +100,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
     {
         $project = Project::factory()->create(['auto_deploy' => false]);
         $commitHash = str_repeat('b', 40);
+        $this->grantLegacyFallback($project, $commitHash);
         $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
 
         $this->assertSame(Deployment::STATUS_PENDING_APPROVAL, $deployment->status);
@@ -90,7 +121,9 @@ class ArtifactDeploymentLinkingTest extends TestCase
     public function test_pending_deployment_without_an_artifact_keeps_the_legacy_fallback_when_approved(): void
     {
         $project = Project::factory()->create(['auto_deploy' => false]);
-        $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, str_repeat('f', 40), 'main', 'dev@example.test');
+        $commitHash = str_repeat('f', 40);
+        $this->grantLegacyFallback($project, $commitHash);
+        $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
 
         app(DeploymentDispatcher::class)->approve($deployment, 'admin@example.test');
 
@@ -132,7 +165,9 @@ class ArtifactDeploymentLinkingTest extends TestCase
     public function test_an_artifact_for_a_different_commit_is_never_attached_at_approval(): void
     {
         $project = Project::factory()->create(['auto_deploy' => false]);
-        $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, str_repeat('1', 40), 'main', 'dev@example.test');
+        $commitHash = str_repeat('1', 40);
+        $this->grantLegacyFallback($project, $commitHash);
+        $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
         Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
             'commit_hash' => str_repeat('2', 40),
@@ -163,6 +198,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
     {
         $project = Project::factory()->create(['auto_deploy' => false]);
         $commitHash = str_repeat('9', 40);
+        $this->grantLegacyFallback($project, $commitHash);
         $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
         Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
@@ -181,6 +217,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
         $environment = Environment::factory()->create(['project_id' => $project->id]);
         DeploymentTarget::factory()->count(2)->create(['environment_id' => $environment->id]);
         $commitHash = str_repeat('7', 40);
+        $this->grantLegacyFallback($project, $commitHash);
         $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
         $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
@@ -200,6 +237,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
     {
         $project = Project::factory()->create(['auto_deploy' => true]);
         $commitHash = str_repeat('8', 40);
+        $this->grantLegacyFallback($project, $commitHash);
         $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
 
         $this->assertSame(Deployment::STATUS_QUEUED, $deployment->status);
@@ -218,6 +256,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
     {
         $project = Project::factory()->create(['auto_deploy' => false]);
         $commitHash = str_repeat('3', 40);
+        $this->grantLegacyFallback($project, $commitHash);
         $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
         $existing = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
@@ -286,6 +325,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
             'reported_at' => now(),
         ]);
         $commitHash = str_repeat('c0', 20);
+        $this->grantLegacyFallback($project, $commitHash);
 
         $job = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
 
@@ -323,6 +363,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
             'working_tree_dirty' => false,
             'reported_at' => now()->subMinute(),
         ]);
+        $this->grantLegacyFallback($project, str_repeat('ab', 20));
 
         $job = app(DeploymentDispatcher::class)->createFromWebhook($project, str_repeat('ab', 20), 'main', 'github');
 
@@ -356,6 +397,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
             'reported_at' => now(),
         ]);
         $commitHash = str_repeat('f0', 20);
+        $this->grantLegacyFallback($project, $commitHash);
 
         $job = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
         $this->assertInstanceOf(PublishJob::class, $job);
@@ -389,6 +431,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
             'commit_hash' => $commitHash,
             'status' => Artifact::STATUS_AVAILABLE,
         ]);
+        $this->grantLegacyFallback($project, $commitHash);
 
         $deployment = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
 
@@ -420,6 +463,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
             'working_tree_dirty' => false,
             'reported_at' => now(),
         ]);
+        $this->grantLegacyFallback($project, $commitHash);
 
         $job = app(DeploymentDispatcher::class)->createFromWebhook($project, $commitHash, 'main', 'dev@example.test');
 
