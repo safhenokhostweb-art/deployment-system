@@ -53,6 +53,8 @@ final class ArtifactSemanticValidator
                 throw new ArtifactValidationException('release_manifest_mismatch', 'Artifact release manifest provenance does not match the assigned project, commit, and branch.');
             }
 
+            $this->validatePersistentSourceBoundary($artifact, $manifest);
+
             if (isset($entries['composer.json'])) {
                 foreach (['composer.lock', 'vendor/autoload.php', 'artisan', 'bootstrap/app.php', 'public/index.php'] as $required) {
                     if (! isset($entries[$required])) {
@@ -66,6 +68,80 @@ final class ArtifactSemanticValidator
             }
         } finally {
             $zip->close();
+        }
+    }
+
+    /**
+     * New manifests declare the exact tracked source files captured before
+     * dependency/build materialization. Reject a persistence parent that
+     * would hide any of those files. Manifests created before this field was
+     * introduced remain compatible and are guarded later by the Server Agent
+     * when the inventory is available.
+     */
+    private function validatePersistentSourceBoundary(Artifact $artifact, array $manifest): void
+    {
+        $persistentPaths = $artifact->project->artifact_persistent_paths ?? [];
+        if ($persistentPaths === [] || ! array_key_exists('source_paths', $manifest)) {
+            return;
+        }
+        if (! is_array($manifest['source_paths'])) {
+            throw new ArtifactValidationException('persistent_source_contract_invalid', 'Artifact source_paths must be an array.');
+        }
+
+        $sourcePaths = [];
+        foreach ($manifest['source_paths'] as $path) {
+            $normalized = is_string($path) ? trim(str_replace('\\', '/', $path), '/') : '';
+            if ($normalized === ''
+                || str_contains((string) $path, "\0")
+                || str_starts_with((string) $path, '/')
+                || str_starts_with((string) $path, '\\')
+                || preg_match('/^[A-Za-z]:[\\\\\/]/', (string) $path)
+                || preg_match('#(^|/)\.\.(/|$)#', $normalized)) {
+                throw new ArtifactValidationException('persistent_source_contract_invalid', 'Artifact source_paths contains an unsafe path.');
+            }
+            $sourcePaths[] = $normalized;
+        }
+
+        $releasePaths = [];
+        foreach ($persistentPaths as $releaseKey => $targetPath) {
+            $releasePaths[] = trim(str_replace('\\', '/', is_string($releaseKey) ? $releaseKey : $targetPath), '/');
+        }
+        for ($i = 0; $i < count($releasePaths); $i++) {
+            for ($j = $i + 1; $j < count($releasePaths); $j++) {
+                $left = $releasePaths[$i];
+                $right = $releasePaths[$j];
+                if ($left === $right
+                    || str_starts_with($left . '/', $right . '/')
+                    || str_starts_with($right . '/', $left . '/')) {
+                    throw new ArtifactValidationException('persistent_path_overlap', "Persistent release paths '{$left}' and '{$right}' overlap.");
+                }
+            }
+        }
+
+        foreach ($persistentPaths as $releaseKey => $targetPath) {
+            $persistent = trim(str_replace('\\', '/', is_string($releaseKey) ? $releaseKey : $targetPath), '/');
+            foreach ($sourcePaths as $source) {
+                if ($source === $persistent) {
+                    throw new ArtifactValidationException(
+                        'persistent_source_overlap',
+                        "Persistent path '{$persistent}' would replace tracked artifact source '{$source}'.",
+                    );
+                }
+                // Descendants prove this is a source-bearing parent directory
+                // and are rejected, except empty-directory markers which do
+                // not constitute application source.
+                if (! str_starts_with($source, $persistent.'/')) {
+                    continue;
+                }
+                if (in_array(basename($source), ['.gitignore', '.gitkeep'], true)) {
+                    continue;
+                }
+
+                throw new ArtifactValidationException(
+                    'persistent_source_overlap',
+                    "Persistent path '{$persistent}' would hide tracked artifact source '{$source}'.",
+                );
+            }
         }
     }
 }

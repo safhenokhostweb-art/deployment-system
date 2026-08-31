@@ -80,6 +80,7 @@ try {
     $check('exact requested commit is checked out only in the isolated build workspace', $git->lastCommitHash($workspace->projectDir()) === $commitB);
     $check('isolated build contains exact requested commit content', trim((string) file_get_contents($workspace->projectDir() . '/tracked.txt')) === 'commit-b');
     $check('commit timestamp is captured for deterministic artifact metadata', $prepared['commitTimestamp'] > 0);
+    $check('tracked source inventory is captured from the immutable checkout', in_array('tracked.txt', $prepared['sourcePaths'] ?? [], true) && !in_array('.git/HEAD', $prepared['sourcePaths'] ?? [], true));
     $workspace->cleanup();
 
     // Dirty state must fail before fetch, so even the remote-tracking ref is

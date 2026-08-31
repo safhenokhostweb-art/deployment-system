@@ -458,6 +458,18 @@ check('exactly one artifact metadata record was created', count($metaFiles) === 
 if ($metaFiles !== [] && $metaFiles !== false) {
     $artifactId = basename($metaFiles[0], '.meta.json');
     check('the fake Hub received the artifact content (containing vendor + public/build)', is_file("{$hub['storageDir']}/{$artifactId}.bin"), $failures, $passCount);
+    $uploadedZip = new ZipArchive();
+    $uploadedZip->open("{$hub['storageDir']}/{$artifactId}.bin");
+    $uploadedManifest = json_decode((string) $uploadedZip->getFromName('.deployment/release-manifest.json'), true);
+    $uploadedZip->close();
+    check(
+        'ArtifactUploader: sealed manifest inventories tracked source but not generated dependency/build output',
+        in_array('app/Kernel.php', $uploadedManifest['source_paths'] ?? [], true)
+            && !in_array('vendor/autoload.php', $uploadedManifest['source_paths'] ?? [], true)
+            && !in_array('public/build/manifest.json', $uploadedManifest['source_paths'] ?? [], true),
+        $failures,
+        $passCount,
+    );
 }
 
 // Failure path: LocalBuildRunner fails (broken composer.json) — the

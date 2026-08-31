@@ -41,7 +41,7 @@ final class ArtifactBuilder
 
     /**
      * @param array{ranComposer: bool, ranNpmBuild: bool} $buildResult what LocalBuildRunner reported — determines which validations below actually apply
-     * @param array{project_key?: string, commit_sha?: string, branch?: string, agent_version?: string} $provenance release provenance written into the artifact's own manifest
+     * @param array{project_key?: string, commit_sha?: string, branch?: string, agent_version?: string, source_paths?: array<int, string>} $provenance release provenance written into the artifact's own manifest
      * @return array{path: string, checksum: string, size: int, requiredPaths: array<int, string>}
      * @throws LocalBuildFailedException
      */
@@ -143,7 +143,7 @@ final class ArtifactBuilder
      * result. The Server Agent verifies this manifest during its
      * pre-activation release gate.
      *
-     * @param array{project_key?: string, commit_sha?: string, branch?: string, agent_version?: string} $provenance
+     * @param array{project_key?: string, commit_sha?: string, branch?: string, agent_version?: string, source_paths?: array<int, string>} $provenance
      */
     private function writeReleaseManifest(string $projectDir, array $buildResult, array $provenance, int $commitTimestamp): void
     {
@@ -167,6 +167,10 @@ final class ArtifactBuilder
             'branch' => $provenance['branch'] ?? null,
             'composer_lock_sha256' => is_file("{$projectDir}/composer.lock") ? hash_file('sha256', "{$projectDir}/composer.lock") : '',
             'required_paths' => $paths,
+            // Exact tracked-source inventory captured before composer/npm add
+            // generated content. Persistence validation uses this immutable
+            // list to distinguish application source from runtime data.
+            'source_paths' => array_values($provenance['source_paths'] ?? []),
             'build_manifest_present' => is_file("{$projectDir}/public/build/manifest.json"),
             'build_result' => [
                 'ran_composer' => (bool) ($buildResult['ranComposer'] ?? false),

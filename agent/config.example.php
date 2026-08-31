@@ -127,7 +127,12 @@ return [
         //     // persistent root's entries to www-data alongside the
         //     // in-release runtime directories (see
         //     // install/deployment-runtime-permissions).
-        //     // 'artifact_persistent_paths' => ['storage', 'database'],
+        //     // Persist the narrowest runtime-owned path. Persisting a
+        //     // source-bearing parent directory fails closed for new
+        //     // artifacts whose manifest inventories tracked source files.
+        //     // Laravel SQLite example (keeps database/migrations etc. from
+        //     // the artifact while sharing only the runtime database file):
+        //     // 'artifact_persistent_paths' => ['database/database.sqlite'],
         //     // 'artifact_persistent_root' => '/var/www/deployment-system/persistent',
         //     // Associative mapping is supported when layouts differ:
         //     // ['public/uploads' => 'uploads'].

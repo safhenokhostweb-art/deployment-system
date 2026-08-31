@@ -95,6 +95,26 @@ function buildFixtureZip(string $dir, string $name, string $marker, bool $includ
 
     return ['path' => $zipPath, 'checksum' => hash_file('sha256', $zipPath), 'size' => filesize($zipPath)];
 }
+
+/** Builds a release with an immutable tracked-source inventory. */
+function buildSourceInventoryZip(string $dir, string $name, string $marker, array $sourcePaths, array $extraEntries = []): array
+{
+    $zipPath = "{$dir}/{$name}.zip";
+    $zip = new ZipArchive();
+    $zip->open($zipPath, ZipArchive::CREATE);
+    $zip->addFromString('index.php', "<?php\n// {$marker}\n");
+    foreach ($extraEntries as $path => $content) {
+        $zip->addFromString($path, $content);
+    }
+    $zip->addFromString('.deployment/release-manifest.json', json_encode([
+        'format' => 'deployment-system-release-manifest',
+        'status' => 'pass',
+        'source_paths' => array_values($sourcePaths),
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    $zip->close();
+
+    return ['path' => $zipPath, 'checksum' => hash_file('sha256', $zipPath), 'size' => filesize($zipPath)];
+}
 /** Builds a composer/Laravel fixture zip; entries in $omit are left out. */
 function buildLaravelZip(string $dir, string $name, array $omit = []): array
 {
@@ -317,7 +337,7 @@ $missingTargetResult = $manager->deploy(
     $persistentSiteDir,
     [],
     3,
-    ['storage'],
+    ['runtime-missing'],
     $persistentRoot,
 );
 check('persistent: a missing target inside the root is rejected before activation', $missingTargetResult['failureCode'] === 'artifact_persistent_target_missing', $failures, $passCount);
@@ -344,6 +364,42 @@ $traversalPathResult = $manager->deploy(
 );
 check('persistent: a traversal persistent path is rejected', $traversalPathResult['failureCode'] === 'artifact_persistent_path_invalid', $failures, $passCount);
 check('persistent: rejected configs never touched the working directory', !is_dir($persistentSiteDir), $failures, $passCount);
+
+// Reproduces `database/migrations` being erased by a `database` mapping.
+// The source-overlap guard runs before symlink creation, on every platform.
+$sourceBearingFixture = buildSourceInventoryZip(
+    $workspace,
+    'source-bearing-database',
+    'source-bearing database',
+    ['index.php', 'database/migrations/2026_08_31_000000_example.php'],
+    ['database/migrations/2026_08_31_000000_example.php' => "<?php\n// migration\n"],
+);
+registerManifestEntry($hub['manifestPath'], 'artifact-source-bearing-database', $sourceBearingFixture['path']);
+$sourceOverlapSite = $workspace . '/source-overlap-site';
+$sourceOverlapResult = $manager->deploy(
+    ['public_id' => 'artifact-source-bearing-database', 'checksum_sha256' => $sourceBearingFixture['checksum'], 'size_bytes' => $sourceBearingFixture['size']],
+    $sourceOverlapSite,
+    [],
+    3,
+    ['database'],
+    $persistentRoot,
+);
+check('persistent: a parent directory containing tracked source fails closed', $sourceOverlapResult['failureCode'] === 'artifact_persistent_source_overlap', $failures, $passCount);
+check('persistent: dangerous source overlap never activates the candidate', !is_dir($sourceOverlapSite), $failures, $passCount);
+
+// Persistent mappings must be mutually disjoint before any staging symlink
+// is created; otherwise the nested path could traverse through its parent.
+$overlapTargetBefore = (string) file_get_contents("{$persistentTargetDir}/database.sqlite");
+$persistentPathOverlapResult = $manager->deploy(
+    ['public_id' => 'artifact-persistent', 'checksum_sha256' => $persistentFixture['checksum'], 'size_bytes' => $persistentFixture['size']],
+    $workspace . '/persistent-path-overlap-site',
+    [],
+    3,
+    ['database', 'database/database.sqlite'],
+    $persistentRoot,
+);
+check('persistent: ancestor and descendant persistent release paths fail closed', $persistentPathOverlapResult['failureCode'] === 'artifact_persistent_overlap', $failures, $passCount);
+check('persistent: overlap rejection occurs before persistent data can be touched', (string) file_get_contents("{$persistentTargetDir}/database.sqlite") === $overlapTargetBefore, $failures, $passCount);
 
 // Platform-independent post-swap defense: an ordinary directory must never
 // satisfy a persistence mapping. The previous live release is restored even
@@ -410,6 +466,34 @@ if ($symlinkSupported) {
     check('persistent: rollback restores the previous release', $rollbackError === null && str_contains($restoredPersistentRelease, 'persistent release') && !str_contains($restoredPersistentRelease, 'persistent release 2'), $failures, $passCount);
     check('persistent: the restored release keeps the persistent reference', is_link("{$persistentSiteDir}/database"), $failures, $passCount);
     check('persistent: rollback never touched the persistent data', trim((string) @file_get_contents("{$persistentTargetDir}/database.sqlite")) === 'sqlite-bytes', $failures, $passCount);
+
+    // File-level Laravel SQLite persistence retains the artifact-owned
+    // database directory and replaces only the runtime database file.
+    $sqliteSite = $workspace . '/sqlite-file-site';
+    $sqliteFixture = buildSourceInventoryZip(
+        $workspace,
+        'sqlite-file-release',
+        'sqlite file release',
+        ['index.php', 'database/migrations/2026_08_31_000000_schema.php', 'database/factories/UserFactory.php'],
+        [
+            'database/migrations/2026_08_31_000000_schema.php' => "<?php\n// schema migration\n",
+            'database/factories/UserFactory.php' => "<?php\n// factory\n",
+        ],
+    );
+    registerManifestEntry($hub['manifestPath'], 'artifact-sqlite-file', $sqliteFixture['path']);
+    $sqliteResult = $manager->deploy(
+        ['public_id' => 'artifact-sqlite-file', 'checksum_sha256' => $sqliteFixture['checksum'], 'size_bytes' => $sqliteFixture['size']],
+        $sqliteSite,
+        [],
+        3,
+        ['database/database.sqlite'],
+        $persistentRoot,
+    );
+    check('persistent file: SQLite file-level configuration activates', $sqliteResult['status'] === 'succeeded', $failures, $passCount);
+    check('persistent file: database directory remains artifact-owned', is_dir($sqliteSite . '/database') && !is_link($sqliteSite . '/database'), $failures, $passCount);
+    check('persistent file: SQLite file resolves to persistent runtime data', is_link($sqliteSite . '/database/database.sqlite') && trim((string) file_get_contents($sqliteSite . '/database/database.sqlite')) === 'sqlite-bytes', $failures, $passCount);
+    check('persistent file: artifact migrations remain visible after activation', is_file($sqliteSite . '/database/migrations/2026_08_31_000000_schema.php'), $failures, $passCount);
+    check('persistent file: artifact factories remain visible after activation', is_file($sqliteSite . '/database/factories/UserFactory.php'), $failures, $passCount);
 
     // Post-swap validation is independent of staging validation. Simulate a
     // target disappearing after prepare() but before activate(): activation
@@ -490,8 +574,36 @@ if ($symlinkSupported) {
     // Developer Mode) — the fail-closed contract above is still fully
     // exercised. Count the gated assertions as satisfied to keep the run
     // green here while the same scenario runs for real on Linux CI.
-    $passCount += 22;
+    $passCount += 27;
 }
+
+// The configured application root may sit inside an older Git worktree.
+// Deployment identity comes from the immutable artifact manifest, not that
+// untouched parent .git/HEAD.
+$identityRoot = $workspace . '/identity-parent';
+mkdir($identityRoot . '/.git', 0777, true);
+file_put_contents($identityRoot . '/.git/HEAD', "f94dd984f94dd984f94dd984f94dd984f94dd984\n");
+$identityCommit = str_repeat('c', 40);
+$identityFixture = buildSourceInventoryZip($workspace, 'identity-release', 'identity release', ['index.php']);
+$identityZip = new ZipArchive();
+$identityZip->open($identityFixture['path']);
+$identityManifest = json_decode((string) $identityZip->getFromName('.deployment/release-manifest.json'), true);
+$identityManifest['commit_sha'] = $identityCommit;
+$identityZip->addFromString('.deployment/release-manifest.json', json_encode($identityManifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+$identityZip->close();
+$identityFixture['checksum'] = hash_file('sha256', $identityFixture['path']);
+$identityFixture['size'] = filesize($identityFixture['path']);
+registerManifestEntry($hub['manifestPath'], 'artifact-identity', $identityFixture['path']);
+$identityResult = $manager->deploy(
+    ['public_id' => 'artifact-identity', 'checksum_sha256' => $identityFixture['checksum'], 'size_bytes' => $identityFixture['size'], 'commit_hash' => $identityCommit, 'required_paths' => ['.deployment/release-manifest.json']],
+    $identityRoot . '/service',
+    [],
+    3,
+);
+$activeIdentity = json_decode((string) @file_get_contents($identityRoot . '/service/.deployment/release-manifest.json'), true);
+check('identity: activation succeeds independently of stale parent Git metadata', $identityResult['status'] === 'succeeded', $failures, $passCount);
+check('identity: immutable artifact manifest is authoritative for deployed commit', ($activeIdentity['commit_sha'] ?? null) === $identityCommit, $failures, $passCount);
+check('identity: activation neither reads nor rewrites stale parent Git HEAD', trim((string) @file_get_contents($identityRoot . '/.git/HEAD')) === 'f94dd984f94dd984f94dd984f94dd984f94dd984', $failures, $passCount);
 
 
 // ============================================================

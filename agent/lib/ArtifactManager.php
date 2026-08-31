@@ -287,7 +287,7 @@ final class ArtifactManager
             return ['code' => 'artifact_persistent_root_missing', 'message' => 'Persistent root is missing during post-activation validation.'];
         }
 
-        $rootReal = realpath(rtrim($persistentRoot, '/'));
+        $rootReal = self::canonicalRealPath(rtrim($persistentRoot, '/'));
         if ($rootReal === false || !is_dir($rootReal)) {
             return ['code' => 'artifact_persistent_root_missing', 'message' => "Persistent root '{$persistentRoot}' is missing during post-activation validation."];
         }
@@ -297,13 +297,13 @@ final class ArtifactManager
             $normalized = rtrim(str_replace('\\', '/', trim($relativePath)), '/');
             $targetNormalized = rtrim(str_replace('\\', '/', trim($configuredTargetPath)), '/');
             $link = rtrim($releasePath, '/') . '/' . $normalized;
-            $expected = realpath(rtrim($rootReal, '/') . '/' . $targetNormalized);
+            $expected = self::canonicalRealPath(rtrim($rootReal, '/') . '/' . $targetNormalized);
 
             if (!is_link($link)) {
                 return ['code' => 'artifact_persistent_reference_invalid', 'message' => "Activated persistent path '{$link}' is not a symlink."];
             }
 
-            $actual = realpath($link);
+            $actual = self::canonicalRealPath($link);
             if ($expected === false || $actual === false || $actual !== $expected) {
                 return ['code' => 'artifact_persistent_reference_invalid', 'message' => "Activated persistent path '{$link}' does not resolve to its configured target."];
             }
@@ -398,12 +398,29 @@ final class ArtifactManager
             return ['code' => 'artifact_persistent_root_missing', 'message' => 'artifact_persistent_root must be configured when artifact_persistent_paths are set.'];
         }
 
-        $rootReal = realpath(rtrim($persistentRoot, '/'));
+        $rootReal = self::canonicalRealPath(rtrim($persistentRoot, '/'));
         if ($rootReal === false || !is_dir($rootReal)) {
             return ['code' => 'artifact_persistent_root_missing', 'message' => "Persistent root '{$persistentRoot}' does not exist — refusing to activate without persistent state."];
         }
 
         $rootPrefix = rtrim($rootReal, '/') . '/';
+        $sourcePaths = $this->manifestSourcePaths($stagingPath);
+        if (isset($sourcePaths['error'])) {
+            return ['code' => 'artifact_persistent_source_contract_invalid', 'message' => $sourcePaths['error']];
+        }
+
+        // Validate the complete mapping set before creating even one staging
+        // symlink. Ancestor/descendant mappings are ambiguous and, if applied
+        // sequentially, a nested entry could traverse through an earlier
+        // staging symlink into persistent data.
+        $persistentPathOverlap = self::persistentPathOverlapError($persistentPaths);
+        if ($persistentPathOverlap !== null) {
+            return ['code' => 'artifact_persistent_overlap', 'message' => $persistentPathOverlap];
+        }
+        $preserveOverlap = self::persistentOverlapError($effectivePreservePaths, $persistentPaths);
+        if ($preserveOverlap !== null) {
+            return ['code' => 'artifact_persistent_overlap', 'message' => $preserveOverlap];
+        }
 
         foreach ($persistentPaths as $releaseKey => $configuredTargetPath) {
             $relativePath = is_string($releaseKey) ? $releaseKey : $configuredTargetPath;
@@ -426,13 +443,21 @@ final class ArtifactManager
             }
 
             $target = $rootPrefix . $targetNormalized;
-            $targetReal = realpath($target);
+            $targetReal = self::canonicalRealPath($target);
             if ($targetReal === false || !file_exists($targetReal)) {
                 return ['code' => 'artifact_persistent_target_missing', 'message' => "Persistent target '{$target}' does not exist — refusing to activate (missing persistent state would be silently replaced). Create it first (installer/runtime helper)."];
             }
 
             if ($targetReal !== $rootReal && !str_starts_with($targetReal, $rootPrefix)) {
                 return ['code' => 'artifact_persistent_path_invalid', 'message' => "Persistent target '{$target}' escapes the persistent root."];
+            }
+
+            $sourceOverlap = self::persistentSourceOverlap($normalized, $sourcePaths['paths']);
+            if ($sourceOverlap !== null) {
+                return [
+                    'code' => 'artifact_persistent_source_overlap',
+                    'message' => "Persistent path '{$normalized}' would hide tracked artifact source '{$sourceOverlap}'. Configure the specific runtime file or a source-free runtime directory instead.",
+                ];
             }
 
             $stagingEntry = rtrim($stagingPath, '/') . '/' . $normalized;
@@ -460,7 +485,7 @@ final class ArtifactManager
                 return ['code' => 'artifact_persistent_path_invalid', 'message' => "Could not create persistent reference for '{$normalized}' in the staging release."];
             }
 
-            $linkReal = realpath($stagingEntry);
+            $linkReal = self::canonicalRealPath($stagingEntry);
             if ($linkReal === false || ($linkReal !== $rootReal && !str_starts_with($linkReal, $rootPrefix))) {
                 @unlink($stagingEntry);
 
@@ -468,14 +493,94 @@ final class ArtifactManager
             }
         }
 
-        // Deterministic fail-closed overlap rule: persistent and preserve must
-        // never ambiguously overlap (exact duplicate or ancestor/descendant).
-        $overlap = self::persistentOverlapError($effectivePreservePaths, $persistentPaths);
-        if ($overlap !== null) {
-            return ['code' => 'artifact_persistent_overlap', 'message' => $overlap];
+        return null;
+    }
+
+    /** @param array<int|string, string> $persistentPaths */
+    private static function persistentPathOverlapError(array $persistentPaths): ?string
+    {
+        $releasePaths = [];
+        foreach ($persistentPaths as $releaseKey => $targetPath) {
+            $releasePath = is_string($releaseKey) ? $releaseKey : $targetPath;
+            $releasePaths[] = rtrim(str_replace('\\', '/', trim($releasePath)), '/');
+        }
+
+        for ($i = 0; $i < count($releasePaths); $i++) {
+            for ($j = $i + 1; $j < count($releasePaths); $j++) {
+                $left = $releasePaths[$i];
+                $right = $releasePaths[$j];
+                if ($left === $right
+                    || str_starts_with($left . '/', $right . '/')
+                    || str_starts_with($right . '/', $left . '/')) {
+                    return "Persistent release paths '{$left}' and '{$right}' overlap; configure only the narrowest runtime-owned path.";
+                }
+            }
         }
 
         return null;
+    }
+
+    /**
+     * Older manifests intentionally remain compatible: absence of
+     * source_paths means the pre-existing persistence behavior is retained.
+     * Once present, however, malformed entries fail closed.
+     *
+     * @return array{paths: array<int, string>, error?: string}
+     */
+    private function manifestSourcePaths(string $stagingPath): array
+    {
+        $manifestPath = rtrim($stagingPath, '/') . '/' . ReleaseValidator::IN_ARTIFACT_MANIFEST_PATH;
+        if (!is_file($manifestPath)) {
+            return ['paths' => []];
+        }
+        $manifest = json_decode((string) file_get_contents($manifestPath), true);
+        if (!is_array($manifest) || !array_key_exists('source_paths', $manifest)) {
+            return ['paths' => []];
+        }
+        if (!is_array($manifest['source_paths'])) {
+            return ['paths' => [], 'error' => 'Artifact release manifest source_paths must be an array.'];
+        }
+
+        $paths = [];
+        foreach ($manifest['source_paths'] as $path) {
+            if (!is_string($path) || self::validateRelativePersistentPath($path) !== null) {
+                return ['paths' => [], 'error' => 'Artifact release manifest contains an invalid tracked source path.'];
+            }
+            $normalized = rtrim(str_replace('\\', '/', trim($path)), '/');
+            if ($normalized === '') {
+                return ['paths' => [], 'error' => 'Artifact release manifest contains an empty tracked source path.'];
+            }
+            $paths[] = $normalized;
+        }
+
+        return ['paths' => array_values(array_unique($paths))];
+    }
+
+    /** @param array<int, string> $sourcePaths */
+    private static function persistentSourceOverlap(string $persistentPath, array $sourcePaths): ?string
+    {
+        foreach ($sourcePaths as $sourcePath) {
+            if ($sourcePath === $persistentPath) {
+                return $sourcePath;
+            }
+            if (str_starts_with($sourcePath, $persistentPath . '/')) {
+                $basename = basename($sourcePath);
+                if (in_array($basename, ['.gitignore', '.gitkeep'], true)) {
+                    continue;
+                }
+
+                return $sourcePath;
+            }
+        }
+
+        return null;
+    }
+
+    private static function canonicalRealPath(string $path): string|false
+    {
+        $real = realpath($path);
+
+        return $real === false ? false : str_replace('\\', '/', $real);
     }
 
     /**

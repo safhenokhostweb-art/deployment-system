@@ -83,7 +83,7 @@ final class ArtifactUploader
     }
 
     /**
-     * @param callable(BuildWorkspace): array{commitTimestamp: int} $prepareSource
+     * @param callable(BuildWorkspace): array{commitTimestamp: int, sourcePaths?: array<int, string>} $prepareSource
      * @return array{succeeded: bool, message: string, failureCode: ?string}
      */
     private function buildAndUploadFromPreparedSource(string $projectKey, string $repositoryPath, string $commitHash, string $branch, string $jobId, callable $prepareSource, ?callable $onTick = null, string $applicationRoot = '.', array $evidenceContract = []): array
@@ -126,6 +126,7 @@ final class ArtifactUploader
                     'commit_sha' => $commitHash,
                     'branch' => $branch,
                     'agent_version' => $this->agentVersion ?? 'unknown',
+                    'source_paths' => self::sourcePathsForApplicationRoot($prepared['sourcePaths'] ?? [], $this->buildProfiles[$projectKey]['application_root'] ?? $applicationRoot),
                     'dependency_locks' => $prepared['dependencyLocks'] ?? [],
                     'dependency_pinning_required' => ($prepared['dependencyLocks'] ?? []) !== [],
                 ],
@@ -202,6 +203,26 @@ final class ArtifactUploader
                 @unlink($archivePath);
             }
         }
+    }
+
+    /** @param array<int, string> $sourcePaths @return array<int, string> */
+    private static function sourcePathsForApplicationRoot(array $sourcePaths, string $applicationRoot): array
+    {
+        $root = trim(str_replace('\\', '/', $applicationRoot), '/');
+        if ($root === '' || $root === '.') {
+            return array_values($sourcePaths);
+        }
+
+        $prefix = $root . '/';
+        $relative = [];
+        foreach ($sourcePaths as $path) {
+            $path = str_replace('\\', '/', $path);
+            if (str_starts_with($path, $prefix)) {
+                $relative[] = substr($path, strlen($prefix));
+            }
+        }
+
+        return array_values($relative);
     }
 
     /** @return array{status:int, body:array<string,mixed>} */

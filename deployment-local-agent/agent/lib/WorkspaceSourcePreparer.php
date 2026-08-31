@@ -44,7 +44,7 @@ final class WorkspaceSourcePreparer
     }
 
     /**
-     * @return array{commitTimestamp: int}
+     * @return array{commitTimestamp: int, sourcePaths: array<int, string>}
      */
     public function prepare(BuildWorkspace $workspace, string $repositoryPath, string $commitHash, ?callable $onTick = null): array
     {
@@ -60,13 +60,14 @@ final class WorkspaceSourcePreparer
             @unlink($tempArchivePath);
         }
 
+        $sourcePaths = self::sourcePaths($workspace->projectDir());
         $this->copyPathDependencies($workspace, $repositoryPath);
 
-        return ['commitTimestamp' => $this->commitTimestamp($repositoryPath, $commitHash)];
+        return ['commitTimestamp' => $this->commitTimestamp($repositoryPath, $commitHash), 'sourcePaths' => $sourcePaths];
     }
 
     /**
-     * @return array{commitTimestamp: int}
+     * @return array{commitTimestamp: int, sourcePaths: array<int, string>, dependencyLocks: array<int, array<string, mixed>>}
      */
     public function prepareRemoteCommit(BuildWorkspace $workspace, string $repositoryPath, string $repositoryUrl, string $remoteName, string $branch, string $commitHash, ?callable $onTick = null, array $dependencyContract = [], array $dependencyAllowlist = [], array $repositoryMappings = []): array
     {
@@ -87,6 +88,7 @@ final class WorkspaceSourcePreparer
         $this->runOrFail(['git', 'merge-base', '--is-ancestor', $commitHash, "refs/remotes/origin/{$branch}"], $workspace->projectDir(), 30, 'validating commit reachability', $onTick);
         $this->runOrFail(['git', 'checkout', '--detach', '--force', $commitHash], $workspace->projectDir(), 60, 'checking out the exact commit', $onTick);
         $this->assertCheckedOutAtExactCommit($workspace->projectDir(), $commitHash);
+        $sourcePaths = self::sourcePaths($workspace->projectDir());
 
         $dependencyLocks = [];
         $pinningRequired = ($dependencyContract['required'] ?? false) === true;
@@ -108,7 +110,43 @@ final class WorkspaceSourcePreparer
             $this->copyPathDependencies($workspace, $repositoryPath);
         }
 
-        return ['commitTimestamp' => $this->commitTimestamp($workspace->projectDir(), $commitHash), 'dependencyLocks' => $dependencyLocks];
+        return ['commitTimestamp' => $this->commitTimestamp($workspace->projectDir(), $commitHash), 'sourcePaths' => $sourcePaths, 'dependencyLocks' => $dependencyLocks];
+    }
+
+    /**
+     * Captures the immutable source-file boundary before dependencies or build
+     * output are materialized. The list is embedded in the sealed release
+     * manifest so the Server Agent can refuse a persistence mapping that
+     * would hide tracked application source (for example `database/`).
+     *
+     * @return array<int, string>
+     */
+    private static function sourcePaths(string $projectDir): array
+    {
+        $root = rtrim(str_replace('\\', '/', $projectDir), '/');
+        $paths = [];
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveCallbackFilterIterator(
+                new \RecursiveDirectoryIterator($projectDir, \FilesystemIterator::SKIP_DOTS),
+                static fn (\SplFileInfo $entry): bool => $entry->getFilename() !== '.git',
+            ),
+            \RecursiveIteratorIterator::LEAVES_ONLY,
+        );
+
+        foreach ($iterator as $entry) {
+            if (!$entry->isFile() || $entry->isLink()) {
+                continue;
+            }
+            $absolute = str_replace('\\', '/', $entry->getPathname());
+            if (!str_starts_with($absolute, $root . '/')) {
+                throw new LocalBuildFailedException('local_workspace_prepare_failed', 'Tracked source inventory escaped the isolated build workspace.');
+            }
+            $paths[] = substr($absolute, strlen($root) + 1);
+        }
+
+        sort($paths, SORT_STRING);
+
+        return array_values(array_unique($paths));
     }
 
     /**
