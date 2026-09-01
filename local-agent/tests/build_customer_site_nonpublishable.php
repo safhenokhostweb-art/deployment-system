@@ -11,8 +11,8 @@ use LocalAgent\LocalBuildRunner;
 use LocalAgent\SafeFilesystem;
 use LocalAgent\WorkspaceSourcePreparer;
 
-const CONSUMER_SHA = '1bf0d8913948f928e90c452d8896a71922ac0398';
-const DEPENDENCY_SHA = 'd9997e892564b2b8f16e7f67129b1e629f592122';
+const CONSUMER_SHA = '5443d26233a51115efa46df24111a43004de5c88';
+const DEPENDENCY_SHA = '977b88f9009c4b7c881b14334884a0860f717f3a';
 
 $repoRoot = dirname(__DIR__, 2);
 $customerRepo = 'C:/laragon/www/customer-site';
@@ -47,6 +47,7 @@ try {
         ['saas-platform/modules-crm','packages/saas-platform/modules/crm'],
         ['saas-platform/modules-seo-advanced','packages/saas-platform/modules/seo-advanced'],
         ['saas-platform/core-utils','packages/saas-platform/core-utils'],
+        ['saas-platform/modules-theme-runtime','packages/saas-platform/modules/theme-runtime'],
     ];
     $dependencies=[]; $allow=[];
     foreach($packages as [$name,$source]) {

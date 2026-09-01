@@ -88,6 +88,80 @@ try {
     $traversal=BuildWorkspace::create($root.'/builds','consumer','traversal'); $traversalRequest=$request($shaA); $traversalRequest['dependencies'][0]['source_path']='../escape'; $traversalAllow=[$traversalRequest['dependencies'][0]]; unset($traversalAllow[0]['commit_sha']);
     $check('path traversal is rejected',$fails(fn()=>$preparer->prepareRemoteCommit($traversal,$consumerSource,$consumerRemote,'origin','main',$consumerSha,null,$traversalRequest,$traversalAllow,$mappings))); $traversal->cleanup();
 
+    // Regression fixture for customer-site's declarative dependency policy.
+    // The persistent source checkout ends at the six-repository commit, while
+    // the first build deliberately requests the earlier five-repository SHA:
+    // path discovery must therefore read the exact requested commit, never
+    // the persistent workspace's newer composer.json.
+    $customerPackages = [
+        ['saas-platform/modules-tickets', 'packages/saas-platform/modules/tickets'],
+        ['saas-platform/modules-forms', 'packages/saas-platform/modules/forms'],
+        ['saas-platform/modules-crm', 'packages/saas-platform/modules/crm'],
+        ['saas-platform/modules-seo-advanced', 'packages/saas-platform/modules/seo-advanced'],
+        ['saas-platform/core-utils', 'packages/saas-platform/core-utils'],
+        ['saas-platform/modules-theme-runtime', 'packages/saas-platform/modules/theme-runtime'],
+    ];
+    $saasSeed=$root.'/saas-seed'; $saasRemote=$root.'/saas.git'; mkdir($saasSeed,0700,true);
+    $run(['git','init','--initial-branch=main'],$saasSeed); $run(['git','config','user.email','test@example.test'],$saasSeed); $run(['git','config','user.name','Test'],$saasSeed);
+    foreach ($customerPackages as [$packageName, $sourcePath]) {
+        mkdir($saasSeed.'/'.$sourcePath.'/src',0755,true);
+        file_put_contents($saasSeed.'/'.$sourcePath.'/composer.json',json_encode(['name'=>$packageName,'autoload'=>['psr-4'=>['Fixture\\Package\\'=>'src/']]]));
+        file_put_contents($saasSeed.'/'.$sourcePath.'/src/Package.php',"<?php return '".$packageName."';\n");
+    }
+    $run(['git','add','.'],$saasSeed); $run(['git','commit','-m','six dependency packages'],$saasSeed); $saasSha=$git->lastCommitHash($saasSeed);
+    $run(['git','clone','--bare',$saasSeed,$saasRemote],$root);
+
+    $customerSeed=$root.'/customer-seed'; $customerRemote=$root.'/customer.git'; $customerSource=$root.'/customer-source'; mkdir($customerSeed,0700,true);
+    $run(['git','init','--initial-branch=main'],$customerSeed); $run(['git','config','user.email','test@example.test'],$customerSeed); $run(['git','config','user.name','Test'],$customerSeed);
+    $writeCustomerComposer = static function (string $path, array $packages): void {
+        $repositories=[]; $requires=[];
+        foreach ($packages as [$packageName,$sourcePath]) {
+            $repositories[]=['type'=>'path','url'=>'../saas-platform/'.$sourcePath,'options'=>['symlink'=>true]];
+            $requires[$packageName]='@dev';
+        }
+        file_put_contents($path,json_encode(['repositories'=>$repositories,'require'=>$requires],JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
+    };
+    $writeCustomerComposer($customerSeed.'/composer.json',array_slice($customerPackages,0,5));
+    $run(['git','add','composer.json'],$customerSeed); $run(['git','commit','-m','five path repositories'],$customerSeed); $customerFiveSha=$git->lastCommitHash($customerSeed);
+    $writeCustomerComposer($customerSeed.'/composer.json',$customerPackages);
+    $run(['git','add','composer.json'],$customerSeed); $run(['git','commit','-m','add theme runtime path repository'],$customerSeed); $customerSixSha=$git->lastCommitHash($customerSeed);
+    $run(['git','clone','--bare',$customerSeed,$customerRemote],$root); $run(['git','clone','--branch','main',$customerRemote,$customerSource],$root);
+
+    $policyFor = static function (array $packages, string $commitSha): array {
+        $allow=[]; $dependencies=[];
+        foreach ($packages as [$packageName,$sourcePath]) {
+            $base=['project_id'=>'saas-platform','repository_mapping'=>'saas-platform','branch'=>'main','package_name'=>$packageName,'source_path'=>$sourcePath,'destination_path'=>'../saas-platform/'.$sourcePath];
+            $allow[]=$base; $dependencies[]=[...$base,'commit_sha'=>$commitSha];
+        }
+        return [$allow,['version'=>2,'required'=>true,'dependencies'=>$dependencies]];
+    };
+    [$allowFive,$contractFive]=$policyFor(array_slice($customerPackages,0,5),$saasSha);
+    [$allowSix,$contractSix]=$policyFor($customerPackages,$saasSha);
+    $saasMappings=['saas-platform'=>['repository_url'=>$saasRemote]];
+
+    $five=BuildWorkspace::create($root.'/builds','customer-site','five-existing-paths');
+    $preparedFive=$preparer->prepareRemoteCommit($five,$customerSource,$customerRemote,'origin','main',$customerFiveSha,null,$contractFive,$allowFive,$saasMappings);
+    $check('five existing customer-site path repositories remain valid',count($preparedFive['dependencyLocks'])===5);
+    $check('exact consumer commit beats newer persistent workspace composer state',count($preparedFive['dependencyLocks'])===5 && $git->lastCommitHash($customerSource)===$customerSixSha);
+
+    $stale=BuildWorkspace::create($root.'/builds','customer-site','stale-five-pin-contract');
+    $check('stale five-pin mapping cannot satisfy six-repository commit',$fails(fn()=>$preparer->prepareRemoteCommit($stale,$customerSource,$customerRemote,'origin','main',$customerSixSha,null,$contractFive,$allowFive,$saasMappings))); $stale->cleanup();
+
+    $six=BuildWorkspace::create($root.'/builds','customer-site','six-with-theme-runtime');
+    $preparedSix=$preparer->prepareRemoteCommit($six,$customerSource,$customerRemote,'origin','main',$customerSixSha,null,$contractSix,$allowSix,$saasMappings);
+    $themeLocks=array_values(array_filter($preparedSix['dependencyLocks'],static fn(array $lock): bool=>($lock['destination_path']??'')==='../saas-platform/packages/saas-platform/modules/theme-runtime'));
+    $check('sixth theme-runtime repository is valid and pinned exactly once',count($preparedSix['dependencyLocks'])===6 && count($themeLocks)===1 && ($themeLocks[0]['commit_sha']??'')===$saasSha);
+
+    $missingPin=BuildWorkspace::create($root.'/builds','customer-site','missing-theme-runtime-pin'); $missingContract=$contractSix; array_pop($missingContract['dependencies']);
+    $check('missing dependency pin fails closed',$fails(fn()=>$preparer->prepareRemoteCommit($missingPin,$customerSource,$customerRemote,'origin','main',$customerSixSha,null,$missingContract,$allowSix,$saasMappings))); $missingPin->cleanup();
+    $duplicatePin=BuildWorkspace::create($root.'/builds','customer-site','duplicate-theme-runtime-pin'); $duplicateContract=$contractSix; $duplicateContract['dependencies'][]=$duplicateContract['dependencies'][5];
+    $check('duplicate dependency pin fails closed',$fails(fn()=>$preparer->prepareRemoteCommit($duplicatePin,$customerSource,$customerRemote,'origin','main',$customerSixSha,null,$duplicateContract,$allowSix,$saasMappings))); $duplicatePin->cleanup();
+    $unresolved=BuildWorkspace::create($root.'/builds','customer-site','unresolved-theme-runtime'); $unresolvedContract=$contractSix; $unresolvedAllow=$allowSix;
+    $unresolvedContract['dependencies'][5]['source_path']='packages/saas-platform/modules/missing-runtime'; $unresolvedAllow[5]['source_path']='packages/saas-platform/modules/missing-runtime';
+    $check('allowlisted but unresolved dependency source fails closed',$fails(fn()=>$preparer->prepareRemoteCommit($unresolved,$customerSource,$customerRemote,'origin','main',$customerSixSha,null,$unresolvedContract,$unresolvedAllow,$saasMappings))); $unresolved->cleanup();
+
+    $five->cleanup(); $six->cleanup();
+
     // Simulate Composer's final vendor package with a normal copy, then seal and re-verify it.
     mkdir($wa->projectDir().'/vendor/acme',0755,true); SafeFilesystem::copyRecursiveSafely((string)realpath($targetA),(string)realpath($targetA),$wa->projectDir().'/vendor/acme/widget');
     file_put_contents($wa->projectDir().'/vendor/autoload.php',"<?php\n");
