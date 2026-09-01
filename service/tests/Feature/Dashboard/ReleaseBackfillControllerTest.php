@@ -217,7 +217,7 @@ class ReleaseBackfillControllerTest extends TestCase
         $this->assertSame(Release::STATUS_READY, $release->status);
 
         $after = $this->actingAs($this->admin())->get(route('projects.deploy-latest.show', $project));
-        $after->assertOk()->assertSee('READY TO DEPLOY')->assertSee('Confirm deployment');
+        $after->assertOk()->assertSee('READY TO DEPLOY')->assertSee('Create deployment candidate');
     }
 
     // 10. metadata recording creates no Deployment

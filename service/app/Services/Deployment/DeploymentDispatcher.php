@@ -14,6 +14,7 @@ use App\Models\PublishJob;
 use App\Models\Release;
 use App\Services\Deployment\Artifact\ArtifactService;
 use App\Services\Publish\AuthoritativeBuildAgentResolver;
+use App\Services\Releases\ReleaseReadiness;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -45,6 +46,7 @@ class DeploymentDispatcher
         private readonly DeploymentTaskCreator $taskCreator,
         private readonly ArtifactService $artifacts,
         private readonly AuthoritativeBuildAgentResolver $buildAgents,
+        private readonly ReleaseReadiness $releaseReadiness,
     ) {
     }
 
@@ -83,6 +85,33 @@ class DeploymentDispatcher
     public function createManual(Project $project, string $commitHash, string $triggeredBy, ?array $release = null): Deployment|PublishJob
     {
         $artifact = $this->artifacts->findMatching($project, $commitHash, $project->branch);
+        $releaseContract = $this->resolveAutomaticDeploymentContract($project, $commitHash);
+
+        // A modern Release-bound Artifact always uses the explicit-confirm
+        // candidate flow. The older manual behavior remains available only
+        // when there is no Release contract or that contract carries an
+        // explicit, auditable legacy-fallback grant.
+        if ($releaseContract !== null && ! $releaseContract->isLegacyFallbackEligible()) {
+            $artifact = Artifact::query()
+                ->where('project_id', $project->id)
+                ->where('release_id', $releaseContract->id)
+                ->where('commit_hash', $commitHash)
+                ->where('branch', $project->branch)
+                ->where('status', Artifact::STATUS_AVAILABLE)
+                ->latest('id')
+                ->first();
+
+            abort_unless(
+                $artifact !== null,
+                409,
+                'This Release requires its exact verified Artifact and explicit deployment confirmation.',
+            );
+
+            $deployment = $this->createFromExistingArtifact($project, $artifact, $triggeredBy);
+
+            return $this->attachReleaseDescription($deployment, $release);
+        }
+
         if ($project->requires_complete_artifact && $artifact === null) {
             return $this->queueRequiredArtifactBuild($project, $commitHash, $project->branch, [
                 'trigger' => Deployment::TRIGGER_MANUAL,
@@ -112,14 +141,7 @@ class DeploymentDispatcher
         // is untouched too. A caller that never sends a release label (any
         // pre-4-I caller, including every existing test) triggers no extra
         // write at all.
-        if (!empty($release['release_label']) || !empty($release['release_notes'])) {
-            $deployment->update([
-                'release_label' => $release['release_label'] ?? null,
-                'release_notes' => $release['release_notes'] ?? null,
-            ]);
-        }
-
-        return $deployment;
+        return $this->attachReleaseDescription($deployment, $release);
     }
 
     /**
@@ -143,6 +165,32 @@ class DeploymentDispatcher
             abort_unless($artifact !== null, 409, 'The selected Artifact is no longer available for this project, commit, and branch.');
             $artifact = $this->artifacts->assertPhysicalIntegrity($artifact);
 
+            $release = $artifact->release_id === null
+                ? null
+                : Release::query()->whereKey($artifact->release_id)->lockForUpdate()->first();
+            abort_if($artifact->release_id !== null && $release === null, 409, 'The selected Artifact no longer has a valid Release binding.');
+
+            $requiresExplicitConfirm = $release !== null && ! $release->isLegacyFallbackEligible();
+
+            if ($release !== null) {
+                abort_unless(
+                    $release->project_id === $project->id
+                        && $release->commit_hash === $artifact->commit_hash
+                        && $release->branch === $artifact->branch,
+                    409,
+                    'The selected Artifact does not match its Release contract.',
+                );
+
+                if ($requiresExplicitConfirm) {
+                    $readiness = $this->releaseReadiness->for($artifact->commit_hash, $release, $artifact);
+                    abort_unless($readiness['deployable'], 409, $readiness['message']);
+                }
+            }
+
+            $auditAction = $requiresExplicitConfirm
+                ? 'deployment.created_from_existing_artifact_pending_approval'
+                : 'deployment.created_from_existing_artifact';
+
             $targets = $this->resolver->resolveTargetsFor($project);
             if ($this->isLegacyTargetSet($targets)) {
                 return $this->createLegacy(
@@ -151,13 +199,14 @@ class DeploymentDispatcher
                     branch: $artifact->branch,
                     trigger: Deployment::TRIGGER_MANUAL,
                     triggeredBy: $triggeredBy,
-                    autoApprove: true,
+                    autoApprove: ! $requiresExplicitConfirm,
                     approvedBy: $triggeredBy,
-                    auditAction: 'deployment.created_from_existing_artifact',
+                    auditAction: $auditAction,
                     auditActorType: AuditLogEntry::ACTOR_USER,
                     auditActorIdentifier: $triggeredBy,
                     auditMetadata: ['project_id' => $project->id, 'artifact_id' => $artifact->id, 'commit_hash' => $artifact->commit_hash, 'branch' => $artifact->branch],
                     artifactId: $artifact->id,
+                    releaseId: $release?->id,
                 );
             }
 
@@ -168,11 +217,12 @@ class DeploymentDispatcher
                 branch: $artifact->branch,
                 trigger: Deployment::TRIGGER_MANUAL,
                 triggeredBy: $triggeredBy,
-                autoApprove: true,
-                auditAction: 'deployment.created_from_existing_artifact',
+                autoApprove: ! $requiresExplicitConfirm,
+                auditAction: $auditAction,
                 auditActorType: AuditLogEntry::ACTOR_USER,
                 auditMetadata: ['artifact_id' => $artifact->id],
                 artifactId: $artifact->id,
+                releaseId: $release?->id,
             );
         });
     }
@@ -319,6 +369,31 @@ class DeploymentDispatcher
             $this->artifacts->assertPhysicalIntegrity($deployment->artifact()->firstOrFail());
         }
 
+        // Candidate creation and approval are deliberately separate. Re-run
+        // the modern Release gate at the latter boundary so a candidate whose
+        // Release or exact Artifact ceased to be READY cannot enter the queue.
+        if ($deployment->release_id !== null) {
+            $release = Release::query()->find($deployment->release_id);
+            $artifact = $deployment->artifact()->first();
+            abort_unless(
+                $release !== null
+                    && $artifact !== null
+                    && $artifact->release_id === $release->id
+                    && $release->project_id === $deployment->project_id
+                    && $release->commit_hash === $deployment->commit_hash
+                    && $release->branch === $deployment->branch
+                    && $artifact->commit_hash === $deployment->commit_hash
+                    && $artifact->branch === $deployment->branch,
+                409,
+                'The Deployment no longer matches its exact Release and Artifact contract.',
+            );
+
+            if (! $release->isLegacyFallbackEligible()) {
+                $readiness = $this->releaseReadiness->for($deployment->commit_hash, $release, $artifact);
+                abort_unless($readiness['deployable'], 409, $readiness['message']);
+            }
+        }
+
         abort_if(
             $deployment->project->requires_complete_artifact && $deployment->artifact_id === null,
             409,
@@ -399,6 +474,21 @@ class DeploymentDispatcher
     private function attachArtifactIfAvailable(Deployment $deployment): void
     {
         $this->artifacts->attachToDeploymentIfAvailable($deployment);
+    }
+
+    /**
+     * @param array{release_label?: ?string, release_notes?: ?string}|null $release
+     */
+    private function attachReleaseDescription(Deployment $deployment, ?array $release): Deployment
+    {
+        if (!empty($release['release_label']) || !empty($release['release_notes'])) {
+            $deployment->update([
+                'release_label' => $release['release_label'] ?? null,
+                'release_notes' => $release['release_notes'] ?? null,
+            ]);
+        }
+
+        return $deployment;
     }
 
     /**
@@ -487,12 +577,14 @@ class DeploymentDispatcher
         ?string $auditActorIdentifier,
         array $auditMetadata,
         ?int $artifactId,
+        ?int $releaseId = null,
     ): Deployment {
-        return DB::transaction(function () use ($project, $commitHash, $branch, $trigger, $triggeredBy, $autoApprove, $approvedBy, $auditAction, $auditActorType, $auditActorIdentifier, $auditMetadata, $artifactId) {
+        return DB::transaction(function () use ($project, $commitHash, $branch, $trigger, $triggeredBy, $autoApprove, $approvedBy, $auditAction, $auditActorType, $auditActorIdentifier, $auditMetadata, $artifactId, $releaseId) {
             $previousCommit = $project->latestSuccessfulDeployment()?->commit_hash;
 
             $deployment = Deployment::create([
                 'project_id' => $project->id,
+                'release_id' => $releaseId,
                 'server_id' => $project->server_id,
                 'action' => Deployment::ACTION_DEPLOY,
                 'status' => $autoApprove ? Deployment::STATUS_QUEUED : Deployment::STATUS_PENDING_APPROVAL,
@@ -549,6 +641,7 @@ class DeploymentDispatcher
         ?string $auditActorType = null,
         array $auditMetadata = [],
         ?int $artifactId = null,
+        ?int $releaseId = null,
     ): Deployment {
         if (count($targets) === 0) {
             AuditLogEntry::record(
@@ -565,11 +658,12 @@ class DeploymentDispatcher
             abort(422, "Project '{$project->name}' has an Environment configured but no active deployment targets.");
         }
 
-        return DB::transaction(function () use ($project, $targets, $commitHash, $branch, $trigger, $triggeredBy, $autoApprove, $auditAction, $auditActorType, $auditMetadata, $artifactId) {
+        return DB::transaction(function () use ($project, $targets, $commitHash, $branch, $trigger, $triggeredBy, $autoApprove, $auditAction, $auditActorType, $auditMetadata, $artifactId, $releaseId) {
             $previousCommit = $project->latestSuccessfulDeployment()?->commit_hash;
 
             $deployment = Deployment::create([
                 'project_id' => $project->id,
+                'release_id' => $releaseId,
                 // Not authoritative for a multi-target deployment — the
                 // per-target truth lives in DeploymentTask ->
                 // DeploymentTarget -> Server. Populated only because

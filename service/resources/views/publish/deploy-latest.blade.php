@@ -31,7 +31,7 @@
         </dl>
         <form method="POST" action="{{ route('projects.deploy-latest', $project) }}">
             @csrf
-            <button class="btn btn-primary" type="submit">Confirm deployment</button>
+            <button class="btn btn-primary" type="submit">Create deployment candidate</button>
             <a class="btn" href="{{ route('projects.show', $project) }}">Cancel</a>
         </form>
     @else

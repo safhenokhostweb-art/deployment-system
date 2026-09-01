@@ -50,7 +50,7 @@ class PublishController extends Controller
         return view('publish.deploy-latest', compact('project', 'artifact', 'release', 'readiness', 'latestRemoteCommit'));
     }
 
-    /** Create a deployment only after the operator explicitly confirms. */
+    /** Create the exact pending deployment candidate selected by the operator. */
     public function deployLatest(Request $request, Project $project): RedirectResponse
     {
         Gate::authorize('deployments.create');
@@ -61,7 +61,6 @@ class PublishController extends Controller
         abort_unless($readiness['deployable'] && $artifact !== null && $release !== null, 409, $readiness['message']);
 
         $deployment = $this->deployments->createFromExistingArtifact($project, $artifact, $request->user()->email);
-        $deployment->update(['release_id' => $release->id]);
 
         return redirect()->route('deployments.show', $deployment)
             ->with('status', __('ui.publish.deployment_created_from_artifact', [

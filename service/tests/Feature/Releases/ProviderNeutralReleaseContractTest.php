@@ -64,7 +64,7 @@ class ProviderNeutralReleaseContractTest extends TestCase
             ->assertOk()
             ->assertSee('READY TO DEPLOY')
             ->assertSee('Review changes')
-            ->assertSee('Confirm deployment')
+            ->assertSee('Create deployment candidate')
             ->assertDontSee('name="commit_hash"', false)
             ->assertDontSee('name="artifact_id"', false);
         $this->assertDatabaseCount('deployments', 0);
