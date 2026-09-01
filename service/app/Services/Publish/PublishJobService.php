@@ -82,16 +82,24 @@ class PublishJobService
         abort_unless($branch !== '', 422, 'Artifact build requires a branch.');
         $mapping = $this->buildAgents->resolve($project, $branch);
         abort_unless($mapping->local_agent_id === $localAgent->id, 409, 'Artifact builds must use the project authoritative production build Agent.');
-        $release ??= Release::query()
-            ->where('project_id', $project->id)
-            ->where('commit_hash', $commitHash)
-            ->where('branch', $branch)
-            ->first();
+        // An exact-commit Artifact build is the boundary at which the Hub
+        // must have one authoritative Release identity. Webhook builds
+        // already pass their Release; operator-queued Dashboard builds may
+        // legitimately arrive before webhook/project metadata, so resolve
+        // or create that same project+commit contract here. The database
+        // unique key on releases(project_id, commit_hash) makes concurrent
+        // Dashboard/webhook resolution unambiguous.
+        $release ??= $this->releases->createForCommit($project, $commitHash, $branch);
+        $this->assertArtifactBuildRelease($release, $project, $commitHash, $branch);
 
         $activeBuildKey = "artifact:{$project->id}:{$commitHash}";
 
         try {
             $job = DB::transaction(function () use ($localAgent, $project, $commitHash, $branch, $requestedBy, $release, $activeBuildKey): PublishJob {
+            $release = Release::query()->lockForUpdate()->find($release->id);
+            abort_unless($release !== null, 409, 'Artifact build Release no longer exists.');
+            $this->assertArtifactBuildRelease($release, $project, $commitHash, $branch);
+
             // Concurrency: a build for this exact project+commit may already
             // be in flight (a double click, a webhook-triggered auto-build,
             // or a racing request) — reuse it instead of racing the same
@@ -106,7 +114,7 @@ class PublishJobService
                 ->lockForUpdate()
                 ->first();
             if ($existingBuild !== null) {
-                if ($release !== null && ($existingBuild->release_id === null || $existingBuild->evidence_contract === null)) {
+                if ($existingBuild->release_id === null || $existingBuild->evidence_contract === null) {
                     abort_if($existingBuild->release_id !== null && $existingBuild->release_id !== $release->id, 409, 'Active artifact build belongs to a different Release.');
                     $existingBuild->release()->associate($release);
                     $existingBuild->evidence_contract = $this->releaseEvidence->issue($existingBuild, $release, $localAgent);
@@ -118,7 +126,7 @@ class PublishJobService
             $job = PublishJob::create([
                 'local_agent_id' => $localAgent->id,
                 'project_id' => $project->id,
-                'release_id' => $release?->id,
+                'release_id' => $release->id,
                 'active_build_key' => $activeBuildKey,
                 'action' => PublishJob::ACTION_BUILD_ARTIFACT,
                 'status' => PublishJob::STATUS_APPROVED,
@@ -130,9 +138,7 @@ class PublishJobService
                 'reviewed_working_tree_clean' => true,
             ]);
 
-            if ($release !== null) {
-                $job->update(['evidence_contract' => $this->releaseEvidence->issue($job, $release, $localAgent)]);
-            }
+            $job->update(['evidence_contract' => $this->releaseEvidence->issue($job, $release, $localAgent)]);
 
             AuditLogEntry::record(
                 actorType: AuditLogEntry::ACTOR_USER,
@@ -145,20 +151,33 @@ class PublishJobService
 
             return $job;
             });
-            if ($release !== null) {
-                $this->releases->markArtifactBuilding($release);
-            }
+            $this->releases->markArtifactBuilding($release);
             return $job;
         } catch (QueryException $e) {
             $existing = PublishJob::query()->where('active_build_key', $activeBuildKey)->first();
             if ($existing !== null) {
-                if ($release !== null) {
-                    $this->releases->markArtifactBuilding($release);
+                abort_if($existing->release_id !== null && $existing->release_id !== $release->id, 409, 'Active artifact build belongs to a different Release.');
+                if ($existing->release_id === null || $existing->evidence_contract === null) {
+                    $existing->release()->associate($release);
+                    $existing->evidence_contract = $this->releaseEvidence->issue($existing, $release, $localAgent);
+                    $existing->save();
                 }
+                $this->releases->markArtifactBuilding($release);
                 return $existing;
             }
             throw $e;
         }
+    }
+
+    private function assertArtifactBuildRelease(Release $release, Project $project, string $commitHash, string $branch): void
+    {
+        abort_unless(
+            $release->project_id === $project->id
+                && hash_equals($release->commit_hash, $commitHash)
+                && $release->branch === $branch,
+            409,
+            'Artifact build Release does not match the exact project, commit, and branch contract.',
+        );
     }
 
     /**

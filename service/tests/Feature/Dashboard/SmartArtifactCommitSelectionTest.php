@@ -9,6 +9,7 @@ use App\Models\LocalAgent;
 use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use App\Models\PublishJob;
+use App\Models\Release;
 use App\Models\User;
 use App\Services\GitHub\GitHubAppClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -109,6 +110,17 @@ class SmartArtifactCommitSelectionTest extends TestCase
 
         $job = PublishJob::sole();
         $this->assertSame($freshRemote, $job->reviewed_head_sha, 'The queued build must target the exact remote HEAD, never the stale workspace HEAD.');
+        $release = Release::sole();
+        $this->assertSame($release->id, $job->release_id, 'A Dashboard build must bootstrap and bind the exact Release before the Agent can claim it.');
+        $this->assertSame($project->id, $release->project_id);
+        $this->assertSame($freshRemote, $release->commit_hash);
+        $this->assertSame('main', $release->branch);
+        $this->assertSame(Release::STATUS_ARTIFACT_BUILDING, $release->status);
+        $this->assertIsArray($job->evidence_contract);
+        $this->assertSame($release->public_id, $job->evidence_contract['release_id']);
+        $this->assertDatabaseCount('deployments', 0);
+        $this->assertDatabaseCount('deployment_tasks', 0);
+        $this->assertDatabaseCount('agent_jobs', 0);
         $this->assertSame($oldHead, $mapping->fresh()->local_head_sha, 'Queuing a build must never rewrite the persistent workspace mapping.');
     }
 

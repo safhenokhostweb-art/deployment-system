@@ -6,6 +6,7 @@ use App\Models\LocalAgent;
 use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use App\Models\PublishJob;
+use App\Models\Release;
 use App\Services\Publish\PublishJobService;
 use Database\Factories\LocalAgentFactory;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -136,7 +137,10 @@ class PublishJobFlowTest extends TestCase
         $path = "/api/local-agent/publish-jobs/{$job->public_id}/report";
 
         $this->postJson($path, $body, $this->headersFor($agent, 'POST', $path, json_encode($body)))->assertStatus(422);
-        $this->assertSame(PublishJob::STATUS_RUNNING, $job->fresh()->status);
+        $this->assertSame(PublishJob::STATUS_FAILED, $job->fresh()->status);
+        $this->assertSame('release_evidence_invalid', $job->fresh()->failure_code);
+        $this->assertSame(Release::STATUS_FAILED, $job->fresh()->release->status);
+        $this->assertDatabaseCount('deployments', 0);
     }
 
     public function test_customer_site_build_contract_is_v2_and_contains_only_allowlisted_pins(): void

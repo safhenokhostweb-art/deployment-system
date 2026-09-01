@@ -160,6 +160,45 @@ class ExactCommitEvidenceClosureTest extends TestCase
         $this->assertDatabaseCount('deployments', 0);
     }
 
+    public function test_artifact_metadata_for_an_unlinked_modern_build_fails_closed(): void
+    {
+        [$project, $agent] = $this->context();
+        PublishJob::query()->delete();
+        $job = PublishJob::factory()->create([
+            'local_agent_id' => $agent->id,
+            'project_id' => $project->id,
+            'release_id' => null,
+            'action' => PublishJob::ACTION_BUILD_ARTIFACT,
+            'status' => PublishJob::STATUS_RUNNING,
+            'reviewed_head_sha' => str_repeat('b', 40),
+            'reviewed_branch' => 'main',
+        ]);
+        $body = [
+            'project_key' => $project->project_key,
+            'commit_hash' => str_repeat('b', 40),
+            'branch' => 'main',
+            'checksum_sha256' => str_repeat('c', 64),
+            'size_bytes' => 100,
+            'publish_job_id' => $job->public_id,
+        ];
+        $path = '/api/local-agent/artifacts';
+        $headers = $this->localAgentHeaders(
+            'POST',
+            $path,
+            json_encode($body),
+            $agent->public_id,
+            LocalAgentFactory::$lastPlainToken,
+            LocalAgentFactory::$lastPlainSecret,
+        );
+
+        $this->postJson($path, $body, $headers)
+            ->assertStatus(422)
+            ->assertSee('Artifact build is not linked to a Release.');
+
+        $this->assertDatabaseCount('artifacts', 0);
+        $this->assertDatabaseCount('deployments', 0);
+    }
+
     public function test_signed_job_report_with_invalid_evidence_fails_the_job_and_release_closed(): void
     {
         [$project, $agent, $release, $job] = $this->context();
@@ -190,7 +229,9 @@ class ExactCommitEvidenceClosureTest extends TestCase
 
         $this->assertNotSame($job->id, $retry->id);
         $this->assertSame($retry->id, $duplicate->id);
+        $this->assertSame($release->id, $retry->release_id);
         $this->assertSame(Release::STATUS_ARTIFACT_BUILDING, $release->fresh()->status);
+        $this->assertDatabaseCount('releases', 1);
         $this->assertSame(1, PublishJob::where('active_build_key', "artifact:{$project->id}:{$release->commit_hash}")->count());
     }
 
