@@ -13,6 +13,7 @@ use App\Services\Publish\ArtifactCommitSelector;
 use App\Services\Publish\AuthoritativeBuildAgentResolver;
 use App\Services\Publish\PublishJobService;
 use App\Services\Releases\ReleaseReadiness;
+use App\Services\Releases\ReleaseVerificationStatus;
 use App\Services\GitHub\GitHubAppClient;
 use App\Services\GitHub\GitHubApiException;
 use Illuminate\Http\RedirectResponse;
@@ -36,6 +37,7 @@ class PublishController extends Controller
         private readonly ArtifactService $artifacts,
         private readonly GitHubAppClient $github,
         private readonly ReleaseReadiness $releaseReadiness,
+        private readonly ReleaseVerificationStatus $releaseVerificationStatus,
     ) {
     }
 
@@ -46,8 +48,9 @@ class PublishController extends Controller
         Gate::authorize('deploy', $project);
         [$latestRemoteCommit, $artifact, $release] = $this->latestRemoteArtifact($project);
         $readiness = $this->releaseReadiness->for($latestRemoteCommit, $release, $artifact);
+        $verification = $this->releaseVerificationStatus->for($release);
 
-        return view('publish.deploy-latest', compact('project', 'artifact', 'release', 'readiness', 'latestRemoteCommit'));
+        return view('publish.deploy-latest', compact('project', 'artifact', 'release', 'readiness', 'verification', 'latestRemoteCommit'));
     }
 
     /** Create the exact pending deployment candidate selected by the operator. */

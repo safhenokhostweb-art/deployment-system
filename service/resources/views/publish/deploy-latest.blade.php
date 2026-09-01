@@ -12,7 +12,7 @@
         <dl class="definition-list">
             <dt>Release summary</dt><dd>{{ $metadata['summary'] ?? '—' }}</dd>
             <dt>Files changed</dt><dd>{{ count($metadata['changed_files'] ?? []) }}</dd>
-            <dt>Tests</dt><dd>{{ collect($metadata['test_results'] ?? [])->every(fn ($test) => ($test['exit_code'] ?? 1) === 0) ? 'Passed' : 'Failed' }}</dd>
+            <dt>Build verification</dt><dd>{{ $verification['label'] }}</dd>
             <dt>Migration verdict</dt><dd>{{ empty($metadata['migration_files']) ? 'No migrations' : 'Safe by project policy' }}</dd>
             <dt>Risk flags</dt><dd>{{ empty($metadata['risk_flags']) ? 'None' : implode(', ', $metadata['risk_flags']) }}</dd>
             <dt>Health contract</dt><dd>{{ ($metadata['health_contract']['required'] ?? false) ? 'Required after deployment' : 'Not required' }}</dd>
