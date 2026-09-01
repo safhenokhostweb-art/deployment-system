@@ -114,6 +114,52 @@ class ExactCommitEvidenceClosureTest extends TestCase
         $this->assertDatabaseCount('artifacts', 0);
     }
 
+    public function test_artifact_metadata_requires_the_assigned_publish_job_public_id(): void
+    {
+        [$project, $agent, $release, $job] = $this->context();
+        app(PublishJobService::class)->claimNext($agent);
+
+        $path = '/api/local-agent/artifacts';
+        $body = [
+            'project_key' => $project->project_key,
+            'commit_hash' => $release->commit_hash,
+            'branch' => $release->branch,
+            'checksum_sha256' => str_repeat('c', 64),
+            'size_bytes' => 100,
+        ];
+
+        $headers = fn (array $payload): array => $this->localAgentHeaders(
+            'POST',
+            $path,
+            json_encode($payload),
+            $agent->public_id,
+            LocalAgentFactory::$lastPlainToken,
+            LocalAgentFactory::$lastPlainSecret,
+        );
+
+        $this->postJson($path, $body, $headers($body))
+            ->assertStatus(422)
+            ->assertSee('publish_job_id is required');
+
+        $databaseIdBody = [...$body, 'publish_job_id' => (string) $job->id];
+        $this->postJson($path, $databaseIdBody, $headers($databaseIdBody))
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('publish_job_id');
+
+        $mismatchBody = [...$body, 'publish_job_id' => '00000000-0000-4000-8000-000000000000'];
+        $this->postJson($path, $mismatchBody, $headers($mismatchBody))->assertNotFound();
+
+        $validBody = [...$body, 'publish_job_id' => $job->public_id];
+        $this->postJson($path, $validBody, $headers($validBody))->assertCreated();
+
+        $this->assertDatabaseHas('artifacts', [
+            'project_id' => $project->id,
+            'publish_job_id' => $job->id,
+            'release_id' => $release->id,
+        ]);
+        $this->assertDatabaseCount('deployments', 0);
+    }
+
     public function test_signed_job_report_with_invalid_evidence_fails_the_job_and_release_closed(): void
     {
         [$project, $agent, $release, $job] = $this->context();

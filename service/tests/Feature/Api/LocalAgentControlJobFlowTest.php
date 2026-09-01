@@ -216,6 +216,47 @@ class LocalAgentControlJobFlowTest extends TestCase
         $this->assertSame('1.4.4', $agent->fresh()->agent_version);
     }
 
+    public function test_1_5_0_agent_can_bootstrap_to_1_5_1_before_assigned_artifact_work(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create([
+            'operating_system' => 'Linux',
+            'agent_version' => '1.5.0',
+            'capabilities' => ['git' => true, 'laravel_release_manifest' => true, 'linux_self_upgrade' => true],
+        ]);
+        $job = app(LocalAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
+
+        $this->get('/api/local-agent/control-jobs/next', $this->headersFor($agent, 'GET', '/api/local-agent/control-jobs/next'))
+            ->assertOk()
+            ->assertJsonPath('job.action', LocalAgentControlJob::ACTION_UPGRADE)
+            ->assertJsonPath('job.expected_version', '1.5.1');
+
+        $reportBody = ['status' => 'started', 'output' => 'UPGRADE_OK old_version=1.5.0 new_version=1.5.1'];
+        $reportPath = "/api/local-agent/control-jobs/{$job->public_id}/report";
+        $this->postJson($reportPath, $reportBody, $this->headersFor($agent, 'POST', $reportPath, json_encode($reportBody)))
+            ->assertOk()
+            ->assertJsonPath('status', LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT);
+
+        $heartbeat = [
+            'agent_version' => '1.5.1',
+            'hostname' => 'linux-builder',
+            'operating_system' => 'Linux',
+            'capabilities' => [
+                'git' => true,
+                'laravel_release_manifest' => true,
+                'assigned_artifact_publish_job_id' => true,
+                'linux_self_upgrade' => true,
+            ],
+        ];
+        $this->postJson('/api/local-agent/heartbeat', $heartbeat, $this->headersFor($agent, 'POST', '/api/local-agent/heartbeat', json_encode($heartbeat)))
+            ->assertOk();
+
+        $this->assertSame(LocalAgentControlJob::STATUS_SUCCEEDED, $job->fresh()->status);
+        $this->assertSame('1.5.1', $job->fresh()->reported_version);
+        $this->assertTrue($agent->fresh()->supportsAssignedArtifactUploads());
+        $this->assertDatabaseCount('publish_jobs', 0);
+        $this->assertDatabaseCount('deployments', 0);
+    }
+
     public function test_heartbeat_reports_a_project_config_version_agents_use_to_detect_changed_mappings(): void
     {
         $agent = LocalAgent::factory()->approved()->create();

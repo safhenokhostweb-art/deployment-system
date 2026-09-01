@@ -25,7 +25,7 @@ function New-FakeInstall([string]$Root, [string]$Version) {
     # installed) always comes from the real pinned historical commit via
     # the script itself, never from this fixture.
     Copy-Item -LiteralPath (Join-Path $RepoRoot 'deployment-local-agent\agent\agent.php') -Destination $agent
-    (Get-Content -LiteralPath (Join-Path $agent 'agent.php') -Raw).Replace("LOCAL_AGENT_VERSION = '1.5.0'", "LOCAL_AGENT_VERSION = '$Version'") |
+    (Get-Content -LiteralPath (Join-Path $agent 'agent.php') -Raw) -replace "LOCAL_AGENT_VERSION = '[^']+'", "LOCAL_AGENT_VERSION = '$Version'" |
         Set-Content -LiteralPath (Join-Path $agent 'agent.php') -NoNewline
     Copy-Item -LiteralPath (Join-Path $RepoRoot 'deployment-local-agent\agent\heartbeat-watchdog.php') -Destination $agent
     Copy-Item -Path (Join-Path $RepoRoot 'deployment-local-agent\agent\lib\*.php') -Destination (Join-Path $agent 'lib')

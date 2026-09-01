@@ -35,6 +35,13 @@ final class AuthoritativeBuildAgentResolver
             'عامل رسمی قابلیت‌های لازم git و laravel_release_manifest را گزارش نکرده است.',
         );
 
+        $assignedArtifactMinimum = (string) config('deployment.min_local_agent_version_for_assigned_artifact');
+        abort_unless(
+            $agent->supportsAssignedArtifactUploads(),
+            409,
+            "Assigned artifact builds require Local Agent {$assignedArtifactMinimum} or newer with assigned_artifact_publish_job_id capability; upgrade required before artifact work begins.",
+        );
+
         $mapping = LocalProjectMapping::query()
             ->where('local_agent_id', $agent->id)
             ->where('project_id', $project->id)

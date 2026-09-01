@@ -28,12 +28,12 @@ class LocalAgentFactory extends Factory
             'name' => $this->faker->userName() . '-laptop',
             'hostname' => $this->faker->domainWord() . '-pc',
             'operating_system' => 'windows',
-            'capabilities' => ['git' => true, 'php' => '8.4'],
+            'capabilities' => ['git' => true, 'php' => '8.4', 'assigned_artifact_publish_job_id' => true],
             // Phase: Laravel Release Completeness — an approved agent in
             // tests is a current agent; the artifact-upload gate rejects
             // older/unknown versions, so the factory mirrors the current
             // minimum from config instead of leaving it null.
-            'agent_version' => (string) config('deployment.min_local_agent_version_for_artifact'),
+            'agent_version' => (string) config('deployment.latest_local_agent_version'),
         ];
     }
 
@@ -63,6 +63,7 @@ class LocalAgentFactory extends Factory
                 'git' => true,
                 'php' => '8.4',
                 'laravel_release_manifest' => true,
+                'assigned_artifact_publish_job_id' => true,
             ],
         ]);
     }

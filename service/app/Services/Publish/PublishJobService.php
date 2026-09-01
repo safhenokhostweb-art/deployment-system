@@ -226,6 +226,15 @@ class PublishJobService
             ->get();
 
             foreach ($candidates as $job) {
+                if ($job->action === PublishJob::ACTION_BUILD_ARTIFACT) {
+                    $minimum = (string) config('deployment.min_local_agent_version_for_assigned_artifact');
+                    abort_unless(
+                        $localAgent->supportsAssignedArtifactUploads(),
+                        409,
+                        "Assigned artifact builds require Local Agent {$minimum} or newer with assigned_artifact_publish_job_id capability; upgrade required before artifact work begins.",
+                    );
+                }
+
                 if ($job->no_source_change && !$this->noSourceChangeEvidenceIsStillValid($job)) {
                     $job->update([
                         'status' => PublishJob::STATUS_REJECTED,

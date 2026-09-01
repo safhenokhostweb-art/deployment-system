@@ -117,7 +117,7 @@ return [
     | that keeps these three from drifting apart again.
     |
     */
-    'latest_local_agent_version' => env('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION', '1.5.0'),
+    'latest_local_agent_version' => env('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION', '1.5.1'),
 
     /*
     |--------------------------------------------------------------------------
@@ -287,6 +287,12 @@ return [
     |
     */
     'min_local_agent_version_for_artifact' => (string) env('DEPLOYMENT_MIN_LOCAL_AGENT_VERSION_FOR_ARTIFACT', '1.4.7'),
+
+    // First Local Agent release that binds an assigned artifact metadata
+    // upload to the claimed PublishJob public UUID via publish_job_id.
+    // Kept separate from the older release-manifest minimum because
+    // unassigned/manual artifact uploads still use that older contract.
+    'min_local_agent_version_for_assigned_artifact' => (string) env('DEPLOYMENT_MIN_LOCAL_AGENT_VERSION_FOR_ASSIGNED_ARTIFACT', '1.5.1'),
 
     // A production artifact must be built from fresh workspace evidence
     // reported by the one authoritative Agent configured on the Project.

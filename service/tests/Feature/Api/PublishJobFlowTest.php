@@ -38,7 +38,7 @@ class PublishJobFlowTest extends TestCase
         $agent->update([
             'role' => LocalAgent::ROLE_PRODUCTION_BUILD,
             'last_seen_at' => now(),
-            'capabilities' => ['git' => true, 'php' => '8.4', 'laravel_release_manifest' => true],
+            'capabilities' => ['git' => true, 'php' => '8.4', 'laravel_release_manifest' => true, 'assigned_artifact_publish_job_id' => true],
         ]);
         LocalProjectMapping::factory()->create([
             'local_agent_id' => $agent->id,
@@ -141,7 +141,7 @@ class PublishJobFlowTest extends TestCase
 
     public function test_customer_site_build_contract_is_v2_and_contains_only_allowlisted_pins(): void
     {
-        $agent = LocalAgent::factory()->approved()->create(['agent_version' => '1.5.0']);
+        $agent = LocalAgent::factory()->approved()->create(['agent_version' => config('deployment.latest_local_agent_version')]);
         $project = $this->mappedProject($agent);
         $project->update(['project_key' => 'customer-site']);
         $dependencyProject = Project::factory()->create(['project_key' => 'saas-platform', 'repository' => 'owner/saas-platform']);
@@ -166,27 +166,56 @@ class PublishJobFlowTest extends TestCase
         $this->assertArrayNotHasKey('commit_sha', $consumer['dependency_allowlist'][0]);
     }
 
-    public function test_customer_site_dependency_policy_fails_closed_on_old_local_agent_only(): void
+    public function test_customer_site_assigned_artifact_contract_fails_closed_on_old_local_agent(): void
     {
         $agent = LocalAgent::factory()->approved()->create(['agent_version' => '1.4.7']);
         $project = $this->mappedProject($agent);
         $project->update(['project_key' => 'customer-site']);
-        $job = app(PublishJobService::class)->queueArtifactBuild($agent, $project, str_repeat('e', 40), 'main', 'dev@example.test');
-        $this->get('/api/local-agent/publish-jobs/next', $this->headersFor($agent, 'GET', '/api/local-agent/publish-jobs/next'))->assertStatus(409);
-        $this->assertSame(PublishJob::STATUS_FAILED, $job->fresh()->status);
+
+        $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
+        $this->expectExceptionMessage('upgrade required');
+        app(PublishJobService::class)->queueArtifactBuild($agent, $project, str_repeat('e', 40), 'main', 'dev@example.test');
     }
 
-    public function test_new_hub_with_policy_off_keeps_local_agent_1_4_7_compatible(): void
+    public function test_dependency_policy_off_does_not_weaken_assigned_artifact_protocol_gate(): void
     {
         config()->set('deployment.artifact_dependency_policies.customer-site.required', false);
         $agent = LocalAgent::factory()->approved()->create(['agent_version' => '1.4.7']);
         $project = $this->mappedProject($agent);
         $project->update(['project_key' => 'customer-site']);
-        app(PublishJobService::class)->queueArtifactBuild($agent, $project, str_repeat('e', 40), 'main', 'dev@example.test');
 
-        $response = $this->get('/api/local-agent/publish-jobs/next', $this->headersFor($agent, 'GET', '/api/local-agent/publish-jobs/next'));
-        $response->assertOk()->assertJsonPath('job.build_contract_version', 2);
-        $this->assertSame([], $response->json('job.dependency_contract'));
+        $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
+        $this->expectExceptionMessage('upgrade required');
+        app(PublishJobService::class)->queueArtifactBuild($agent, $project, str_repeat('e', 40), 'main', 'dev@example.test');
+    }
+
+    public function test_preexisting_artifact_assignment_is_not_claimed_by_an_incompatible_agent(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create([
+            'agent_version' => '1.5.0',
+            'capabilities' => ['git' => true, 'laravel_release_manifest' => true],
+        ]);
+        $project = $this->mappedProject($agent);
+        $agent->update([
+            'agent_version' => '1.5.0',
+            'capabilities' => ['git' => true, 'laravel_release_manifest' => true],
+        ]);
+        $job = PublishJob::factory()->create([
+            'local_agent_id' => $agent->id,
+            'project_id' => $project->id,
+            'action' => PublishJob::ACTION_BUILD_ARTIFACT,
+            'status' => PublishJob::STATUS_APPROVED,
+            'reviewed_head_sha' => str_repeat('e', 40),
+            'reviewed_branch' => 'main',
+        ]);
+
+        $this->get('/api/local-agent/publish-jobs/next', $this->headersFor($agent, 'GET', '/api/local-agent/publish-jobs/next'))
+            ->assertStatus(409)
+            ->assertSee('upgrade required');
+
+        $this->assertSame(PublishJob::STATUS_APPROVED, $job->fresh()->status);
+        $this->assertNull($job->fresh()->started_at);
+        $this->assertDatabaseCount('deployments', 0);
     }
 
     public function test_status_check_rejects_no_source_change_evidence_for_the_wrong_mapping_branch(): void

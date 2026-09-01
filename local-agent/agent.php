@@ -101,7 +101,7 @@ use LocalAgent\WorkspaceSourcePreparer;
  * Hub side for why this never triggers an automatic download). Bump
  * when agent.php or lib/* changes in a way that matters operationally.
  */
-const LOCAL_AGENT_VERSION = '1.5.0';
+const LOCAL_AGENT_VERSION = '1.5.1';
 
 $configPath = __DIR__ . '/config.php';
 
@@ -868,7 +868,7 @@ function sendHeartbeat(Client $client, Logger $logger, array $projectStates = []
             'hostname' => gethostname() ?: null,
             'operating_system' => PHP_OS_FAMILY,
             'agent_version' => LOCAL_AGENT_VERSION,
-            'capabilities' => ['git' => true, 'php' => PHP_VERSION, 'laravel_release_manifest' => true, 'linux_self_upgrade' => PHP_OS_FAMILY === 'Linux'],
+            'capabilities' => ['git' => true, 'php' => PHP_VERSION, 'laravel_release_manifest' => true, 'assigned_artifact_publish_job_id' => true, 'linux_self_upgrade' => PHP_OS_FAMILY === 'Linux'],
             'project_states' => $projectStates,
         ]);
 
@@ -972,7 +972,7 @@ function installCommand(array $args, string $configPath): void
         'name' => $name,
         'hostname' => $hostname,
         'operating_system' => PHP_OS_FAMILY,
-        'capabilities' => ['git' => true, 'php' => PHP_VERSION, 'linux_self_upgrade' => PHP_OS_FAMILY === 'Linux'],
+        'capabilities' => ['git' => true, 'php' => PHP_VERSION, 'laravel_release_manifest' => true, 'assigned_artifact_publish_job_id' => true, 'linux_self_upgrade' => PHP_OS_FAMILY === 'Linux'],
     ];
     $bodyJson = json_encode($body, JSON_THROW_ON_ERROR);
 

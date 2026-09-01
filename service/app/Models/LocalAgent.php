@@ -96,6 +96,15 @@ class LocalAgent extends Model
         return $this->isApproved() && $this->role === self::ROLE_PRODUCTION_BUILD;
     }
 
+    public function supportsAssignedArtifactUploads(): bool
+    {
+        $minimum = (string) config('deployment.min_local_agent_version_for_assigned_artifact');
+
+        return is_string($this->agent_version)
+            && version_compare($this->agent_version, $minimum, '>=')
+            && ($this->capabilities['assigned_artifact_publish_job_id'] ?? false) === true;
+    }
+
     public function changeDetectionJobs(): HasMany
     {
         return $this->hasMany(LocalChangeDetectionJob::class);

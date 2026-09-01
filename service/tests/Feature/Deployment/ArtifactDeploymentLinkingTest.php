@@ -348,7 +348,7 @@ class ArtifactDeploymentLinkingTest extends TestCase
             'reported_at' => now(),
         ]);
         $capableAgent = LocalAgent::factory()->productionBuild()->create([
-            'agent_version' => config('deployment.min_local_agent_version_for_artifact'),
+            'agent_version' => config('deployment.min_local_agent_version_for_assigned_artifact'),
         ]);
         $project->update(['authoritative_build_local_agent_id' => $capableAgent->id]);
         LocalProjectMapping::factory()->create([

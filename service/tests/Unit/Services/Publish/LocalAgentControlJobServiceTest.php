@@ -133,6 +133,28 @@ class LocalAgentControlJobServiceTest extends TestCase
         $this->assertNotNull($job->fresh()->upgrade_verified_at);
     }
 
+    public function test_official_linux_upgrade_targets_1_5_1_and_only_heartbeat_completes_it(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create([
+            'operating_system' => 'Linux',
+            'agent_version' => '1.5.0',
+            'capabilities' => ['linux_self_upgrade' => true],
+        ]);
+        $service = app(LocalAgentControlJobService::class);
+
+        $job = $service->queueUpgrade($agent, 'admin@example.test');
+        $this->assertSame('1.5.1', $job->expected_version);
+        $service->claimNext($agent);
+        $service->reportResult($job->fresh(), 'UPGRADE_OK old_version=1.5.0 new_version=1.5.1');
+
+        $this->assertSame(LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT, $job->fresh()->status);
+        $this->assertSame(0, $service->verifyUpgradeHeartbeat($agent, '1.5.0'));
+        $this->assertSame(1, $service->verifyUpgradeHeartbeat($agent, '1.5.1'));
+        $this->assertSame(LocalAgentControlJob::STATUS_SUCCEEDED, $job->fresh()->status);
+        $this->assertSame('1.5.1', $job->fresh()->reported_version);
+        $this->assertDatabaseCount('deployments', 0);
+    }
+
     public function test_remote_upgrade_rejects_an_agent_without_bootstrap_capability(): void
     {
         config(['deployment.latest_local_agent_version' => '1.4.4']);

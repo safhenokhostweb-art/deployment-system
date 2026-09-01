@@ -69,6 +69,12 @@ class LocalAgentArtifactController extends Controller
         $project = $this->resolveMappedProject($agent, $validated['project_key']);
         $job = null;
         if (isset($validated['publish_job_id'])) {
+            $minimum = (string) config('deployment.min_local_agent_version_for_assigned_artifact');
+            abort_unless(
+                $agent->supportsAssignedArtifactUploads(),
+                409,
+                "Assigned artifact uploads require Local Agent {$minimum} or newer with assigned_artifact_publish_job_id capability; upgrade required.",
+            );
             $job = PublishJob::where('public_id', $validated['publish_job_id'])->firstOrFail();
             $this->assertAssignedJob($job, $agent, $project, $validated['commit_hash'], $validated['branch']);
         } else {

@@ -53,9 +53,24 @@ class AuthoritativeBuildAgentResolverTest extends TestCase
     public function test_old_agent_version_is_rejected(): void
     {
         [$project, $agent] = $this->authoritativeProject();
-        $agent->update(['agent_version' => '1.4.5']);
+        $agent->update(['agent_version' => '1.5.0']);
 
-        $this->assertResolverRejected($project, 'version');
+        $this->assertResolverRejected($project, 'upgrade required');
+    }
+
+    public function test_current_version_without_publish_job_binding_capability_is_rejected(): void
+    {
+        [$project, $agent] = $this->authoritativeProject();
+        $agent->update(['capabilities' => ['git' => true, 'laravel_release_manifest' => true]]);
+
+        $this->assertResolverRejected($project, 'assigned_artifact_publish_job_id');
+    }
+
+    public function test_current_version_with_publish_job_binding_capability_is_accepted(): void
+    {
+        [$project, , $mapping] = $this->authoritativeProject();
+
+        $this->assertSame($mapping->id, app(AuthoritativeBuildAgentResolver::class)->resolve($project->fresh(), 'main')->id);
     }
 
     public function test_stale_report_and_production_like_source_are_rejected(): void

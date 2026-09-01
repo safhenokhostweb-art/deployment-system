@@ -41,6 +41,36 @@ class LocalAgentVersionSyncTest extends TestCase
         );
     }
 
+    public function test_assigned_artifact_protocol_minimum_matches_the_shipped_agent_and_capability(): void
+    {
+        $shippedVersion = $this->extractLocalAgentVersion(base_path('../deployment-local-agent/agent/agent.php'));
+        $source = file_get_contents(base_path('../deployment-local-agent/agent/agent.php'));
+
+        $this->assertSame($shippedVersion, config('deployment.min_local_agent_version_for_assigned_artifact'));
+        $this->assertStringContainsString("'assigned_artifact_publish_job_id' => true", $source);
+    }
+
+    public function test_both_packaged_uploaders_send_the_claimed_publish_job_public_id(): void
+    {
+        $local = file_get_contents(base_path('../local-agent/lib/ArtifactUploader.php'));
+        $packaged = file_get_contents(base_path('../deployment-local-agent/agent/lib/ArtifactUploader.php'));
+
+        $this->assertSame($local, $packaged, 'ArtifactUploader mirrors must remain byte-identical.');
+        $this->assertStringContainsString("'publish_job_id' => \$jobId", $packaged);
+    }
+
+    public function test_linux_self_upgrade_uses_the_versioned_packaged_runtime_and_expected_version(): void
+    {
+        $runner = file_get_contents(base_path('../deployment-local-agent/agent/lib/LinuxUpgradeRunner.php'));
+        $upgrader = file_get_contents(base_path('../deployment-local-agent/upgrade-linux.sh'));
+
+        $this->assertStringContainsString("\$projects['deployment-system']", $runner);
+        $this->assertStringContainsString("/deployment-local-agent/upgrade-linux.sh", $runner);
+        $this->assertStringContainsString("'--expected-version'", $runner);
+        $this->assertStringContainsString('SOURCE_DIR="${SCRIPT_DIR}/agent"', $upgrader);
+        $this->assertStringContainsString('does not match expected version', $upgrader);
+    }
+
     public function test_hub_default_stays_overridable_via_env(): void
     {
         $configSource = file_get_contents(config_path('deployment.php'));

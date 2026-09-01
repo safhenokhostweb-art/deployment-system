@@ -1,13 +1,13 @@
 $ErrorActionPreference = 'Stop'
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ('local-agent-upgrade-' + [Guid]::NewGuid().ToString('N'))
 
-function New-FakeInstall([string]$InstallRoot) {
+function New-FakeInstall([string]$InstallRoot, [string]$CandidateAgentDir) {
     $fakeAgent = Join-Path $InstallRoot 'agent'
     New-Item -ItemType Directory -Path (Join-Path $fakeAgent 'lib') -Force | Out-Null
-    Copy-Item -LiteralPath 'deployment-local-agent\agent\agent.php' -Destination $fakeAgent
+    Copy-Item -LiteralPath (Join-Path $CandidateAgentDir 'agent.php') -Destination $fakeAgent
     (Get-Content -LiteralPath (Join-Path $fakeAgent 'agent.php') -Raw).Replace("LOCAL_AGENT_VERSION = '1.5.0'", "LOCAL_AGENT_VERSION = '1.4.7'") | Set-Content -LiteralPath (Join-Path $fakeAgent 'agent.php') -NoNewline
-    Copy-Item -LiteralPath 'deployment-local-agent\agent\heartbeat-watchdog.php' -Destination $fakeAgent
-    Copy-Item -Path 'deployment-local-agent\agent\lib\*.php' -Destination (Join-Path $fakeAgent 'lib')
+    Copy-Item -LiteralPath (Join-Path $CandidateAgentDir 'heartbeat-watchdog.php') -Destination $fakeAgent
+    Copy-Item -Path (Join-Path $CandidateAgentDir 'lib\*.php') -Destination (Join-Path $fakeAgent 'lib')
     Set-Content -LiteralPath (Join-Path $fakeAgent 'config.php') -Value "<?php return ['marker' => '$(New-Guid)'];"
     return $fakeAgent
 }
@@ -19,25 +19,39 @@ function Get-TreeFingerprint([string]$Path) {
 }
 
 try {
+    # This is an archival 1.4.7 -> 1.5.0 transition test. Reconstruct the
+    # package it belonged to instead of accidentally sourcing the moving
+    # current package (now 1.5.1+), which the versioned upgrader correctly
+    # refuses as the wrong candidate.
+    $historicalPackage = Join-Path $root 'package-1.5.0'
+    $historicalAgent = Join-Path $historicalPackage 'agent'
+    New-Item -ItemType Directory -Path (Join-Path $historicalAgent 'lib') -Force | Out-Null
+    Copy-Item -LiteralPath 'deployment-local-agent\agent\agent.php' -Destination $historicalAgent
+    (Get-Content -LiteralPath (Join-Path $historicalAgent 'agent.php') -Raw) -replace "LOCAL_AGENT_VERSION = '[^']+'", "LOCAL_AGENT_VERSION = '1.5.0'" | Set-Content -LiteralPath (Join-Path $historicalAgent 'agent.php') -NoNewline
+    Copy-Item -LiteralPath 'deployment-local-agent\agent\heartbeat-watchdog.php' -Destination $historicalAgent
+    Copy-Item -Path 'deployment-local-agent\agent\lib\*.php' -Destination (Join-Path $historicalAgent 'lib')
+    $upgradeScript = Join-Path $historicalPackage 'upgrade-1.5.0.ps1'
+    Copy-Item -LiteralPath 'deployment-local-agent\upgrade-1.5.0.ps1' -Destination $upgradeScript
+
     $install = Join-Path $root 'install'
-    $agent = New-FakeInstall $install
+    $agent = New-FakeInstall $install $historicalAgent
     $state = Join-Path $root 'state'
-    & 'deployment-local-agent\upgrade-1.5.0.ps1' -Action DryRun -RunId local-dry-run -InstallDir $install -StateRoot $state -TestMode
+    & $upgradeScript -Action DryRun -RunId local-dry-run -InstallDir $install -StateRoot $state -TestMode
     if (Test-Path -LiteralPath (Join-Path $state 'stop.log')) { throw 'Dry-run stopped the task.' }
     if (Test-Path -LiteralPath (Join-Path $state 'restart.log')) { throw 'Dry-run restarted the task.' }
-    & 'deployment-local-agent\upgrade-1.5.0.ps1' -Action Activate -RunId local-activate -InstallDir $install -StateRoot $state -TestMode
+    & $upgradeScript -Action Activate -RunId local-activate -InstallDir $install -StateRoot $state -TestMode
     if (@(Get-Content -LiteralPath (Join-Path $state 'restart.log')).Count -ne 1) { throw 'Activation restart count is not one.' }
     $attestation = Join-Path $root 'rollback-attestation.json'
     Set-Content -LiteralPath $attestation -Value '{"run_id":"local-activate","policy_required":false}'
     $attestationHash = (Get-FileHash -LiteralPath $attestation -Algorithm SHA256).Hash.ToLowerInvariant()
-    & 'deployment-local-agent\upgrade-1.5.0.ps1' -Action Rollback -RunId local-activate -InstallDir $install -StateRoot $state -RollbackAttestation $attestation -RollbackAttestationSha256 $attestationHash -TestMode
-    & 'deployment-local-agent\upgrade-1.5.0.ps1' -Action Rollback -RunId local-activate -InstallDir $install -StateRoot $state -RollbackAttestation $attestation -RollbackAttestationSha256 $attestationHash -TestMode
+    & $upgradeScript -Action Rollback -RunId local-activate -InstallDir $install -StateRoot $state -RollbackAttestation $attestation -RollbackAttestationSha256 $attestationHash -TestMode
+    & $upgradeScript -Action Rollback -RunId local-activate -InstallDir $install -StateRoot $state -RollbackAttestation $attestation -RollbackAttestationSha256 $attestationHash -TestMode
     if (@(Get-Content -LiteralPath (Join-Path $state 'restart.log')).Count -ne 2) { throw 'Repeated rollback caused an extra restart.' }
     if (-not (Select-String -LiteralPath (Join-Path $agent 'agent.php') -Quiet -Pattern "LOCAL_AGENT_VERSION = '1.4.7'")) { throw 'Rollback version mismatch.' }
 
     # A real live PID in agent.pid must block activation before AgentDir is moved.
     $lockedInstall = Join-Path $root 'locked-install'
-    $lockedAgent = New-FakeInstall $lockedInstall
+    $lockedAgent = New-FakeInstall $lockedInstall $historicalAgent
     $lockedState = Join-Path $root 'locked-state'
     $blocker = Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 60' -PassThru -WindowStyle Hidden
     try {
@@ -46,7 +60,7 @@ try {
         $lockedTreeBefore = Get-TreeFingerprint $lockedAgent
         $blocked = $false
         try {
-            & 'deployment-local-agent\upgrade-1.5.0.ps1' -Action Activate -RunId locked -InstallDir $lockedInstall -StateRoot $lockedState -TestMode -StopTimeoutSeconds 2 | Out-Null
+            & $upgradeScript -Action Activate -RunId locked -InstallDir $lockedInstall -StateRoot $lockedState -TestMode -StopTimeoutSeconds 2 | Out-Null
         } catch {
             $blocked = $_.Exception.Message -match 'refusing to swap a live directory'
         }
@@ -60,16 +74,16 @@ try {
 
     # Happy path must record a stop before completing the swap/start sequence.
     $orderedInstall = Join-Path $root 'ordered-install'
-    $orderedAgent = New-FakeInstall $orderedInstall
+    $orderedAgent = New-FakeInstall $orderedInstall $historicalAgent
     $orderedState = Join-Path $root 'ordered-state'
-    & 'deployment-local-agent\upgrade-1.5.0.ps1' -Action Activate -RunId ordered -InstallDir $orderedInstall -StateRoot $orderedState -TestMode | Out-Null
+    & $upgradeScript -Action Activate -RunId ordered -InstallDir $orderedInstall -StateRoot $orderedState -TestMode | Out-Null
     if ((Get-Content -LiteralPath (Join-Path $orderedState 'stop.log')) -notcontains 'ordered') { throw 'Activation did not record the pre-swap stop.' }
     if ((Get-Content -LiteralPath (Join-Path $orderedState 'restart.log')) -notcontains 'ordered') { throw 'Activation did not record the post-swap start.' }
     if (-not (Select-String -LiteralPath (Join-Path $orderedAgent 'agent.php') -Quiet -Pattern "LOCAL_AGENT_VERSION = '1.5.0'")) { throw 'Ordered activation version mismatch.' }
 
     # A post-swap failure must restore the exact 1.4.7 tree and start it again.
     $rollbackInstall = Join-Path $root 'automatic-rollback-install'
-    $rollbackAgent = New-FakeInstall $rollbackInstall
+    $rollbackAgent = New-FakeInstall $rollbackInstall $historicalAgent
     $rollbackState = Join-Path $root 'automatic-rollback-state'
     $rollbackRunRoot = Join-Path $rollbackState 'automatic-rollback'
     New-Item -ItemType Directory -Path $rollbackRunRoot -Force | Out-Null
@@ -77,7 +91,7 @@ try {
     $rollbackTreeBefore = Get-TreeFingerprint $rollbackAgent
     $rolledBack = $false
     try {
-        & 'deployment-local-agent\upgrade-1.5.0.ps1' -Action Activate -RunId automatic-rollback -InstallDir $rollbackInstall -StateRoot $rollbackState -TestMode | Out-Null
+        & $upgradeScript -Action Activate -RunId automatic-rollback -InstallDir $rollbackInstall -StateRoot $rollbackState -TestMode | Out-Null
     } catch {
         $rolledBack = $_.Exception.Message -match 'automatically rolled back to 1.4.7'
     }
