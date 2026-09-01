@@ -103,6 +103,7 @@ return [
     'git_commit_timeout_seconds' => 60,
     'git_push_timeout_seconds' => 180,
     'git_pull_timeout_seconds' => 180,
+    'git_fetch_timeout_seconds' => 180,
 
     // Per-command build timeouts (default 30 min / 1800s) - large composer installs can exceed 10 min once they reach 'Generating optimized autoload files'. Raise via config.php if needed; job_max_runtime_seconds must stay above these.
     'composer_timeout_seconds' => 1800,

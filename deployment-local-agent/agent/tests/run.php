@@ -39,6 +39,9 @@ $agent = (string) file_get_contents(__DIR__ . '/../agent.php');
 $buildWorkspace = (string) file_get_contents(__DIR__ . '/../lib/BuildWorkspace.php');
 $evidence = (string) file_get_contents(__DIR__ . '/../lib/ExactCommitEvidence.php');
 $artifactUploader = (string) file_get_contents(__DIR__ . '/../lib/ArtifactUploader.php');
+$materializer = (string) file_get_contents(__DIR__ . '/../lib/PinnedDependencyMaterializer.php');
+$dependencyResolver = (string) file_get_contents(__DIR__ . '/../lib/DependencyRepositoryResolver.php');
+$gitManager = (string) file_get_contents(__DIR__ . '/../lib/GitManager.php');
 
 // --- Root cause: the wired-up build_artifact path must be the safe
 // fetch-and-verify-then-isolated-checkout method, never the strict
@@ -77,6 +80,11 @@ check('a missing requested commit after fetch throws and refuses to build', str_
 // --- Fetch/auth failure fails closed (git exit code checked, no silent continue).
 check('fetch failure throws immediately rather than continuing with stale refs', preg_match('/fetchBranch.*?if \(\$result\[.exitCode.\] !== 0\) \{\s*throw/s', $preparer) === 1, $failures, $passCount);
 check('git commands never suppress a non-interactive credential/host-key prompt into a silent hang (GIT_TERMINAL_PROMPT=0)', str_contains((string) file_get_contents(__DIR__ . '/../lib/GitManager.php'), "GIT_TERMINAL_PROMPT'] = '0'"), $failures, $passCount);
+check('dependency mappings carry source workspace transport metadata into artifact builds', str_contains($agent, "'source_workspace_path' => \$mappedProject['source_workspace_path']") && str_contains($agent, "'remote_name' => \$mappedProject['remote_name']"), $failures, $passCount);
+check('dependency fetch transport is resolved from the trusted mapped workspace remote', str_contains($materializer, '$this->repositories->resolve(') && str_contains($dependencyResolver, 'repository_identity_mismatch'), $failures, $passCount);
+check('same repository branch and SHA pins share one checkout and fetch', str_contains($materializer, '$checkoutKey') && str_contains($materializer, '$checkouts[$checkoutKey]'), $failures, $passCount);
+check('dependency fetch failures expose only categorized diagnostics', str_contains($materializer, 'stderr_category=') && !str_contains($materializer, 'while {$operation}: '), $failures, $passCount);
+check('dependency fetches use a dedicated 180-second timeout', str_contains($gitManager, "'fetch' => 180") && str_contains($agent, "'fetch' => (int) (\$config['git_fetch_timeout_seconds'] ?? 180)"), $failures, $passCount);
 
 // --- The exact requested commit is checked out ONLY inside the isolated,
 // per-job BuildWorkspace — never as a mutation of the persistent source

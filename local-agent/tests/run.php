@@ -589,6 +589,7 @@ check('run() sets GCM_INTERACTIVE=never in the child environment', str_contains(
 $gitWithTimeouts = new GitManager(['add' => 42]);
 check('timeoutFor() returns a configured override when present', $gitWithTimeouts->timeoutFor('add') === 42, $failures, $passCount);
 check('timeoutFor() falls back to its own default for an unconfigured purpose', $gitWithTimeouts->timeoutFor('push') === 180, $failures, $passCount);
+check('dependency fetches have a bounded 180-second default instead of the generic 30-second fallback', $gitWithTimeouts->timeoutFor('fetch') === 180, $failures, $passCount);
 check('timeoutFor() falls back to 30 for a completely unknown purpose', $gitWithTimeouts->timeoutFor('not-a-real-purpose') === 30, $failures, $passCount);
 
 // --- GitCommandException — carries whether the underlying failure was a

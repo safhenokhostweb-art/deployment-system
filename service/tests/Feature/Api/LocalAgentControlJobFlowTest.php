@@ -216,7 +216,7 @@ class LocalAgentControlJobFlowTest extends TestCase
         $this->assertSame('1.4.4', $agent->fresh()->agent_version);
     }
 
-    public function test_1_5_0_agent_can_bootstrap_to_1_5_1_before_assigned_artifact_work(): void
+    public function test_1_5_0_agent_can_bootstrap_to_1_5_2_before_assigned_artifact_work(): void
     {
         $agent = LocalAgent::factory()->approved()->create([
             'operating_system' => 'Linux',
@@ -228,16 +228,16 @@ class LocalAgentControlJobFlowTest extends TestCase
         $this->get('/api/local-agent/control-jobs/next', $this->headersFor($agent, 'GET', '/api/local-agent/control-jobs/next'))
             ->assertOk()
             ->assertJsonPath('job.action', LocalAgentControlJob::ACTION_UPGRADE)
-            ->assertJsonPath('job.expected_version', '1.5.1');
+            ->assertJsonPath('job.expected_version', '1.5.2');
 
-        $reportBody = ['status' => 'started', 'output' => 'UPGRADE_OK old_version=1.5.0 new_version=1.5.1'];
+        $reportBody = ['status' => 'started', 'output' => 'UPGRADE_OK old_version=1.5.0 new_version=1.5.2'];
         $reportPath = "/api/local-agent/control-jobs/{$job->public_id}/report";
         $this->postJson($reportPath, $reportBody, $this->headersFor($agent, 'POST', $reportPath, json_encode($reportBody)))
             ->assertOk()
             ->assertJsonPath('status', LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT);
 
         $heartbeat = [
-            'agent_version' => '1.5.1',
+            'agent_version' => '1.5.2',
             'hostname' => 'linux-builder',
             'operating_system' => 'Linux',
             'capabilities' => [
@@ -251,7 +251,7 @@ class LocalAgentControlJobFlowTest extends TestCase
             ->assertOk();
 
         $this->assertSame(LocalAgentControlJob::STATUS_SUCCEEDED, $job->fresh()->status);
-        $this->assertSame('1.5.1', $job->fresh()->reported_version);
+        $this->assertSame('1.5.2', $job->fresh()->reported_version);
         $this->assertTrue($agent->fresh()->supportsAssignedArtifactUploads());
         $this->assertDatabaseCount('publish_jobs', 0);
         $this->assertDatabaseCount('deployments', 0);

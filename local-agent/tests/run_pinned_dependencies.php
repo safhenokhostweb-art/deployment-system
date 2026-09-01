@@ -2,10 +2,11 @@
 
 declare(strict_types=1);
 
-foreach (['GitCommandException','GitManager','LocalBuildFailedException','SafeFilesystem','Logger','BuildWorkspace','SafetyChecker','PinnedDependencyMaterializer','WorkspaceSourcePreparer','ArtifactBuilder'] as $class) require __DIR__ . '/../lib/' . $class . '.php';
+foreach (['GitCommandException','GitManager','LocalBuildFailedException','SafeFilesystem','Logger','BuildWorkspace','SafetyChecker','DependencyRepositoryResolver','PinnedDependencyMaterializer','WorkspaceSourcePreparer','ArtifactBuilder'] as $class) require __DIR__ . '/../lib/' . $class . '.php';
 
 use LocalAgent\ArtifactBuilder;
 use LocalAgent\BuildWorkspace;
+use LocalAgent\DependencyRepositoryResolver;
 use LocalAgent\GitManager;
 use LocalAgent\LocalBuildFailedException;
 use LocalAgent\PinnedDependencyMaterializer;
@@ -28,6 +29,7 @@ $git = new GitManager(); $failures = []; $passed = 0;
 $check = static function (string $label, bool $ok) use (&$failures, &$passed): void { $ok ? $passed++ : $failures[] = $label; };
 $run = static function (array $command, string $cwd) use ($git): string { $r=$git->run($command,$cwd,60); if($r['exitCode']!==0) throw new RuntimeException($r['output']); return trim($r['output']); };
 $fails = static function (callable $fn) use ($check): bool { try { $fn(); return false; } catch (LocalBuildFailedException) { return true; } };
+$failureMessage = static function (callable $fn): string { try { $fn(); return ''; } catch (LocalBuildFailedException $e) { return $e->getMessage(); } };
 
 try {
     $depSeed = $root . '/dep-seed'; $depRemote = $root . '/dep.git'; mkdir($depSeed,0700,true);
@@ -110,6 +112,20 @@ try {
     }
     $run(['git','add','.'],$saasSeed); $run(['git','commit','-m','six dependency packages'],$saasSeed); $saasSha=$git->lastCommitHash($saasSeed);
     $run(['git','clone','--bare',$saasSeed,$saasRemote],$root);
+    $saasPersistent=$root.'/saas-persistent'; $run(['git','clone','--branch','main',$saasRemote,$saasPersistent],$root);
+    file_put_contents($saasSeed.'/README.md',"newer branch tip\n");
+    $run(['git','add','README.md'],$saasSeed); $run(['git','commit','-m','newer main tip'],$saasSeed); $saasTipSha=$git->lastCommitHash($saasSeed);
+    $run(['git','remote','add','origin',$saasRemote],$saasSeed); $run(['git','push','origin','main'],$saasSeed);
+    $check('dependency fixture has main but no master', $git->run(['git','show-ref','--verify','refs/heads/main'],$saasRemote,30)['exitCode']===0 && $git->run(['git','show-ref','--verify','refs/heads/master'],$saasRemote,30)['exitCode']!==0);
+    $check('pinned dependency SHA is an ancestor rather than branch tip', $saasSha!==$saasTipSha && $git->run(['git','merge-base','--is-ancestor',$saasSha,$saasTipSha],$saasSeed,30)['exitCode']===0);
+    $check('stale clean persistent dependency workspace already contains the pinned SHA', $git->lastCommitHash($saasPersistent)===$saasSha && $git->changedFiles($saasPersistent)===[] && $git->run(['git','cat-file','-e',$saasSha.'^{commit}'],$saasPersistent,30)['exitCode']===0);
+    $sshRepository='ssh://git@ssh.github.com:443/example/saas-platform.git';
+    $httpsRepository='https://github.com/example/saas-platform.git';
+    $run(['git','remote','set-url','origin',$sshRepository],$saasPersistent);
+    $resolvedTransport=(new DependencyRepositoryResolver($git))->resolve(['repository_url'=>$httpsRepository,'source_workspace_path'=>$saasPersistent,'remote_name'=>'origin','branch'=>'main'],'saas-platform','main');
+    $check('same-repository HTTPS mapping resolves to the trusted workspace SSH transport without network access',$resolvedTransport===$sshRepository);
+    $check('wrong dependency repository identity fails closed',$fails(fn()=>(new DependencyRepositoryResolver($git))->resolve(['repository_url'=>'https://github.com/example/other.git','source_workspace_path'=>$saasPersistent,'remote_name'=>'origin','branch'=>'main'],'saas-platform','main')));
+    $run(['git','remote','set-url','origin',$saasRemote],$saasPersistent);
 
     $customerSeed=$root.'/customer-seed'; $customerRemote=$root.'/customer.git'; $customerSource=$root.'/customer-source'; mkdir($customerSeed,0700,true);
     $run(['git','init','--initial-branch=main'],$customerSeed); $run(['git','config','user.email','test@example.test'],$customerSeed); $run(['git','config','user.name','Test'],$customerSeed);
@@ -137,7 +153,7 @@ try {
     };
     [$allowFive,$contractFive]=$policyFor(array_slice($customerPackages,0,5),$saasSha);
     [$allowSix,$contractSix]=$policyFor($customerPackages,$saasSha);
-    $saasMappings=['saas-platform'=>['repository_url'=>$saasRemote]];
+    $saasMappings=['saas-platform'=>['repository_url'=>$saasRemote,'source_workspace_path'=>$saasPersistent,'remote_name'=>'origin','branch'=>'main']];
 
     $five=BuildWorkspace::create($root.'/builds','customer-site','five-existing-paths');
     $preparedFive=$preparer->prepareRemoteCommit($five,$customerSource,$customerRemote,'origin','main',$customerFiveSha,null,$contractFive,$allowFive,$saasMappings);
@@ -151,6 +167,17 @@ try {
     $preparedSix=$preparer->prepareRemoteCommit($six,$customerSource,$customerRemote,'origin','main',$customerSixSha,null,$contractSix,$allowSix,$saasMappings);
     $themeLocks=array_values(array_filter($preparedSix['dependencyLocks'],static fn(array $lock): bool=>($lock['destination_path']??'')==='../saas-platform/packages/saas-platform/modules/theme-runtime'));
     $check('sixth theme-runtime repository is valid and pinned exactly once',count($preparedSix['dependencyLocks'])===6 && count($themeLocks)===1 && ($themeLocks[0]['commit_sha']??'')===$saasSha);
+    $check('six pins sharing one repository branch and SHA use one isolated checkout and fetch',count(glob($six->root().'/dependency-checkouts/*',GLOB_ONLYDIR)?:[])===1);
+
+    $sixRetry=BuildWorkspace::create($root.'/builds','customer-site','six-with-theme-runtime-retry');
+    $preparedRetry=$preparer->prepareRemoteCommit($sixRetry,$customerSource,$customerRemote,'origin','main',$customerSixSha,null,$contractSix,$allowSix,$saasMappings);
+    $check('repeated six-pin materialization is idempotent in a fresh retry workspace',count($preparedRetry['dependencyLocks'])===6 && array_column($preparedRetry['dependencyLocks'],'checksum_sha256')===array_column($preparedSix['dependencyLocks'],'checksum_sha256'));
+
+    $diagnostic=BuildWorkspace::create($root.'/builds','customer-site','failed-fetch-diagnostic');
+    $diagnosticDependency=$contractSix['dependencies'][0]; $diagnosticDependency['branch']='missing-branch';
+    $diagnosticAllow=$allowSix[0]; $diagnosticAllow['branch']='missing-branch';
+    $message=$failureMessage(fn()=>(new PinnedDependencyMaterializer($git))->materialize($diagnostic,[$diagnosticDependency],[$diagnosticAllow],['saas-platform'=>['repository_url'=>$saasRemote]]));
+    $check('fetch failure reports safe mapping branch exit timeout and stderr category diagnostics',str_contains($message,'mapping=saas-platform')&&str_contains($message,'branch=missing-branch')&&str_contains($message,'exit_code=')&&str_contains($message,'timed_out=false')&&str_contains($message,'stderr_category=remote_ref_missing')&&!str_contains($message,$saasRemote));
 
     $missingPin=BuildWorkspace::create($root.'/builds','customer-site','missing-theme-runtime-pin'); $missingContract=$contractSix; array_pop($missingContract['dependencies']);
     $check('missing dependency pin fails closed',$fails(fn()=>$preparer->prepareRemoteCommit($missingPin,$customerSource,$customerRemote,'origin','main',$customerSixSha,null,$missingContract,$allowSix,$saasMappings))); $missingPin->cleanup();
@@ -160,7 +187,7 @@ try {
     $unresolvedContract['dependencies'][5]['source_path']='packages/saas-platform/modules/missing-runtime'; $unresolvedAllow[5]['source_path']='packages/saas-platform/modules/missing-runtime';
     $check('allowlisted but unresolved dependency source fails closed',$fails(fn()=>$preparer->prepareRemoteCommit($unresolved,$customerSource,$customerRemote,'origin','main',$customerSixSha,null,$unresolvedContract,$unresolvedAllow,$saasMappings))); $unresolved->cleanup();
 
-    $five->cleanup(); $six->cleanup();
+    $five->cleanup(); $six->cleanup(); $sixRetry->cleanup(); $diagnostic->cleanup();
 
     // Simulate Composer's final vendor package with a normal copy, then seal and re-verify it.
     mkdir($wa->projectDir().'/vendor/acme',0755,true); SafeFilesystem::copyRecursiveSafely((string)realpath($targetA),(string)realpath($targetA),$wa->projectDir().'/vendor/acme/widget');

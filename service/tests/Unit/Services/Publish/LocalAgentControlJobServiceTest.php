@@ -133,7 +133,7 @@ class LocalAgentControlJobServiceTest extends TestCase
         $this->assertNotNull($job->fresh()->upgrade_verified_at);
     }
 
-    public function test_official_linux_upgrade_targets_1_5_1_and_only_heartbeat_completes_it(): void
+    public function test_official_linux_upgrade_targets_1_5_2_and_only_heartbeat_completes_it(): void
     {
         $agent = LocalAgent::factory()->approved()->create([
             'operating_system' => 'Linux',
@@ -143,15 +143,15 @@ class LocalAgentControlJobServiceTest extends TestCase
         $service = app(LocalAgentControlJobService::class);
 
         $job = $service->queueUpgrade($agent, 'admin@example.test');
-        $this->assertSame('1.5.1', $job->expected_version);
+        $this->assertSame('1.5.2', $job->expected_version);
         $service->claimNext($agent);
-        $service->reportResult($job->fresh(), 'UPGRADE_OK old_version=1.5.0 new_version=1.5.1');
+        $service->reportResult($job->fresh(), 'UPGRADE_OK old_version=1.5.0 new_version=1.5.2');
 
         $this->assertSame(LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT, $job->fresh()->status);
         $this->assertSame(0, $service->verifyUpgradeHeartbeat($agent, '1.5.0'));
-        $this->assertSame(1, $service->verifyUpgradeHeartbeat($agent, '1.5.1'));
+        $this->assertSame(1, $service->verifyUpgradeHeartbeat($agent, '1.5.2'));
         $this->assertSame(LocalAgentControlJob::STATUS_SUCCEEDED, $job->fresh()->status);
-        $this->assertSame('1.5.1', $job->fresh()->reported_version);
+        $this->assertSame('1.5.2', $job->fresh()->reported_version);
         $this->assertDatabaseCount('deployments', 0);
     }
 

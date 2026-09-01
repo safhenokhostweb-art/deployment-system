@@ -67,6 +67,7 @@ final class GitManager
         'revert' => 60,
         'push' => 180,
         'pull' => 180,
+        'fetch' => 180,
     ];
 
     /** Hard cap on accumulated stdout+stderr per command, so an unexpectedly huge `git status` on a giant untracked tree can't exhaust memory. */

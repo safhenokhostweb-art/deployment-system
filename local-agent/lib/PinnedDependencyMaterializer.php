@@ -7,8 +7,11 @@ namespace LocalAgent;
 /** Materializes allowlisted Composer path packages from an exact reachable Git commit. */
 final class PinnedDependencyMaterializer
 {
-    public function __construct(private readonly GitManager $git)
+    private readonly DependencyRepositoryResolver $repositories;
+
+    public function __construct(private readonly GitManager $git, ?DependencyRepositoryResolver $repositories = null)
     {
+        $this->repositories = $repositories ?? new DependencyRepositoryResolver($git);
     }
 
     /**
@@ -21,6 +24,7 @@ final class PinnedDependencyMaterializer
     {
         $locks = [];
         $seenDestinations = [];
+        $checkouts = [];
 
         foreach ($dependencies as $index => $dependency) {
             $normalized = $this->validateRequest($dependency, $allowlist, $repositoryMappings);
@@ -36,16 +40,23 @@ final class PinnedDependencyMaterializer
             }
 
             $mapping = $repositoryMappings[$normalized['repository_mapping']];
-            $checkout = $workspace->root() . '/dependency-checkouts/' . $index . '-' . bin2hex(random_bytes(6));
-            if (!mkdir($checkout, 0700, true) && !is_dir($checkout)) {
-                throw $this->failure('Could not create an isolated dependency checkout.');
-            }
+            $checkoutKey = implode("\0", [$normalized['repository_mapping'], $normalized['branch'], $normalized['commit_sha']]);
+            if (!isset($checkouts[$checkoutKey])) {
+                $checkout = $workspace->root() . '/dependency-checkouts/' . count($checkouts) . '-' . bin2hex(random_bytes(6));
+                if (!mkdir($checkout, 0700, true) && !is_dir($checkout)) {
+                    throw $this->failure('Could not create an isolated dependency checkout.');
+                }
 
-            $this->run(['git', 'init'], $checkout, 30, 'initializing dependency checkout', $onTick);
-            $this->run(['git', 'remote', 'add', 'origin', (string) $mapping['repository_url']], $checkout, 30, 'configuring dependency mapping', $onTick);
-            $this->run(['git', 'fetch', '--no-tags', '--prune', 'origin', $normalized['branch']], $checkout, $this->git->timeoutFor('fetch'), 'fetching dependency branch', $onTick);
-            $this->run(['git', 'cat-file', '-e', $normalized['commit_sha'] . '^{commit}'], $checkout, 30, 'validating dependency commit', $onTick);
-            $this->run(['git', 'merge-base', '--is-ancestor', $normalized['commit_sha'], 'FETCH_HEAD'], $checkout, 30, 'validating dependency reachability', $onTick);
+                $repositoryUrl = $this->repositories->resolve($mapping, $normalized['repository_mapping'], $normalized['branch']);
+                $context = ['mapping' => $normalized['repository_mapping'], 'branch' => $normalized['branch']];
+                $this->run(['git', 'init'], $checkout, 30, 'initializing dependency checkout', $onTick, $context);
+                $this->run(['git', 'remote', 'add', 'origin', $repositoryUrl], $checkout, 30, 'configuring dependency mapping', $onTick, $context);
+                $this->run(['git', 'fetch', '--no-tags', '--prune', 'origin', $normalized['branch']], $checkout, $this->git->timeoutFor('fetch'), 'fetching dependency branch', $onTick, $context);
+                $this->run(['git', 'cat-file', '-e', $normalized['commit_sha'] . '^{commit}'], $checkout, 30, 'validating dependency commit', $onTick, $context);
+                $this->run(['git', 'merge-base', '--is-ancestor', $normalized['commit_sha'], 'FETCH_HEAD'], $checkout, 30, 'validating dependency reachability', $onTick, $context);
+                $checkouts[$checkoutKey] = $checkout;
+            }
+            $checkout = $checkouts[$checkoutKey];
 
             $tree = $this->git->run(['git', 'rev-parse', $normalized['commit_sha'] . ':' . $normalized['source_path']], $checkout, 30);
             $treeHash = strtolower(trim($tree['output']));
@@ -143,12 +154,30 @@ final class PinnedDependencyMaterializer
         return $request;
     }
 
-    private function run(array $command, string $cwd, int $timeout, string $operation, ?callable $onTick): void
+    /** @param array{mapping?: string, branch?: string} $context */
+    private function run(array $command, string $cwd, int $timeout, string $operation, ?callable $onTick, array $context = []): void
     {
         $result = $this->git->run($command, $cwd, $timeout, $onTick);
         if ($result['exitCode'] !== 0) {
-            throw $this->failure("Dependency materialization failed while {$operation}.");
+            $mapping = $context['mapping'] ?? 'unknown';
+            $branch = $context['branch'] ?? 'unknown';
+            $timedOut = ($result['timedOut'] ?? false) === true ? 'true' : 'false';
+            $category = self::stderrCategory((string) ($result['output'] ?? ''), $timedOut === 'true');
+            throw $this->failure("Dependency materialization failed while {$operation} [mapping={$mapping}, branch={$branch}, exit_code={$result['exitCode']}, timed_out={$timedOut}, stderr_category={$category}].");
         }
+    }
+
+    private static function stderrCategory(string $output, bool $timedOut): string
+    {
+        if ($timedOut) return 'timeout';
+        $output = strtolower($output);
+        if (preg_match('/authentication failed|permission denied|could not read username|publickey/', $output) === 1) return 'authentication';
+        if (str_contains($output, 'host key verification failed')) return 'host_key_verification';
+        if (preg_match('/repository .* not found|does not appear to be a git repository/', $output) === 1) return 'repository_not_found';
+        if (preg_match('/could not resolve host|failed to connect|connection (?:timed out|reset|refused)|network is unreachable/', $output) === 1) return 'network';
+        if (str_contains($output, "couldn't find remote ref")) return 'remote_ref_missing';
+        if (str_contains($output, 'failed to start process')) return 'process_start';
+        return 'git_failure';
     }
 
     private function safeRelativePath(string $path, bool $allowParentSegments = false): bool

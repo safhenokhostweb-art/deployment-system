@@ -55,6 +55,7 @@ require __DIR__ . '/lib/LocalProjectStateReporter.php';
 require __DIR__ . '/lib/SourceWorkspaceManager.php';
 require __DIR__ . '/lib/SafeFilesystem.php';
 require __DIR__ . '/lib/BuildWorkspace.php';
+require __DIR__ . '/lib/DependencyRepositoryResolver.php';
 require __DIR__ . '/lib/WorkspaceSourcePreparer.php';
 require __DIR__ . '/lib/PinnedDependencyMaterializer.php';
 require __DIR__ . '/lib/ArtifactBuilder.php';
@@ -101,7 +102,7 @@ use LocalAgent\WorkspaceSourcePreparer;
  * Hub side for why this never triggers an automatic download). Bump
  * when agent.php or lib/* changes in a way that matters operationally.
  */
-const LOCAL_AGENT_VERSION = '1.5.1';
+const LOCAL_AGENT_VERSION = '1.5.2';
 
 $configPath = __DIR__ . '/config.php';
 
@@ -144,6 +145,7 @@ $git = new GitManager(
         'commit' => (int) ($config['git_commit_timeout_seconds'] ?? 60),
         'push' => (int) ($config['git_push_timeout_seconds'] ?? 180),
         'pull' => (int) ($config['git_pull_timeout_seconds'] ?? 180),
+        'fetch' => (int) ($config['git_fetch_timeout_seconds'] ?? 180),
     ],
     jobHeartbeatIntervalSeconds: (int) ($config['job_heartbeat_interval_seconds'] ?? 25),
 );
@@ -461,7 +463,12 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
             $contract = is_array($job['dependency_contract'] ?? null) ? $job['dependency_contract'] : [];
             $mappings = [];
             foreach ($projects as $mappedKey => $mappedProject) {
-                if (is_string($mappedProject['repository_url'] ?? null)) $mappings[$mappedKey] = ['repository_url' => $mappedProject['repository_url']];
+                if (is_string($mappedProject['repository_url'] ?? null)) $mappings[$mappedKey] = [
+                    'repository_url' => $mappedProject['repository_url'],
+                    'source_workspace_path' => $mappedProject['source_workspace_path'] ?? $mappedProject['local_path'] ?? null,
+                    'remote_name' => $mappedProject['remote_name'] ?? 'origin',
+                    'branch' => $mappedProject['branch'] ?? null,
+                ];
             }
             $evidenceContract = is_array($job['evidence_contract'] ?? null) ? $job['evidence_contract'] : [];
             $artifactResult = $artifactUploader->buildAndUploadRemoteCommit($projectKey, $repositoryPath, $repositoryUrl, $remoteName, $commitHash, $artifactBranch, (string) $job['id'], $onTick, $projectConfig['application_root'] ?? '.', $contract, $projectConfig['dependency_allowlist'] ?? [], $mappings, $evidenceContract);
@@ -526,7 +533,12 @@ function pollAndExecutePublish(Client $client, GitManager $git, CommitManager $c
             $contract = is_array($job['dependency_contract'] ?? null) ? $job['dependency_contract'] : [];
             $mappings = [];
             foreach ($projects as $mappedKey => $mappedProject) {
-                if (is_string($mappedProject['repository_url'] ?? null)) $mappings[$mappedKey] = ['repository_url' => $mappedProject['repository_url']];
+                if (is_string($mappedProject['repository_url'] ?? null)) $mappings[$mappedKey] = [
+                    'repository_url' => $mappedProject['repository_url'],
+                    'source_workspace_path' => $mappedProject['source_workspace_path'] ?? $mappedProject['local_path'] ?? null,
+                    'remote_name' => $mappedProject['remote_name'] ?? 'origin',
+                    'branch' => $mappedProject['branch'] ?? null,
+                ];
             }
             $artifactResult = $artifactUploader->buildAndUploadRemoteCommit($projectKey, $repositoryPath, $repositoryUrl, $remoteName, $commitHash, $branch, (string) $job['id'], $onTick, $projectConfig['application_root'] ?? '.', $contract, $projectConfig['dependency_allowlist'] ?? [], $mappings);
 
