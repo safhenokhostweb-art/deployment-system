@@ -192,6 +192,32 @@ class PublishJobFlowTest extends TestCase
         app(PublishJobService::class)->queueArtifactBuild($agent, $project, str_repeat('e', 40), 'main', 'dev@example.test');
     }
 
+    public function test_1_5_1_to_1_5_2_transition_keeps_the_assigned_artifact_gate_closed_until_bootstrap(): void
+    {
+        config()->set('deployment.min_local_agent_version_for_assigned_artifact', '1.5.2');
+        $agent = LocalAgent::factory()->approved()->create(['agent_version' => '1.5.1']);
+        $project = $this->mappedProject($agent);
+        $service = app(PublishJobService::class);
+
+        try {
+            $service->queueArtifactBuild($agent, $project, str_repeat('e', 40), 'main', 'system:release-orchestrator');
+            $this->fail('Agent 1.5.1 unexpectedly passed the assigned-artifact 1.5.2 gate.');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $exception) {
+            $this->assertSame(409, $exception->getStatusCode());
+            $this->assertStringContainsString('Local Agent 1.5.2 or newer', $exception->getMessage());
+        }
+        $this->assertDatabaseCount('publish_jobs', 0);
+        $this->assertDatabaseCount('releases', 0);
+
+        $agent->update(['agent_version' => '1.5.2']);
+        $job = $service->queueArtifactBuild($agent->fresh(), $project->fresh(), str_repeat('e', 40), 'main', 'system:release-orchestrator');
+
+        $this->assertSame(PublishJob::ACTION_BUILD_ARTIFACT, $job->action);
+        $this->assertSame(PublishJob::STATUS_APPROVED, $job->status);
+        $this->assertSame(str_repeat('e', 40), $job->reviewed_head_sha);
+        $this->assertSame('1.5.2', config('deployment.min_local_agent_version_for_assigned_artifact'));
+    }
+
     public function test_dependency_policy_off_does_not_weaken_assigned_artifact_protocol_gate(): void
     {
         config()->set('deployment.artifact_dependency_policies.customer-site.required', false);

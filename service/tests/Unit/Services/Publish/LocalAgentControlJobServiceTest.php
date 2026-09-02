@@ -4,6 +4,9 @@ namespace Tests\Unit\Services\Publish;
 
 use App\Models\LocalAgent;
 use App\Models\LocalAgentControlJob;
+use App\Models\Deployment;
+use App\Models\Project;
+use App\Models\Release;
 use App\Services\Publish\LocalAgentControlJobService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -110,49 +113,58 @@ class LocalAgentControlJobServiceTest extends TestCase
 
     public function test_linux_upgrade_waits_for_the_expected_version_heartbeat(): void
     {
-        config(['deployment.latest_local_agent_version' => '1.4.4']);
+        $target = $this->createUpgradeAuthority();
+        config(['deployment.latest_local_agent_version' => '1.5.3']);
         $agent = LocalAgent::factory()->approved()->create([
             'operating_system' => 'Linux',
-            'agent_version' => '1.4.3',
+            'agent_version' => '1.5.2',
             'capabilities' => ['linux_self_upgrade' => true],
         ]);
         $service = app(LocalAgentControlJobService::class);
 
         $job = $service->queueUpgrade($agent, 'admin@example.test');
-        $this->assertSame('1.4.4', $job->expected_version);
+        $this->assertSame('1.5.3', $job->expected_version);
         $service->claimNext($agent);
         $job->refresh();
-        $activated = $service->reportResult($job, 'UPGRADE_OK old_version=1.4.3 new_version=1.4.4');
+        $activated = $service->reportUpgradeStarted($job, 'validated', $target['commit'], str_repeat('b', 40), 'deployment-system');
 
         $this->assertSame(LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT, $activated->status);
-        $this->assertSame(0, $service->verifyUpgradeHeartbeat($agent, '1.4.3'));
+        $this->assertSame(0, $service->verifyUpgradeHeartbeat($agent, '1.5.2'));
         $this->assertSame(LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT, $job->fresh()->status);
-        $this->assertSame(1, $service->verifyUpgradeHeartbeat($agent, '1.4.4'));
+        $this->assertSame(1, $service->verifyUpgradeHeartbeat($agent, '1.5.3'));
         $this->assertSame(LocalAgentControlJob::STATUS_SUCCEEDED, $job->fresh()->status);
-        $this->assertSame('1.4.4', $job->fresh()->reported_version);
+        $this->assertSame('1.5.3', $job->fresh()->reported_version);
         $this->assertNotNull($job->fresh()->upgrade_verified_at);
     }
 
-    public function test_official_linux_upgrade_targets_1_5_2_and_only_heartbeat_completes_it(): void
+    public function test_1_5_1_agent_requires_the_one_time_exact_commit_bootstrap(): void
     {
         $agent = LocalAgent::factory()->approved()->create([
             'operating_system' => 'Linux',
-            'agent_version' => '1.5.0',
+            'agent_version' => '1.5.1',
+            'capabilities' => ['linux_self_upgrade' => true],
+        ]);
+
+        $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
+        $this->expectExceptionMessage('SERVER BOOTSTRAP REQUIRED');
+        app(LocalAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
+    }
+
+    public function test_exact_commit_upgrade_rejects_same_version_from_the_wrong_commit(): void
+    {
+        config(['deployment.latest_local_agent_version' => '1.5.3']);
+        $target = $this->createUpgradeAuthority();
+        $agent = LocalAgent::factory()->approved()->create([
+            'operating_system' => 'Linux',
+            'agent_version' => '1.5.2',
             'capabilities' => ['linux_self_upgrade' => true],
         ]);
         $service = app(LocalAgentControlJobService::class);
-
         $job = $service->queueUpgrade($agent, 'admin@example.test');
-        $this->assertSame('1.5.2', $job->expected_version);
         $service->claimNext($agent);
-        $service->reportResult($job->fresh(), 'UPGRADE_OK old_version=1.5.0 new_version=1.5.2');
 
-        $this->assertSame(LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT, $job->fresh()->status);
-        $this->assertSame(0, $service->verifyUpgradeHeartbeat($agent, '1.5.0'));
-        $this->assertSame(1, $service->verifyUpgradeHeartbeat($agent, '1.5.2'));
-        $this->assertSame(LocalAgentControlJob::STATUS_SUCCEEDED, $job->fresh()->status);
-        $this->assertSame('1.5.2', $job->fresh()->reported_version);
-        $this->assertDatabaseCount('deployments', 0);
+        $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
+        $service->reportUpgradeStarted($job->fresh(), 'validated', str_repeat('f', 40), str_repeat('b', 40), 'deployment-system');
     }
 
     public function test_remote_upgrade_rejects_an_agent_without_bootstrap_capability(): void
@@ -166,5 +178,24 @@ class LocalAgentControlJobServiceTest extends TestCase
 
         $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
         app(LocalAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
+    }
+
+    /** @return array{commit:string} */
+    private function createUpgradeAuthority(): array
+    {
+        $commit = str_repeat('a', 40);
+        $project = Project::factory()->create(['project_key' => 'deployment-system', 'branch' => 'master']);
+        $release = Release::factory()->ready()->create(['project_id' => $project->id, 'commit_hash' => $commit, 'branch' => 'master']);
+        Deployment::factory()->create([
+            'project_id' => $project->id,
+            'server_id' => $project->server_id,
+            'release_id' => $release->id,
+            'status' => Deployment::STATUS_SUCCEEDED,
+            'commit_hash' => $commit,
+            'branch' => 'master',
+            'finished_at' => now(),
+        ]);
+
+        return ['commit' => $commit];
     }
 }

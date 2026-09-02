@@ -91,5 +91,62 @@ check 'rollback restores old lib contents' test "$rollback_lib_before" = "$(sha2
 check 'rollback removes newly introduced lib files' test ! -e "$rollback_install/lib/NewRuntimeLibrary.php"
 check 'rollback preserves config.php' test "$rollback_config_before" = "$(sha256sum "$rollback_install/config.php" | awk '{print $1}')"
 
+# A failed operator-managed service restart must also restore the old runtime.
+restart_install="$TMP_ROOT/restart-install"
+restart_source="$TMP_ROOT/restart-source"
+fake_systemctl="$TMP_ROOT/fake-systemctl"
+restart_state="$TMP_ROOT/restart-state"
+make_runtime "$restart_install" 1.4.3
+make_source "$restart_source" 1.4.4
+printf '%s\n' '<?php return ["token" => "restart-preserve"];' >"$restart_install/config.php"
+restart_agent_before="$(sha256sum "$restart_install/agent.php" | awk '{print $1}')"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'case "$1" in' \
+    '    is-active|stop) exit 0 ;;' \
+    '    restart)' \
+    '        if [[ ! -e "$FAKE_SYSTEMCTL_STATE" ]]; then' \
+    '            : >"$FAKE_SYSTEMCTL_STATE"' \
+    '            exit 1' \
+    '        fi' \
+    '        exit 0' \
+    '        ;;' \
+    '    *) exit 1 ;;' \
+    'esac' >"$fake_systemctl"
+chmod +x "$fake_systemctl"
+if LOCAL_AGENT_UPGRADER_TEST_MODE=1 \
+    LOCAL_AGENT_UPGRADER_PHP_BIN="${LOCAL_AGENT_TEST_PHP_BIN:-php}" \
+    LOCAL_AGENT_UPGRADER_BACKUP_ROOT="$restart_install/storage/upgrades/backups" \
+    LOCAL_AGENT_UPGRADER_SYSTEMCTL_BIN="$fake_systemctl" \
+    FAKE_SYSTEMCTL_STATE="$restart_state" \
+    bash "$UPGRADER" --source-dir "$restart_source" --install-dir "$restart_install" --expected-version 1.4.4 >/dev/null 2>&1; then
+    restart_failed=1
+else
+    restart_failed=0
+fi
+check 'service restart failure rejects the upgrade' test "$restart_failed" -eq 0
+check 'service restart failure rolls back the active runtime' test "$restart_agent_before" = "$(sha256sum "$restart_install/agent.php" | awk '{print $1}')"
+check 'rollback attempts to restart the restored runtime' test -f "$restart_state"
+
+# Explicit one-time migration boundary. The 1.5.1 Runner can activate this
+# package once its exact source is made available; 1.5.2+ uses the new
+# exact-commit materializer for every subsequent Dashboard upgrade.
+bootstrap_install="$TMP_ROOT/bootstrap-1.5.2-install"
+make_runtime "$bootstrap_install" 1.5.1
+printf '%s\n' '<?php return ["token" => "bootstrap-preserve"];' >"$bootstrap_install/config.php"
+bootstrap_output="$(
+    LOCAL_AGENT_UPGRADER_TEST_MODE=1 \
+    LOCAL_AGENT_UPGRADER_PHP_BIN="${LOCAL_AGENT_TEST_PHP_BIN:-php}" \
+    LOCAL_AGENT_UPGRADER_BACKUP_ROOT="$bootstrap_install/storage/upgrades/backups" \
+    bash "$UPGRADER" \
+        --source-dir "$ROOT/deployment-local-agent/agent" \
+        --install-dir "$bootstrap_install" \
+        --agent-managed-restart \
+        --expected-version 1.5.2
+)"
+check 'historical 1.5.1 runtime can bootstrap through the official 1.5.2 package' grep -q 'UPGRADE_OK old_version=1.5.1 new_version=1.5.2' <<<"$bootstrap_output"
+check 'bootstrap activates canonical Agent 1.5.2' grep -q "LOCAL_AGENT_VERSION = '1.5.2'" "$bootstrap_install/agent.php"
+check 'bootstrap package includes exact-commit upgrade materialization' test -f "$bootstrap_install/lib/LinuxUpgradePackageMaterializer.php"
+
 printf '\nLinux upgrader: %d passed, %d failed\n' "$passed" "$failed"
 test "$failed" -eq 0

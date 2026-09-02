@@ -203,7 +203,6 @@ if [[ "$TEST_MODE" != "1" ]]; then
 fi
 
 rm -rf -- "${INSTALL_DIR}/lib.upgrade-old-${STAMP}"
-ACTIVATION_STARTED=0
 
 if [[ "$AGENT_MANAGED_RESTART" != "1" ]]; then
     if [[ "$SERVICE_WAS_ACTIVE" == "1" ]]; then
@@ -213,6 +212,7 @@ if [[ "$AGENT_MANAGED_RESTART" != "1" ]]; then
         "$SYSTEMCTL_BIN" stop "$SERVICE_NAME" >/dev/null 2>&1 || true
     fi
 fi
+ACTIVATION_STARTED=0
 
 trap - ERR
 echo "UPGRADE_OK old_version=${OLD_VERSION} new_version=${NEW_VERSION} config_sha256=${CONFIG_HASH_BEFORE} backup=${BACKUP} restart_mode=$([[ "$AGENT_MANAGED_RESTART" == "1" ]] && echo agent || echo systemd)"

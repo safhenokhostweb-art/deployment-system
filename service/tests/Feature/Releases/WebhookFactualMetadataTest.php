@@ -5,7 +5,10 @@ namespace Tests\Feature\Releases;
 use App\Jobs\ProcessGitHubWebhookPush;
 use App\Models\Artifact;
 use App\Models\GitHubAccount;
+use App\Models\LocalAgent;
+use App\Models\LocalProjectMapping;
 use App\Models\Project;
+use App\Models\PublishJob;
 use App\Models\Release;
 use App\Services\GitHub\GitHubAppClient;
 use App\Services\Publish\AuthoritativeBuildAgentResolver;
@@ -192,6 +195,43 @@ class WebhookFactualMetadataTest extends TestCase
             ['service/app/Http/Controllers/Dashboard/ReleaseBackfillController.php', 'service/app/Services/Releases/ReleaseBackfillService.php'],
             Release::sole()->metadata['changed_files'],
         );
+    }
+
+    public function test_automatic_release_waits_at_the_1_5_2_gate_then_queues_after_bootstrap(): void
+    {
+        config()->set('deployment.min_local_agent_version_for_assigned_artifact', '1.5.2');
+        $project = $this->githubProject();
+        $project->update(['requires_complete_artifact' => true]);
+        $agent = LocalAgent::factory()->productionBuild()->create([
+            'agent_version' => '1.5.1',
+            'last_seen_at' => now(),
+            'capabilities' => ['git' => true, 'laravel_release_manifest' => true, 'assigned_artifact_publish_job_id' => true],
+        ]);
+        LocalProjectMapping::factory()->create([
+            'local_agent_id' => $agent->id,
+            'project_id' => $project->id,
+            'source_workspace_path' => '/opt/deployment-agent/workspaces/deployment-system',
+            'git_branch' => 'main',
+            'local_head_sha' => self::HEAD,
+            'reported_branch' => 'main',
+            'reported_at' => now(),
+        ]);
+        $project->update(['authoritative_build_local_agent_id' => $agent->id]);
+
+        $this->dispatch($project->fresh(), self::HEAD);
+
+        $this->assertSame(Release::STATUS_AWAITING_ARTIFACT, Release::sole()->status);
+        $this->assertDatabaseCount('publish_jobs', 0);
+        $this->assertDatabaseCount('deployments', 0);
+
+        $agent->update(['agent_version' => '1.5.2']);
+        $this->dispatch($project->fresh(), self::HEAD);
+
+        $job = PublishJob::sole();
+        $this->assertSame(PublishJob::ACTION_BUILD_ARTIFACT, $job->action);
+        $this->assertSame(PublishJob::STATUS_APPROVED, $job->status);
+        $this->assertSame(self::HEAD, $job->reviewed_head_sha);
+        $this->assertSame(Release::sole()->id, $job->release_id);
     }
 
     // 10. no Deployment is created merely by metadata generation

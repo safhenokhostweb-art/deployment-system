@@ -47,6 +47,7 @@ class LocalAgentVersionSyncTest extends TestCase
         $source = file_get_contents(base_path('../deployment-local-agent/agent/agent.php'));
 
         $this->assertSame($shippedVersion, config('deployment.min_local_agent_version_for_assigned_artifact'));
+        $this->assertSame('1.5.2', config('deployment.min_local_agent_version_for_exact_commit_upgrade'));
         $this->assertStringContainsString("'assigned_artifact_publish_job_id' => true", $source);
     }
 
@@ -62,13 +63,34 @@ class LocalAgentVersionSyncTest extends TestCase
     public function test_linux_self_upgrade_uses_the_versioned_packaged_runtime_and_expected_version(): void
     {
         $runner = file_get_contents(base_path('../deployment-local-agent/agent/lib/LinuxUpgradeRunner.php'));
+        $materializer = file_get_contents(base_path('../deployment-local-agent/agent/lib/LinuxUpgradePackageMaterializer.php'));
         $upgrader = file_get_contents(base_path('../deployment-local-agent/upgrade-linux.sh'));
 
-        $this->assertStringContainsString("\$projects['deployment-system']", $runner);
-        $this->assertStringContainsString("/deployment-local-agent/upgrade-linux.sh", $runner);
+        $this->assertStringContainsString('LinuxUpgradePackageMaterializer', $runner);
+        $this->assertStringContainsString("['git', 'fetch', '--no-tags', '--prune', 'origin', 'refs/heads/' . \$branch]", $materializer);
+        $this->assertStringContainsString("['git', 'archive', '--format=zip'", $materializer);
+        $this->assertStringContainsString("\$expectedCommit . ':deployment-local-agent'", $materializer);
         $this->assertStringContainsString("'--expected-version'", $runner);
         $this->assertStringContainsString('SOURCE_DIR="${SCRIPT_DIR}/agent"', $upgrader);
         $this->assertStringContainsString('does not match expected version', $upgrader);
+    }
+
+    public function test_local_and_packaged_exact_commit_upgrade_sources_have_no_semantic_drift(): void
+    {
+        $critical = [
+            'agent.php',
+            'lib/DependencyRepositoryResolver.php',
+            'lib/GitManager.php',
+            'lib/LinuxUpgradePackageMaterializer.php',
+            'lib/LinuxUpgradeRunner.php',
+            'lib/PinnedDependencyMaterializer.php',
+            'lib/SafeFilesystem.php',
+            'lib/SafetyChecker.php',
+        ];
+        $local = $this->runtimeFingerprints(base_path('../local-agent'), $critical);
+        $packaged = $this->runtimeFingerprints(base_path('../deployment-local-agent/agent'), $critical);
+
+        $this->assertSame($local, $packaged, 'Local and packaged exact-commit upgrade semantics must match; comments and formatting may differ.');
     }
 
     public function test_hub_default_stays_overridable_via_env(): void
@@ -91,5 +113,34 @@ class LocalAgentVersionSyncTest extends TestCase
         $this->assertSame(1, $matched, "Could not find a LOCAL_AGENT_VERSION constant declaration in {$path}");
 
         return $matches[1];
+    }
+
+    /** @return array<string, string> */
+    private function runtimeFingerprints(string $root, array $paths): array
+    {
+        sort($paths);
+
+        $fingerprints = [];
+        foreach ($paths as $relative) {
+            $tokens = token_get_all((string) file_get_contents($root.'/'.$relative));
+            $semantic = '';
+            foreach ($tokens as $token) {
+                if (is_array($token) && in_array($token[0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) {
+                    continue;
+                }
+                if (is_array($token) && $token[0] === T_OPEN_TAG) {
+                    $semantic .= '<?php';
+                    continue;
+                }
+                if (is_array($token) && $token[0] === T_CLOSE_TAG) {
+                    $semantic .= '?>';
+                    continue;
+                }
+                $semantic .= is_array($token) ? $token[1] : $token;
+            }
+            $fingerprints[$relative] = hash('sha256', $semantic);
+        }
+
+        return $fingerprints;
     }
 }

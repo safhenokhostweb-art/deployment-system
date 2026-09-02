@@ -4,6 +4,9 @@ namespace Tests\Feature\Dashboard;
 
 use App\Models\LocalAgent;
 use App\Models\LocalAgentControlJob;
+use App\Models\Deployment;
+use App\Models\Project;
+use App\Models\Release;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -46,13 +49,14 @@ class LocalAgentControlTest extends TestCase
         ]);
     }
 
-    public function test_admin_can_queue_a_bootstrapped_linux_agent_upgrade(): void
+    public function test_admin_can_queue_an_exact_commit_linux_agent_upgrade(): void
     {
-        config(['deployment.latest_local_agent_version' => '1.4.4']);
+        $commit = $this->createUpgradeAuthority();
+        config(['deployment.latest_local_agent_version' => '1.5.3']);
         $admin = User::factory()->create();
         $agent = LocalAgent::factory()->approved()->create([
             'operating_system' => 'Linux',
-            'agent_version' => '1.4.3',
+            'agent_version' => '1.5.2',
             'capabilities' => ['linux_self_upgrade' => true],
         ]);
 
@@ -63,18 +67,20 @@ class LocalAgentControlTest extends TestCase
             'local_agent_id' => $agent->id,
             'action' => LocalAgentControlJob::ACTION_UPGRADE,
             'status' => LocalAgentControlJob::STATUS_QUEUED,
-            'expected_version' => '1.4.4',
+            'expected_version' => '1.5.3',
+            'expected_commit_hash' => $commit,
+            'repository_mapping' => 'deployment-system',
         ]);
     }
 
     public function test_dashboard_refuses_remote_upgrade_before_linux_bootstrap(): void
     {
-        config(['deployment.latest_local_agent_version' => '1.4.4']);
+        config(['deployment.latest_local_agent_version' => '1.5.2']);
         $admin = User::factory()->create();
         $agent = LocalAgent::factory()->approved()->create([
             'operating_system' => 'Linux',
-            'agent_version' => '1.4.3',
-            'capabilities' => ['linux_self_upgrade' => false],
+            'agent_version' => '1.5.1',
+            'capabilities' => ['linux_self_upgrade' => true],
         ]);
 
         $this->actingAs($admin)->post(route('local-agents.upgrade', $agent))->assertStatus(409);
@@ -193,5 +199,23 @@ class LocalAgentControlTest extends TestCase
         $agent = LocalAgent::factory()->approved()->create(['agent_version' => config('deployment.latest_local_agent_version')]);
 
         $this->assertFalse($agent->isUpdateAvailable());
+    }
+
+    private function createUpgradeAuthority(): string
+    {
+        $commit = str_repeat('a', 40);
+        $project = Project::factory()->create(['project_key' => 'deployment-system', 'branch' => 'master']);
+        $release = Release::factory()->ready()->create(['project_id' => $project->id, 'commit_hash' => $commit, 'branch' => 'master']);
+        Deployment::factory()->create([
+            'project_id' => $project->id,
+            'server_id' => $project->server_id,
+            'release_id' => $release->id,
+            'status' => Deployment::STATUS_SUCCEEDED,
+            'commit_hash' => $commit,
+            'branch' => 'master',
+            'finished_at' => now(),
+        ]);
+
+        return $commit;
     }
 }

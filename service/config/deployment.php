@@ -294,6 +294,10 @@ return [
     // uploads remain governed by the older release-manifest minimum above.
     'min_local_agent_version_for_assigned_artifact' => (string) env('DEPLOYMENT_MIN_LOCAL_AGENT_VERSION_FOR_ASSIGNED_ARTIFACT', '1.5.2'),
 
+    // First Agent protocol that fetches and verifies an exact-commit Linux
+    // upgrade package. Older capable Agents use the explicit bootstrap mode.
+    'min_local_agent_version_for_exact_commit_upgrade' => (string) env('DEPLOYMENT_MIN_LOCAL_AGENT_VERSION_FOR_EXACT_COMMIT_UPGRADE', '1.5.2'),
+
     // A production artifact must be built from fresh workspace evidence
     // reported by the one authoritative Agent configured on the Project.
     'artifact_workspace_report_max_age_seconds' => (int) env('DEPLOYMENT_ARTIFACT_WORKSPACE_REPORT_MAX_AGE_SECONDS', 300),

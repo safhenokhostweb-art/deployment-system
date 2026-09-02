@@ -4,6 +4,9 @@ namespace Tests\Feature\Api;
 
 use App\Models\LocalAgent;
 use App\Models\LocalAgentControlJob;
+use App\Models\Deployment;
+use App\Models\Project;
+use App\Models\Release;
 use App\Services\Publish\LocalAgentControlJobService;
 use Database\Factories\LocalAgentFactory;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -186,10 +189,11 @@ class LocalAgentControlJobFlowTest extends TestCase
 
     public function test_upgrade_is_completed_only_by_authenticated_expected_version_heartbeat(): void
     {
-        config(['deployment.latest_local_agent_version' => '1.4.4']);
+        $commit = $this->createUpgradeAuthority();
+        config(['deployment.latest_local_agent_version' => '1.5.3']);
         $agent = LocalAgent::factory()->approved()->create([
             'operating_system' => 'Linux',
-            'agent_version' => '1.4.3',
+            'agent_version' => '1.5.2',
             'capabilities' => ['linux_self_upgrade' => true],
         ]);
         $job = app(LocalAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
@@ -198,63 +202,81 @@ class LocalAgentControlJobFlowTest extends TestCase
         $this->get('/api/local-agent/control-jobs/next', $headers)
             ->assertOk()
             ->assertJsonPath('job.action', LocalAgentControlJob::ACTION_UPGRADE)
-            ->assertJsonPath('job.expected_version', '1.4.4');
+            ->assertJsonPath('job.expected_version', '1.5.3')
+            ->assertJsonPath('job.expected_commit_hash', $commit);
 
-        $reportBody = ['status' => 'started', 'output' => 'Upgrade validation passed; activation is starting.'];
+        $reportBody = [
+            'status' => 'started',
+            'output' => 'Upgrade validation passed; activation is starting.',
+            'source_commit' => $commit,
+            'package_tree_hash' => str_repeat('b', 40),
+            'repository_mapping' => 'deployment-system',
+        ];
         $reportPath = "/api/local-agent/control-jobs/{$job->public_id}/report";
         $reportHeaders = $this->headersFor($agent, 'POST', $reportPath, json_encode($reportBody));
         $this->postJson($reportPath, $reportBody, $reportHeaders)
             ->assertOk()
             ->assertJson(['status' => LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT]);
 
-        $heartbeat = ['agent_version' => '1.4.4', 'hostname' => 'linux-builder', 'operating_system' => 'Linux', 'capabilities' => ['linux_self_upgrade' => true]];
+        $heartbeat = ['agent_version' => '1.5.3', 'hostname' => 'linux-builder', 'operating_system' => 'Linux', 'capabilities' => ['linux_self_upgrade' => true]];
         $heartbeatHeaders = $this->headersFor($agent, 'POST', '/api/local-agent/heartbeat', json_encode($heartbeat));
         $this->postJson('/api/local-agent/heartbeat', $heartbeat, $heartbeatHeaders)->assertOk();
 
         $this->assertSame(LocalAgentControlJob::STATUS_SUCCEEDED, $job->fresh()->status);
-        $this->assertSame('1.4.4', $job->fresh()->reported_version);
-        $this->assertSame('1.4.4', $agent->fresh()->agent_version);
+        $this->assertSame('1.5.3', $job->fresh()->reported_version);
+        $this->assertSame('1.5.3', $agent->fresh()->agent_version);
     }
 
-    public function test_1_5_0_agent_can_bootstrap_to_1_5_2_before_assigned_artifact_work(): void
+    public function test_1_5_1_agent_must_use_the_one_time_bootstrap_before_dashboard_upgrade(): void
     {
         $agent = LocalAgent::factory()->approved()->create([
             'operating_system' => 'Linux',
-            'agent_version' => '1.5.0',
+            'agent_version' => '1.5.1',
             'capabilities' => ['git' => true, 'laravel_release_manifest' => true, 'linux_self_upgrade' => true],
         ]);
-        $job = app(LocalAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
+        $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
+        $this->expectExceptionMessage('SERVER BOOTSTRAP REQUIRED');
+        app(LocalAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
+    }
 
+    public function test_exact_commit_upgrade_rejects_wrong_commit_and_only_exact_version_heartbeat_completes(): void
+    {
+        config(['deployment.latest_local_agent_version' => '1.5.3']);
+        $commit = $this->createUpgradeAuthority();
+        $agent = LocalAgent::factory()->approved()->create([
+            'operating_system' => 'Linux',
+            'agent_version' => '1.5.2',
+            'capabilities' => ['linux_self_upgrade' => true],
+        ]);
+        $job = app(LocalAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
         $this->get('/api/local-agent/control-jobs/next', $this->headersFor($agent, 'GET', '/api/local-agent/control-jobs/next'))
             ->assertOk()
-            ->assertJsonPath('job.action', LocalAgentControlJob::ACTION_UPGRADE)
-            ->assertJsonPath('job.expected_version', '1.5.2');
+            ->assertJsonPath('job.expected_commit_hash', $commit);
 
-        $reportBody = ['status' => 'started', 'output' => 'UPGRADE_OK old_version=1.5.0 new_version=1.5.2'];
         $reportPath = "/api/local-agent/control-jobs/{$job->public_id}/report";
-        $this->postJson($reportPath, $reportBody, $this->headersFor($agent, 'POST', $reportPath, json_encode($reportBody)))
+        $wrong = [
+            'status' => 'started',
+            'source_commit' => str_repeat('f', 40),
+            'package_tree_hash' => str_repeat('b', 40),
+            'repository_mapping' => 'deployment-system',
+        ];
+        $this->postJson($reportPath, $wrong, $this->headersFor($agent, 'POST', $reportPath, json_encode($wrong)))->assertStatus(422);
+        $this->assertSame(LocalAgentControlJob::STATUS_RUNNING, $job->fresh()->status);
+
+        $correct = array_replace($wrong, ['source_commit' => $commit]);
+        $this->postJson($reportPath, $correct, $this->headersFor($agent, 'POST', $reportPath, json_encode($correct)))
             ->assertOk()
             ->assertJsonPath('status', LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT);
 
-        $heartbeat = [
-            'agent_version' => '1.5.2',
-            'hostname' => 'linux-builder',
-            'operating_system' => 'Linux',
-            'capabilities' => [
-                'git' => true,
-                'laravel_release_manifest' => true,
-                'assigned_artifact_publish_job_id' => true,
-                'linux_self_upgrade' => true,
-            ],
-        ];
-        $this->postJson('/api/local-agent/heartbeat', $heartbeat, $this->headersFor($agent, 'POST', '/api/local-agent/heartbeat', json_encode($heartbeat)))
-            ->assertOk();
+        $higher = ['agent_version' => '1.5.4', 'hostname' => 'linux-builder', 'operating_system' => 'Linux'];
+        $this->postJson('/api/local-agent/heartbeat', $higher, $this->headersFor($agent, 'POST', '/api/local-agent/heartbeat', json_encode($higher)))->assertOk();
+        $this->assertSame(LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT, $job->fresh()->status);
 
+        $exact = array_replace($higher, ['agent_version' => '1.5.3']);
+        $this->postJson('/api/local-agent/heartbeat', $exact, $this->headersFor($agent, 'POST', '/api/local-agent/heartbeat', json_encode($exact)))->assertOk();
         $this->assertSame(LocalAgentControlJob::STATUS_SUCCEEDED, $job->fresh()->status);
-        $this->assertSame('1.5.2', $job->fresh()->reported_version);
-        $this->assertTrue($agent->fresh()->supportsAssignedArtifactUploads());
-        $this->assertDatabaseCount('publish_jobs', 0);
-        $this->assertDatabaseCount('deployments', 0);
+        $this->assertSame($commit, $job->fresh()->reported_commit_hash);
+        $this->assertSame(str_repeat('b', 40), $job->fresh()->package_tree_hash);
     }
 
     public function test_heartbeat_reports_a_project_config_version_agents_use_to_detect_changed_mappings(): void
@@ -267,5 +289,23 @@ class LocalAgentControlJobFlowTest extends TestCase
         $response = $this->postJson('/api/local-agent/heartbeat', $body, $headers)->assertOk();
 
         $this->assertSame($agent->projectConfigVersion(), $response->json('project_config_version'));
+    }
+
+    private function createUpgradeAuthority(): string
+    {
+        $commit = str_repeat('a', 40);
+        $project = Project::factory()->create(['project_key' => 'deployment-system', 'branch' => 'master']);
+        $release = Release::factory()->ready()->create(['project_id' => $project->id, 'commit_hash' => $commit, 'branch' => 'master']);
+        Deployment::factory()->create([
+            'project_id' => $project->id,
+            'server_id' => $project->server_id,
+            'release_id' => $release->id,
+            'status' => Deployment::STATUS_SUCCEEDED,
+            'commit_hash' => $commit,
+            'branch' => 'master',
+            'finished_at' => now(),
+        ]);
+
+        return $commit;
     }
 }

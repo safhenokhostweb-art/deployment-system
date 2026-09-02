@@ -42,6 +42,8 @@ $artifactUploader = (string) file_get_contents(__DIR__ . '/../lib/ArtifactUpload
 $materializer = (string) file_get_contents(__DIR__ . '/../lib/PinnedDependencyMaterializer.php');
 $dependencyResolver = (string) file_get_contents(__DIR__ . '/../lib/DependencyRepositoryResolver.php');
 $gitManager = (string) file_get_contents(__DIR__ . '/../lib/GitManager.php');
+$upgradePackage = (string) file_get_contents(__DIR__ . '/../lib/LinuxUpgradePackageMaterializer.php');
+$upgradeRunner = (string) file_get_contents(__DIR__ . '/../lib/LinuxUpgradeRunner.php');
 
 // --- Root cause: the wired-up build_artifact path must be the safe
 // fetch-and-verify-then-isolated-checkout method, never the strict
@@ -85,6 +87,9 @@ check('dependency fetch transport is resolved from the trusted mapped workspace 
 check('same repository branch and SHA pins share one checkout and fetch', str_contains($materializer, '$checkoutKey') && str_contains($materializer, '$checkouts[$checkoutKey]'), $failures, $passCount);
 check('dependency fetch failures expose only categorized diagnostics', str_contains($materializer, 'stderr_category=') && !str_contains($materializer, 'while {$operation}: '), $failures, $passCount);
 check('dependency fetches use a dedicated 180-second timeout', str_contains($gitManager, "'fetch' => 180") && str_contains($agent, "'fetch' => (int) (\$config['git_fetch_timeout_seconds'] ?? 180)"), $failures, $passCount);
+check('Linux upgrades fetch the validated branch into an isolated repository', str_contains($upgradePackage, "['git', 'fetch', '--no-tags', '--prune', 'origin', 'refs/heads/' . \$branch]") && str_contains($upgradePackage, '$this->repositories->resolve('), $failures, $passCount);
+check('Linux upgrade packages archive and verify the exact job commit', str_contains($upgradePackage, "['git', 'archive', '--format=zip'") && str_contains($upgradePackage, '$expectedCommit') && str_contains($upgradePackage, 'verifyExtractedTree'), $failures, $passCount);
+check('Linux activation starts only after exact package validation is reported', str_contains($upgradeRunner, '$onValidated?->__invoke') && str_contains($agent, "'source_commit' => \$package['source_commit']"), $failures, $passCount);
 
 // --- The exact requested commit is checked out ONLY inside the isolated,
 // per-job BuildWorkspace — never as a mutation of the persistent source

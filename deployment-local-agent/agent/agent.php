@@ -66,6 +66,7 @@ require __DIR__ . '/lib/LocalBuildFailedException.php';
 require __DIR__ . '/lib/ArtifactSourceResolver.php';
 require __DIR__ . '/lib/ApplicationRoot.php';
 require __DIR__ . '/lib/LocalBuildRunner.php';
+require __DIR__ . '/lib/LinuxUpgradePackageMaterializer.php';
 require __DIR__ . '/lib/LinuxUpgradeRunner.php';
 
 use LocalAgent\ArtifactBuilder;
@@ -78,6 +79,7 @@ use LocalAgent\GitManager;
 use LocalAgent\IgnoreRules;
 use LocalAgent\JobMaxRuntimeExceededException;
 use LocalAgent\LocalBuildRunner;
+use LocalAgent\LinuxUpgradePackageMaterializer;
 use LocalAgent\LinuxUpgradeRunner;
 use LocalAgent\Logger;
 use LocalAgent\LogTail;
@@ -320,7 +322,7 @@ do {
         // starting next cycle's shouldSync() check — same deferred
         // timing as every other control action here (e.g. `restart`
         // itself doesn't exit until this same call returns).
-        if (pollAndHandleControl($client, $config, $projects, $configPath, $logger)) {
+        if (pollAndHandleControl($client, $git, $config, $projects, $configPath, $logger)) {
             $reloadRequested = true;
         }
     } catch (\Throwable $e) {
@@ -698,7 +700,7 @@ function pollAndDetectChanges(Client $client, GitManager $git, array $projects, 
  *     way to reach this process, so clicking "Force Config Reload" in
  *     the Hub (which queues exactly this job) *is* the manual command.
  */
-function pollAndHandleControl(Client $client, array $config, array $projects, string $configPath, Logger $logger): bool
+function pollAndHandleControl(Client $client, GitManager $git, array $config, array $projects, string $configPath, Logger $logger): bool
 {
     $response = $client->request('GET', '/api/local-agent/control-jobs/next');
 
@@ -742,15 +744,30 @@ function pollAndHandleControl(Client $client, array $config, array $projects, st
 
         if ($job['action'] === 'upgrade') {
             $expectedVersion = (string) ($job['expected_version'] ?? '');
-            $startReport = $client->request('POST', $reportPath, [
-                'status' => 'started',
-                'output' => "Official Linux upgrade to {$expectedVersion} is starting; completion requires the restarted process heartbeat.",
-            ]);
-            if ($startReport['status'] !== 200) {
-                throw new \RuntimeException("Hub rejected the upgrade start report with HTTP {$startReport['status']}.");
-            }
+            $expectedCommit = (string) ($job['expected_commit_hash'] ?? '');
+            $expectedBranch = (string) ($job['expected_branch'] ?? '');
+            $repositoryMapping = (string) ($job['repository_mapping'] ?? '');
             $logger->info("Control job {$job['id']}: applying official Linux Local Agent upgrade to {$expectedVersion}");
-            $result = (new LinuxUpgradeRunner())->upgrade($projects, $expectedVersion, dirname($configPath));
+            $result = (new LinuxUpgradeRunner(new LinuxUpgradePackageMaterializer($git)))->upgrade(
+                $projects,
+                $expectedVersion,
+                $expectedCommit,
+                $expectedBranch,
+                $repositoryMapping,
+                dirname($configPath),
+                function (array $package) use ($client, $reportPath, $expectedVersion): void {
+                    $startReport = $client->request('POST', $reportPath, [
+                        'status' => 'started',
+                        'output' => "Exact-commit Linux upgrade to {$expectedVersion} validated; activation is starting.",
+                        'source_commit' => $package['source_commit'],
+                        'package_tree_hash' => $package['package_tree_hash'],
+                        'repository_mapping' => $package['repository_mapping'],
+                    ]);
+                    if ($startReport['status'] !== 200) {
+                        throw new \RuntimeException("Hub rejected the upgrade start report with HTTP {$startReport['status']}.");
+                    }
+                },
+            );
             $logger->info("Control job {$job['id']}: upgrade activated from {$result['old_version']} to {$result['new_version']}; exiting so systemd restarts deployment-agent.service");
             exit(1);
         }

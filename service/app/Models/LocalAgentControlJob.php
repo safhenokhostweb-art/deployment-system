@@ -43,7 +43,13 @@ class LocalAgentControlJob extends Model
         'action',
         'status',
         'expected_version',
+        'expected_commit_hash',
+        'expected_branch',
+        'repository_mapping',
+        'upgrade_release_id',
         'reported_version',
+        'reported_commit_hash',
+        'package_tree_hash',
         'upgrade_started_at',
         'upgrade_verified_at',
         'requested_by',
@@ -69,5 +75,10 @@ class LocalAgentControlJob extends Model
     public function localAgent(): BelongsTo
     {
         return $this->belongsTo(LocalAgent::class);
+    }
+
+    public function upgradeRelease(): BelongsTo
+    {
+        return $this->belongsTo(\App\Models\Release::class, 'upgrade_release_id');
     }
 }

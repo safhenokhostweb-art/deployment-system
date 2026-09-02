@@ -37,6 +37,9 @@ class LocalAgentControlJobController extends Controller
                 'id' => $job->public_id,
                 'action' => $job->action,
                 'expected_version' => $job->expected_version,
+                'expected_commit_hash' => $job->expected_commit_hash,
+                'expected_branch' => $job->expected_branch,
+                'repository_mapping' => $job->repository_mapping,
             ],
         ]);
     }
@@ -86,11 +89,20 @@ class LocalAgentControlJobController extends Controller
             'status' => 'required|string|in:started,succeeded,failed',
             'output' => 'nullable|string|max:100000',
             'error_message' => 'nullable|string|max:2000',
+            'source_commit' => 'nullable|string|size:40|regex:/^[0-9a-f]{40}$/',
+            'package_tree_hash' => 'nullable|string|size:40|regex:/^[0-9a-f]{40}$/',
+            'repository_mapping' => 'nullable|string|max:100|regex:/^[A-Za-z0-9._-]+$/',
         ]);
 
         if ($validated['status'] === 'started') {
             abort_unless($job->action === LocalAgentControlJob::ACTION_UPGRADE, 422, 'Only an upgrade job may report started.');
-            $updated = $this->controlJobs->reportUpgradeStarted($job, $validated['output'] ?? 'Upgrade validation passed; activation is starting.');
+            $updated = $this->controlJobs->reportUpgradeStarted(
+                $job,
+                $validated['output'] ?? 'Upgrade validation passed; activation is starting.',
+                $validated['source_commit'] ?? null,
+                $validated['package_tree_hash'] ?? null,
+                $validated['repository_mapping'] ?? null,
+            );
         } elseif ($validated['status'] === 'failed') {
             $updated = $this->controlJobs->reportFailure($job, $validated['error_message'] ?? 'Unknown agent-side control job failure.');
         } else {

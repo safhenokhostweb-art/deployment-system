@@ -17,10 +17,12 @@ class LocalAgentControlJobService
 {
     public function __construct(
         private readonly SecretRedactor $redactor,
+        private readonly LocalAgentUpgradeTargetResolver $upgradeTargets,
     ) {
     }
 
-    public function queue(LocalAgent $localAgent, string $action, ?string $requestedBy): LocalAgentControlJob
+    /** @param array{commit_hash:string,branch:string,repository_mapping:string,release_id:int}|null $upgradeTarget */
+    public function queue(LocalAgent $localAgent, string $action, ?string $requestedBy, ?array $upgradeTarget = null): LocalAgentControlJob
     {
         abort_unless(
             in_array($action, [
@@ -33,6 +35,7 @@ class LocalAgentControlJobService
             "Unknown local agent control action '{$action}'."
         );
 
+        abort_if($action === LocalAgentControlJob::ACTION_UPGRADE && $upgradeTarget === null, 409, 'An exact-commit package target is required for a Local Agent upgrade.');
         $job = LocalAgentControlJob::create([
             'local_agent_id' => $localAgent->id,
             'action' => $action,
@@ -41,6 +44,10 @@ class LocalAgentControlJobService
             'expected_version' => $action === LocalAgentControlJob::ACTION_UPGRADE
                 ? (string) config('deployment.latest_local_agent_version')
                 : null,
+            'expected_commit_hash' => $upgradeTarget['commit_hash'] ?? null,
+            'expected_branch' => $upgradeTarget['branch'] ?? null,
+            'repository_mapping' => $upgradeTarget['repository_mapping'] ?? null,
+            'upgrade_release_id' => $upgradeTarget['release_id'] ?? null,
         ]);
 
         AuditLogEntry::record(
@@ -49,7 +56,13 @@ class LocalAgentControlJobService
             action: self::requestedAuditAction($action),
             subjectType: LocalAgentControlJob::class,
             subjectId: $job->id,
-            metadata: ['local_agent_id' => $localAgent->id],
+            metadata: array_filter([
+                'local_agent_id' => $localAgent->id,
+                'expected_version' => $job->expected_version,
+                'expected_commit_hash' => $job->expected_commit_hash,
+                'expected_branch' => $job->expected_branch,
+                'repository_mapping' => $job->repository_mapping,
+            ], static fn ($value): bool => $value !== null),
         );
 
         return $job;
@@ -59,6 +72,12 @@ class LocalAgentControlJobService
     {
         abort_unless(strcasecmp((string) $localAgent->operating_system, 'Linux') === 0, 422, 'Official remote upgrades are supported only for Linux Local Agents.');
         abort_unless(($localAgent->capabilities['linux_self_upgrade'] ?? false) === true, 409, 'This Linux Local Agent predates remote upgrade support. Run the official upgrade-linux.sh once to bootstrap it.');
+        $exactCommitMinimum = (string) config('deployment.min_local_agent_version_for_exact_commit_upgrade');
+        abort_unless(
+            is_string($localAgent->agent_version) && version_compare($localAgent->agent_version, $exactCommitMinimum, '>='),
+            409,
+            "SERVER BOOTSTRAP REQUIRED — Agent versions below {$exactCommitMinimum} cannot validate exact-commit upgrade jobs. Run the official one-time 1.5.2 bootstrap before using Dashboard upgrades.",
+        );
 
         $expected = (string) config('deployment.latest_local_agent_version');
         abort_unless(is_string($localAgent->agent_version) && version_compare($localAgent->agent_version, $expected, '<'), 409, 'This Local Agent is already at the latest version.');
@@ -72,7 +91,7 @@ class LocalAgentControlJobService
             'An upgrade is already active for this Local Agent.'
         );
 
-        return $this->queue($localAgent, LocalAgentControlJob::ACTION_UPGRADE, $requestedBy);
+        return $this->queue($localAgent, LocalAgentControlJob::ACTION_UPGRADE, $requestedBy, $this->upgradeTargets->resolve());
     }
 
     /**
@@ -129,15 +148,27 @@ class LocalAgentControlJobService
         return $job;
     }
 
-    public function reportUpgradeStarted(LocalAgentControlJob $job, string $output): LocalAgentControlJob
+    public function reportUpgradeStarted(
+        LocalAgentControlJob $job,
+        string $output,
+        ?string $sourceCommit = null,
+        ?string $packageTreeHash = null,
+        ?string $repositoryMapping = null,
+    ): LocalAgentControlJob
     {
         abort_unless($job->action === LocalAgentControlJob::ACTION_UPGRADE, 422, 'Only an upgrade job can report upgrade start.');
         abort_unless($job->status === LocalAgentControlJob::STATUS_RUNNING, 409, 'Only a running upgrade can begin activation.');
+        abort_unless(is_string($sourceCommit) && preg_match('/^[0-9a-f]{40}$/', $sourceCommit) === 1, 422, 'Exact-commit upgrade evidence is required before activation.');
+        abort_unless(is_string($packageTreeHash) && preg_match('/^[0-9a-f]{40}$/', $packageTreeHash) === 1, 422, 'Exact package-tree evidence is required before activation.');
+        abort_unless(is_string($repositoryMapping) && hash_equals((string) $job->repository_mapping, $repositoryMapping), 422, 'Upgrade repository mapping evidence does not match the job.');
+        abort_unless(hash_equals((string) $job->expected_commit_hash, $sourceCommit), 422, 'Upgrade source commit does not match the exact job target.');
 
         $job->update([
             'status' => LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT,
             'output' => $this->redactor->redact($output),
             'error_message' => null,
+            'reported_commit_hash' => $sourceCommit,
+            'package_tree_hash' => $packageTreeHash,
             'upgrade_started_at' => now(),
         ]);
 
@@ -147,7 +178,13 @@ class LocalAgentControlJobService
             action: 'local_agent.upgrade_started_awaiting_heartbeat',
             subjectType: LocalAgentControlJob::class,
             subjectId: $job->id,
-            metadata: ['expected_version' => $job->expected_version],
+            metadata: [
+                'expected_version' => $job->expected_version,
+                'expected_commit_hash' => $job->expected_commit_hash,
+                'reported_commit_hash' => $sourceCommit,
+                'package_tree_hash' => $packageTreeHash,
+                'repository_mapping' => $job->repository_mapping,
+            ],
         );
 
         return $job->refresh();
@@ -167,7 +204,7 @@ class LocalAgentControlJobService
             ->get();
 
         foreach ($jobs as $job) {
-            if (!is_string($job->expected_version) || version_compare($reportedVersion, $job->expected_version, '<')) {
+            if (!is_string($job->expected_version) || !hash_equals($job->expected_version, $reportedVersion)) {
                 continue;
             }
 
@@ -182,7 +219,14 @@ class LocalAgentControlJobService
                 action: 'local_agent.upgrade_verified_by_heartbeat',
                 subjectType: LocalAgentControlJob::class,
                 subjectId: $job->id,
-                metadata: ['expected_version' => $job->expected_version, 'reported_version' => $reportedVersion],
+                metadata: [
+                    'expected_version' => $job->expected_version,
+                    'reported_version' => $reportedVersion,
+                    'expected_commit_hash' => $job->expected_commit_hash,
+                    'reported_commit_hash' => $job->reported_commit_hash,
+                    'package_tree_hash' => $job->package_tree_hash,
+                    'repository_mapping' => $job->repository_mapping,
+                ],
             );
             $verified++;
         }
@@ -203,7 +247,13 @@ class LocalAgentControlJobService
             action: 'local_agent.control_job_failed',
             subjectType: LocalAgentControlJob::class,
             subjectId: $job->id,
-            metadata: ['action' => $job->action, 'message' => $job->error_message],
+            metadata: [
+                'action' => $job->action,
+                'message' => $job->error_message,
+                'expected_version' => $job->expected_version,
+                'expected_commit_hash' => $job->expected_commit_hash,
+                'repository_mapping' => $job->repository_mapping,
+            ],
         );
 
         return $job;
