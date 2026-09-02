@@ -108,16 +108,22 @@ return [
     | Check-and-notify only, never auto-download/replace code (a compromised
     | or MITM'd Hub could otherwise push arbitrary code to every developer
     | machine, and there is no code-signing infrastructure in this project to
-    | guard against that). Bump this whenever a new agent release is cut; an
-    | out-of-date agent just logs it and the developer runs the shipped
-    | upgrade.ps1 themselves. Must match LOCAL_AGENT_VERSION in both
-    | local-agent/agent.php and deployment-local-agent/agent/agent.php
-    | (kept identical) at release time — see
-    | tests/Unit/LocalAgentVersionSyncTest.php for the regression guard
-    | that keeps these three from drifting apart again.
+    | guard against that). An out-of-date agent just logs it and the
+    | developer runs the shipped upgrade.ps1 themselves.
+    |
+    | Derived from the LOCAL_AGENT_VERSION actually shipped in this release's
+    | packaged deployment-local-agent/agent/agent.php — never a separately
+    | hand-maintained literal, so a normal release cannot drift from what it
+    | ships, and nothing here requires a production .env edit when the
+    | Agent's own version bumps. A DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION
+    | override remains possible for a genuine emergency but is only honored
+    | at or above the shipped version, so a stale override from an old
+    | release can never again silently pin the Hub below the version it is
+    | actually running — see LocalAgentVersionResolver and
+    | tests/Unit/LocalAgentVersionSyncTest.php for the regression guard.
     |
     */
-    'latest_local_agent_version' => env('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION', '1.5.3'),
+    'latest_local_agent_version' => \App\Support\Deployment\LocalAgentVersionResolver::effective(),
 
     /*
     |--------------------------------------------------------------------------

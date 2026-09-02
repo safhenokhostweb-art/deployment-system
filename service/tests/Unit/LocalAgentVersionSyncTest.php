@@ -2,19 +2,34 @@
 
 namespace Tests\Unit;
 
+use App\Support\Deployment\LocalAgentVersionResolver;
 use Tests\TestCase;
 
 /**
- * Regression guard for the exact drift found during Production Readiness
- * verification: LOCAL_AGENT_VERSION was bumped across two phases of real
- * functional changes (project-config sync, then the publish-lease/
- * watchdog root-cause fixes) without ever being incremented, and
- * config('deployment.latest_local_agent_version')'s default had silently
- * fallen BELOW the shipped version — meaning the "outdated agent" warning
- * (LocalAgent::isUpdateAvailable(), the heartbeat response's
- * latest_version field) could never fire even though the real installed
- * agent was two releases behind. This asserts the version number can
- * never silently drift apart across its three copies again.
+ * Regression guard for two compounding version-drift incidents:
+ *
+ *  1. Production Readiness verification: LOCAL_AGENT_VERSION was bumped
+ *     across two phases of real functional changes (project-config sync,
+ *     then the publish-lease/watchdog root-cause fixes) without ever being
+ *     incremented, and config('deployment.latest_local_agent_version')'s
+ *     hand-maintained literal default had silently fallen BELOW the
+ *     shipped version.
+ *  2. Deployment #177 (commit 5d8041e, official Agent 1.5.3): the shipped
+ *     source default was correctly bumped to 1.5.3, but production's
+ *     persistent shared .env (see ops/atomic-release/MIGRATION_PLAN.md —
+ *     .env is shared/activation state, never part of an immutable release)
+ *     still carried an explicit DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION=1.5.2
+ *     from an earlier release, which env() always prefers over the code
+ *     default — permanently pinning the Hub's reported "latest version" to
+ *     1.5.2 no matter how many later releases bumped the shipped Agent.
+ *
+ * Both were the same root cause wearing two costumes: a second,
+ * independently mutable copy of the version number that a normal release
+ * has no obligation to touch. LocalAgentVersionResolver eliminates it by
+ * deriving latest_local_agent_version from the LOCAL_AGENT_VERSION actually
+ * shipped in this release's packaged agent.php, and by bounding the
+ * remaining env override so it can only pin at or above that canonical
+ * version — never silently below it.
  */
 class LocalAgentVersionSyncTest extends TestCase
 {
@@ -95,15 +110,62 @@ class LocalAgentVersionSyncTest extends TestCase
         $this->assertSame($local, $packaged, 'Local and packaged exact-commit upgrade semantics must match; comments and formatting may differ.');
     }
 
-    public function test_hub_default_stays_overridable_via_env(): void
+    public function test_config_source_derives_the_default_from_the_resolver_not_a_hand_maintained_literal(): void
     {
         $configSource = file_get_contents(config_path('deployment.php'));
 
-        $this->assertMatchesRegularExpression(
-            "/'latest_local_agent_version' => env\\('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION', '[\\d.]+'\\)/",
+        $this->assertStringContainsString(
+            "'latest_local_agent_version' => \\App\\Support\\Deployment\\LocalAgentVersionResolver::effective(),",
             $configSource,
-            'latest_local_agent_version must stay overridable via DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION, never hardcoded past env().',
+            'latest_local_agent_version must be derived from LocalAgentVersionResolver, never a hand-maintained literal that a normal release can forget to bump.',
         );
+    }
+
+    public function test_resolver_canonical_matches_the_shipped_agent_version(): void
+    {
+        $this->assertSame(
+            $this->extractLocalAgentVersion(base_path('../deployment-local-agent/agent/agent.php')),
+            LocalAgentVersionResolver::canonical(),
+        );
+    }
+
+    /**
+     * Reproduces Deployment #177's exact drift directly against the
+     * resolver: a persistent env override left over from the 1.5.2 release
+     * must not be able to shadow the 1.5.3 the Hub actually shipped.
+     */
+    public function test_stale_env_override_below_canonical_cannot_shadow_a_newer_release(): void
+    {
+        $canonical = LocalAgentVersionResolver::canonical();
+        $this->assertSame('1.5.3', $canonical);
+
+        putenv('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION=1.5.2');
+        try {
+            $this->assertSame(
+                $canonical,
+                LocalAgentVersionResolver::effective(),
+                'A stale env override below the canonical shipped version must never win — this is the exact production drift (persisted DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION=1.5.2 surviving after the Agent shipped 1.5.3) this guards against.',
+            );
+        } finally {
+            putenv('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION');
+        }
+    }
+
+    public function test_env_override_at_or_above_canonical_remains_honored_for_a_genuine_emergency(): void
+    {
+        putenv('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION=9.9.9');
+        try {
+            $this->assertSame('9.9.9', LocalAgentVersionResolver::effective());
+        } finally {
+            putenv('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION');
+        }
+
+        putenv('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION=1.5.3');
+        try {
+            $this->assertSame('1.5.3', LocalAgentVersionResolver::effective());
+        } finally {
+            putenv('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION');
+        }
     }
 
     private function extractLocalAgentVersion(string $path): string
