@@ -9,6 +9,7 @@ require __DIR__ . '/../lib/SafeFilesystem.php';
 require __DIR__ . '/../lib/Logger.php';
 require __DIR__ . '/../lib/BuildWorkspace.php';
 require __DIR__ . '/../lib/SafetyChecker.php';
+require __DIR__ . '/../lib/DependencyRepositoryResolver.php';
 require __DIR__ . '/../lib/WorkspaceSourcePreparer.php';
 
 use LocalAgent\BuildWorkspace;
@@ -18,6 +19,8 @@ use LocalAgent\WorkspaceSourcePreparer;
 
 $root = str_replace('\\', '/', sys_get_temp_dir()) . '/source-workspace-contract-' . bin2hex(random_bytes(6));
 mkdir($root, 0700, true);
+$previousGlobalConfig = getenv('GIT_CONFIG_GLOBAL');
+putenv('GIT_CONFIG_GLOBAL=' . $root . '/isolated-global.gitconfig');
 $git = new GitManager();
 $preparer = new WorkspaceSourcePreparer($git);
 $failures = [];
@@ -74,17 +77,17 @@ try {
     $workspace = BuildWorkspace::create($root . '/builds', 'saas-platform', 'stale-refresh');
     $prepared = $preparer->prepareRemoteCommit($workspace, $source, $remote, 'origin', 'main', $commitB);
 
-    $check('clean stale workspace fetches the configured remote branch before build', $run(['git', 'rev-parse', 'refs/remotes/origin/main'], $source) === $commitB);
+    $check('primary build never fetches or mutates the persistent workspace remote ref', $run(['git', 'rev-parse', 'refs/remotes/origin/main'], $source) === $commitA);
     $check('safe fetch does not move the persistent source HEAD', $git->lastCommitHash($source) === $commitA);
-    $check('requested commit becomes reachable from the refreshed remote branch', $git->run(['git', 'merge-base', '--is-ancestor', $commitB, 'refs/remotes/origin/main'], $source, 30)['exitCode'] === 0);
+    $check('requested commit need not be present in the persistent workspace', $git->run(['git', 'cat-file', '-e', $commitB . '^{commit}'], $source, 30)['exitCode'] !== 0);
     $check('exact requested commit is checked out only in the isolated build workspace', $git->lastCommitHash($workspace->projectDir()) === $commitB);
     $check('isolated build contains exact requested commit content', trim((string) file_get_contents($workspace->projectDir() . '/tracked.txt')) === 'commit-b');
     $check('commit timestamp is captured for deterministic artifact metadata', $prepared['commitTimestamp'] > 0);
     $check('tracked source inventory is captured from the immutable checkout', in_array('tracked.txt', $prepared['sourcePaths'] ?? [], true) && !in_array('.git/HEAD', $prepared['sourcePaths'] ?? [], true));
     $workspace->cleanup();
 
-    // Dirty state must fail before fetch, so even the remote-tracking ref is
-    // left unchanged. Nothing is reset or discarded.
+    // Dirty state fails without touching the remote-tracking ref. Nothing is
+    // fetched, reset, or discarded in the persistent workspace.
     file_put_contents($seed . '/tracked.txt', "commit-c\n");
     $run(['git', 'add', 'tracked.txt'], $seed);
     $run(['git', 'commit', '-m', 'commit c'], $seed);
@@ -96,14 +99,14 @@ try {
         fn () => $preparer->prepareRemoteCommit($dirtyWorkspace, $source, $remote, 'origin', 'main', $commitC),
         'Source workspace is dirty',
     );
-    $check('dirty workspace is not fetched or modified', $run(['git', 'rev-parse', 'refs/remotes/origin/main'], $source) === $commitB && is_file($source . '/operator-work.txt'));
+    $check('dirty workspace is not fetched or modified', $run(['git', 'rev-parse', 'refs/remotes/origin/main'], $source) === $commitA && is_file($source . '/operator-work.txt'));
     @unlink($source . '/operator-work.txt');
     $dirtyWorkspace->cleanup();
 
     $wrongRepository = BuildWorkspace::create($root . '/builds', 'saas-platform', 'wrong-repository');
     $expectPrepareFailure(
         fn () => $preparer->prepareRemoteCommit($wrongRepository, $source, $root . '/another.git', 'origin', 'main', $commitC),
-        'Source workspace repository mismatch',
+        'repository_identity_mismatch',
     );
     $wrongRepository->cleanup();
 
@@ -129,6 +132,64 @@ try {
     );
     $check('diverged persistent branch is never reset', $git->lastCommitHash($source) === $divergedHead && is_file($source . '/local-only.txt'));
     $divergedWorkspace->cleanup();
+
+    // A validated GitHub mapping uses the Agent's canonical authenticated SSH
+    // endpoint. The isolated test config rewrites only that endpoint to the
+    // local bare fixture, proving transport choice without network access.
+    $transportSource = $root . '/transport-source';
+    $run(['git', 'clone', '--branch', 'main', $remote, $transportSource], $root);
+    $run(['git', 'reset', '--hard', $commitA], $transportSource);
+    file_put_contents($transportSource . '/.git/info/exclude', "persistent-only.txt\n", FILE_APPEND);
+    file_put_contents($transportSource . '/persistent-only.txt', 'must never enter artifact source');
+    $httpsRepository = 'https://github.com/example/primary.git';
+    $canonicalSsh = 'ssh://git@ssh.github.com:443/example/primary.git';
+    $run(['git', 'remote', 'set-url', 'origin', $httpsRepository], $transportSource);
+    $run(['git', 'config', '--global', 'url.' . $remote . '.insteadOf', $canonicalSsh], $root);
+
+    $httpsWorkspace = BuildWorkspace::create($root . '/builds', 'primary', 'https-to-ssh');
+    $preparer->prepareRemoteCommit($httpsWorkspace, $transportSource, $httpsRepository, 'origin', 'main', $commitC, null, [], [], [], 'customer-site');
+    $check('validated primary HTTPS mapping materializes through canonical SSH', $run(['git', 'config', '--get', 'remote.origin.url'], $httpsWorkspace->projectDir()) === $canonicalSsh);
+    $check('stale persistent HEAD does not control exact isolated checkout', $git->lastCommitHash($transportSource) === $commitA && $git->lastCommitHash($httpsWorkspace->projectDir()) === $commitC);
+    $check('persistent workspace files never become Artifact source', !is_file($httpsWorkspace->projectDir() . '/persistent-only.txt'));
+    $check('primary materialization does not mutate stored HTTPS remote', $run(['git', 'config', '--get', 'remote.origin.url'], $transportSource) === $httpsRepository);
+    $httpsWorkspace->cleanup();
+
+    $run(['git', 'remote', 'set-url', 'origin', $canonicalSsh], $transportSource);
+    $sshWorkspace = BuildWorkspace::create($root . '/builds', 'primary', 'ssh-valid');
+    $preparer->prepareRemoteCommit($sshWorkspace, $transportSource, $httpsRepository, 'origin', 'main', $commitC, null, [], [], [], 'customer-site');
+    $check('correct SSH workspace remote remains valid', $git->lastCommitHash($sshWorkspace->projectDir()) === $commitC);
+    $sshWorkspace->cleanup();
+
+    $run(['git', 'remote', 'set-url', 'origin', 'https://github.com/example/different.git'], $transportSource);
+    $mismatchWorkspace = BuildWorkspace::create($root . '/builds', 'primary', 'identity-mismatch');
+    $expectPrepareFailure(
+        fn () => $preparer->prepareRemoteCommit($mismatchWorkspace, $transportSource, $httpsRepository, 'origin', 'main', $commitC, null, [], [], [], 'customer-site'),
+        'repository_identity_mismatch',
+    );
+    $mismatchWorkspace->cleanup();
+
+    $credentialUrl = 'https://agent-user:super-secret-token@github.com/example/primary.git';
+    $run(['git', 'remote', 'set-url', 'origin', $credentialUrl], $transportSource);
+    $run(['git', 'config', '--global', '--unset-all', 'url.' . $remote . '.insteadOf'], $root);
+    $run(['git', 'config', '--global', 'url.' . $root . '/missing.git.insteadOf', $canonicalSsh], $root);
+    $diagnosticWorkspace = BuildWorkspace::create($root . '/builds', 'primary', 'safe-diagnostic');
+    try {
+        $preparer->prepareRemoteCommit($diagnosticWorkspace, $transportSource, $credentialUrl, 'origin', 'main', $commitC, null, [], [], [], 'customer-site');
+        $check('primary fetch diagnostic is produced', false);
+    } catch (LocalBuildFailedException $e) {
+        $message = $e->getMessage();
+        $check('primary fetch diagnostic is useful and secret-safe',
+            str_contains($message, 'mapping=customer-site')
+            && str_contains($message, 'branch=main')
+            && str_contains($message, 'repository_identity=github.com/example/primary')
+            && str_contains($message, 'transport=ssh')
+            && str_contains($message, 'exit_code=')
+            && str_contains($message, 'timed_out=false')
+            && str_contains($message, 'stderr_category=repository_not_found')
+            && !str_contains($message, 'super-secret-token')
+            && !str_contains($message, $credentialUrl));
+    }
+    $diagnosticWorkspace->cleanup();
 
     $forbidden = BuildWorkspace::create($root . '/builds', 'saas-platform', 'forbidden-source');
     try {
@@ -242,7 +303,7 @@ try {
     } catch (\Throwable $e) {
         $bogusThrew = $e;
     }
-    $check('C: an unresolvable target SHA fails closed before any build step', $bogusThrew !== null && str_contains($bogusThrew->getMessage(), 'is not present'));
+    $check('C: an unresolvable target SHA fails closed before any build step', $bogusThrew !== null && str_contains($bogusThrew->getMessage(), 'validating the requested commit'));
     $check('C: the isolated workspace for an unresolvable commit is never populated with project files', !is_file($bogusWorkspace->projectDir() . '/composer.json'));
     $bogusWorkspace->cleanup();
 
@@ -288,6 +349,7 @@ try {
         }
         @rmdir($root);
     }
+    $previousGlobalConfig === false ? putenv('GIT_CONFIG_GLOBAL') : putenv('GIT_CONFIG_GLOBAL=' . $previousGlobalConfig);
 }
 
 if ($failures !== []) {

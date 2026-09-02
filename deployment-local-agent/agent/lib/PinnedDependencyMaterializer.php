@@ -162,22 +162,9 @@ final class PinnedDependencyMaterializer
             $mapping = $context['mapping'] ?? 'unknown';
             $branch = $context['branch'] ?? 'unknown';
             $timedOut = ($result['timedOut'] ?? false) === true ? 'true' : 'false';
-            $category = self::stderrCategory((string) ($result['output'] ?? ''), $timedOut === 'true');
+            $category = DependencyRepositoryResolver::stderrCategory((string) ($result['output'] ?? ''), $timedOut === 'true');
             throw $this->failure("Dependency materialization failed while {$operation} [mapping={$mapping}, branch={$branch}, exit_code={$result['exitCode']}, timed_out={$timedOut}, stderr_category={$category}].");
         }
-    }
-
-    private static function stderrCategory(string $output, bool $timedOut): string
-    {
-        if ($timedOut) return 'timeout';
-        $output = strtolower($output);
-        if (preg_match('/authentication failed|permission denied|could not read username|publickey/', $output) === 1) return 'authentication';
-        if (str_contains($output, 'host key verification failed')) return 'host_key_verification';
-        if (preg_match('/repository .* not found|does not appear to be a git repository/', $output) === 1) return 'repository_not_found';
-        if (preg_match('/could not resolve host|failed to connect|connection (?:timed out|reset|refused)|network is unreachable/', $output) === 1) return 'network';
-        if (str_contains($output, "couldn't find remote ref")) return 'remote_ref_missing';
-        if (str_contains($output, 'failed to start process')) return 'process_start';
-        return 'git_failure';
     }
 
     private function safeRelativePath(string $path, bool $allowParentSegments = false): bool

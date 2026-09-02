@@ -75,7 +75,7 @@ final class ArtifactUploader
             $commitHash,
             $branch,
             $jobId,
-            fn (BuildWorkspace $workspace) => $this->sourcePreparer->prepareRemoteCommit($workspace, $repositoryPath, $repositoryUrl, $remoteName, $branch, $commitHash, $onTick, $dependencyContract, $dependencyAllowlist, $repositoryMappings),
+            fn (BuildWorkspace $workspace) => $this->sourcePreparer->prepareRemoteCommit($workspace, $repositoryPath, $repositoryUrl, $remoteName, $branch, $commitHash, $onTick, $dependencyContract, $dependencyAllowlist, $repositoryMappings, $projectKey),
             $onTick,
             $applicationRoot,
             $evidenceContract,

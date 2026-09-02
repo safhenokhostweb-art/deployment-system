@@ -52,20 +52,23 @@ check('build_artifact jobs are dispatched through the safe remote-commit path', 
 check('the unsafe pre-equality buildAndUpload() is defined but never dispatched from agent.php', str_contains($uploader, 'public function buildAndUpload(') && !str_contains($agent, '$artifactUploader->buildAndUpload('), $failures, $passCount);
 check('publish also builds through the safe remote-commit path, not the strict-equality one', str_contains($agent, "\$artifactUploader->buildAndUploadRemoteCommit(\$projectKey, \$repositoryPath, \$repositoryUrl, \$remoteName, \$commitHash, \$branch"), $failures, $passCount);
 
-// --- Ordering: dirty-workspace / trust checks happen before any fetch, and
-// fetch happens before the exact commit is ever referenced/checked out.
+// --- Ordering: the persistent workspace supplies validated transport
+// evidence only. Network fetch and exact-SHA proofs run in the isolated repo.
 $posDirtyCheck = strpos($preparer, 'private function assertTrustedPersistentWorkspace');
-$posFetchBranch = strpos($preparer, 'private function fetchBranch');
-$posCommitExists = strpos($preparer, 'private function assertCommitExists');
-$posReachable = strpos($preparer, 'private function assertCommitReachableFromRemoteBranch');
 $posPrepareRemoteCommitBody = strpos($preparer, 'public function prepareRemoteCommit');
 $callOrderSlice = substr($preparer, $posPrepareRemoteCommitBody, ($posDirtyCheck ?: strlen($preparer)) - $posPrepareRemoteCommitBody + 4000);
+$posTransport = strpos($callOrderSlice, '$this->repositories->resolveTransport(');
+$posTrustCall = strpos($callOrderSlice, '$this->assertTrustedPersistentWorkspace(');
+$posIsolatedFetch = strpos($callOrderSlice, "['git', 'fetch', '--no-tags', '--prune', 'origin', \$branch]");
+$posCommitCheck = strpos($callOrderSlice, "['git', 'cat-file', '-e'");
+$posReachability = strpos($callOrderSlice, "['git', 'merge-base', '--is-ancestor', \$commitHash, 'FETCH_HEAD']");
+$posCheckout = strpos($callOrderSlice, "['git', 'checkout', '--detach', '--force', \$commitHash]");
 
-check('prepareRemoteCommit refuses a production-like or dirty persistent source before doing anything else', strpos($callOrderSlice, '$this->assertTrustedPersistentWorkspace(') < strpos($callOrderSlice, '$this->fetchBranch('), $failures, $passCount);
-check('the persistent workspace dirty-check runs before any fetch touches the network', $posDirtyCheck !== false && $posFetchBranch !== false, $failures, $passCount);
+check('primary transport is identity-validated before the isolated repository is configured', $posTransport !== false && $posTransport < strpos($callOrderSlice, '$this->initializeWorkspaceRepository('), $failures, $passCount);
+check('the persistent workspace dirty-check runs before the isolated fetch', $posTrustCall !== false && $posIsolatedFetch !== false && $posTrustCall < $posIsolatedFetch, $failures, $passCount);
 check('changedFiles() dirtiness is asserted before fetch, refusing to fetch or build a dirty workspace', str_contains($preparer, 'Source workspace is dirty; refusing to fetch or build'), $failures, $passCount);
-check('requested commit existence is verified only after a real fetch has run', strpos($callOrderSlice, '$this->fetchBranch(') < strpos($callOrderSlice, '$this->assertCommitExists('), $failures, $passCount);
-check('commit reachability from the remote production branch is verified before any checkout', strpos($callOrderSlice, '$this->assertCommitExists(') < strpos($callOrderSlice, '$this->assertCommitReachableFromRemoteBranch(') && strpos($callOrderSlice, '$this->assertCommitReachableFromRemoteBranch(') < strpos($callOrderSlice, 'checkout'), $failures, $passCount);
+check('requested commit existence is verified only after the isolated fetch', $posIsolatedFetch !== false && $posCommitCheck !== false && $posIsolatedFetch < $posCommitCheck, $failures, $passCount);
+check('FETCH_HEAD reachability is verified before exact detached checkout', $posCommitCheck !== false && $posReachability !== false && $posCheckout !== false && $posCommitCheck < $posReachability && $posReachability < $posCheckout, $failures, $passCount);
 
 // --- Root cause fix itself: workspace HEAD is never required to already
 // equal the requested/remote commit — only non-divergence (an ancestor
@@ -75,15 +78,18 @@ check('local branch divergence is checked with merge-base --is-ancestor (behind 
 check('divergence failure explicitly refuses to reset or discard local commits rather than forcing sync', str_contains($preparer, 'refusing to reset or discard local commits'), $failures, $passCount);
 check('the persistent workspace HEAD itself is never compared for exact equality with the requested commit in prepareRemoteCommit', !preg_match('/prepareRemoteCommit.*?hash_equals\(\$commitHash,\s*\$actualHead\)/s', $preparer), $failures, $passCount);
 
-// --- Requested SHA reachability fails closed.
-check('an unreachable requested commit throws and refuses to build', str_contains($preparer, 'is not reachable from') && str_contains($preparer, 'refusing to build an artifact for an unverified ref'), $failures, $passCount);
-check('a missing requested commit after fetch throws and refuses to build', str_contains($preparer, 'is not present in') && str_contains($preparer, 'after fetch'), $failures, $passCount);
+// --- Requested SHA reachability fails closed in the isolated repository.
+check('an unreachable requested commit fails the FETCH_HEAD ancestor proof', str_contains($preparer, "['git', 'merge-base', '--is-ancestor', \$commitHash, 'FETCH_HEAD']"), $failures, $passCount);
+check('a missing requested commit fails an explicit commit-object proof', str_contains($preparer, "['git', 'cat-file', '-e', \"{\$commitHash}^{commit}\"]"), $failures, $passCount);
 
-// --- Fetch/auth failure fails closed (git exit code checked, no silent continue).
-check('fetch failure throws immediately rather than continuing with stale refs', preg_match('/fetchBranch.*?if \(\$result\[.exitCode.\] !== 0\) \{\s*throw/s', $preparer) === 1, $failures, $passCount);
+// --- Fetch/auth failure fails closed with categorized, secret-safe evidence.
+check('fetch failure is checked by the fail-closed isolated command runner', str_contains($preparer, "if (\$result['exitCode'] !== 0)") && str_contains($preparer, 'Primary repository materialization failed while'), $failures, $passCount);
 check('git commands never suppress a non-interactive credential/host-key prompt into a silent hang (GIT_TERMINAL_PROMPT=0)', str_contains((string) file_get_contents(__DIR__ . '/../lib/GitManager.php'), "GIT_TERMINAL_PROMPT'] = '0'"), $failures, $passCount);
 check('dependency mappings carry source workspace transport metadata into artifact builds', str_contains($agent, "'source_workspace_path' => \$mappedProject['source_workspace_path']") && str_contains($agent, "'remote_name' => \$mappedProject['remote_name']"), $failures, $passCount);
 check('dependency fetch transport is resolved from the trusted mapped workspace remote', str_contains($materializer, '$this->repositories->resolve(') && str_contains($dependencyResolver, 'repository_identity_mismatch'), $failures, $passCount);
+check('primary and dependency materialization share the repository transport resolver', str_contains($preparer, '$this->repositories->resolveTransport(') && str_contains($materializer, '$this->repositories->resolve('), $failures, $passCount);
+check('validated GitHub mappings resolve to the canonical SSH-over-443 transport', str_contains($dependencyResolver, 'ssh://git@ssh.github.com:443/'), $failures, $passCount);
+check('primary fetch diagnostics carry safe mapping identity transport and failure categories', str_contains($preparer, 'repository_identity=') && str_contains($preparer, 'transport=') && str_contains($preparer, 'stderr_category='), $failures, $passCount);
 check('same repository branch and SHA pins share one checkout and fetch', str_contains($materializer, '$checkoutKey') && str_contains($materializer, '$checkouts[$checkoutKey]'), $failures, $passCount);
 check('dependency fetch failures expose only categorized diagnostics', str_contains($materializer, 'stderr_category=') && !str_contains($materializer, 'while {$operation}: '), $failures, $passCount);
 check('dependency fetches use a dedicated 180-second timeout', str_contains($gitManager, "'fetch' => 180") && str_contains($agent, "'fetch' => (int) (\$config['git_fetch_timeout_seconds'] ?? 180)"), $failures, $passCount);
