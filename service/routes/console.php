@@ -75,3 +75,14 @@ Schedule::command('artifacts:cleanup')
     ->hourly()
     ->withoutOverlapping()
     ->onOneServer();
+
+// Root-cause fix (release-orchestration bootstrap deadlock): a Release
+// stranded awaiting_artifact by a temporarily-ineligible authoritative
+// build Agent (most commonly: an exact-commit self-upgrade in flight) has
+// no other path back to building — GitHub never redelivers a push on its
+// own. Same 5-minute cadence as the other sweep commands above; cheap and
+// idempotent, so a persistently-ineligible Release costs nothing extra.
+Schedule::command('releases:retry-awaiting-artifact')
+    ->everyFiveMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();

@@ -114,7 +114,11 @@ class LocalAgentControlJobServiceTest extends TestCase
     public function test_linux_upgrade_waits_for_the_expected_version_heartbeat(): void
     {
         $target = $this->createUpgradeAuthority();
-        config(['deployment.latest_local_agent_version' => '1.5.3']);
+        // Deliberately stale/wrong on purpose: this must NOT drive
+        // expected_version or upgrade eligibility any more (see
+        // test_stale_latest_version_config_cannot_block_the_bootstrap_upgrade
+        // below for the exact production incident this proves fixed).
+        config(['deployment.latest_local_agent_version' => '1.5.2']);
         $agent = LocalAgent::factory()->approved()->create([
             'operating_system' => 'Linux',
             'agent_version' => '1.5.2',
@@ -135,6 +139,41 @@ class LocalAgentControlJobServiceTest extends TestCase
         $this->assertSame(LocalAgentControlJob::STATUS_SUCCEEDED, $job->fresh()->status);
         $this->assertSame('1.5.3', $job->fresh()->reported_version);
         $this->assertNotNull($job->fresh()->upgrade_verified_at);
+    }
+
+    /**
+     * Reproduces the exact production release-orchestration deadlock:
+     * Deployment #177 shipped Hub 5d8041e (canonical Agent 1.5.3), but
+     * production's persistent .env still held
+     * DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION=1.5.2 — so
+     * config('deployment.latest_local_agent_version') kept reporting
+     * 1.5.2 even though the Hub's own shipped Agent was 1.5.3. Under the
+     * old design, queueUpgrade() used exactly that config value both as
+     * the "is this Agent already current" gate and as expected_version —
+     * so the stale override made the Hub refuse to queue ANY upgrade at
+     * all ("This Local Agent is already at the latest version."),
+     * permanently trapping the installed 1.5.2 Agent below the version
+     * min_local_agent_version_for_assigned_artifact requires, with no
+     * path to build the very Hub release (27e8c78) that would have fixed
+     * the stale config in the first place. Eligibility and
+     * expected_version now come from the exact-commit upgrade target's
+     * own shipped version instead, so this stale config can never again
+     * block the bootstrap upgrade off of an old Agent.
+     */
+    public function test_stale_latest_version_config_cannot_block_the_bootstrap_upgrade(): void
+    {
+        $this->createUpgradeAuthority();
+        config(['deployment.latest_local_agent_version' => '1.5.2']);
+        $agent = LocalAgent::factory()->approved()->create([
+            'operating_system' => 'Linux',
+            'agent_version' => '1.5.2',
+            'capabilities' => ['linux_self_upgrade' => true],
+        ]);
+
+        $job = app(LocalAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
+
+        $this->assertSame(LocalAgentControlJob::ACTION_UPGRADE, $job->action);
+        $this->assertSame('1.5.3', $job->expected_version, 'expected_version must come from the upgrade target itself, not the stale latest_local_agent_version override.');
     }
 
     public function test_1_5_1_agent_requires_the_one_time_exact_commit_bootstrap(): void

@@ -6,6 +6,7 @@ use App\Models\AuditLogEntry;
 use App\Models\Project;
 use App\Models\Release;
 use App\Services\Publish\AuthoritativeBuildAgentResolver;
+use App\Services\Publish\LocalAgentControlJobService;
 use App\Services\Publish\PublishJobService;
 use App\Services\Releases\ReleaseGitFactsResolver;
 use App\Services\Releases\ReleaseOrchestrator;
@@ -65,7 +66,9 @@ class ProcessGitHubWebhookPush implements ShouldQueue
         AuthoritativeBuildAgentResolver $buildAgents,
         PublishJobService $publishJobs,
         ?WebhookDeliveryOwnershipService $deliveries = null,
+        ?LocalAgentControlJobService $controlJobs = null,
     ): void {
+        $controlJobs ??= app(LocalAgentControlJobService::class);
         $deliveries ??= app(WebhookDeliveryOwnershipService::class);
         $ownedToken = null;
         if ($this->webhookDeliveryId !== null) {
@@ -110,9 +113,46 @@ class ProcessGitHubWebhookPush implements ShouldQueue
                         $release,
                     );
                     $releases->markArtifactBuilding($release);
-                } catch (HttpExceptionInterface) {
+                } catch (HttpExceptionInterface $blocked) {
                     // No authoritative build Agent leaves the Release visibly
                     // awaiting remediation; it never falls back to another Agent.
+                    // Root-cause fix (release-orchestration bootstrap deadlock):
+                    // when version is the ONLY thing standing between this
+                    // Agent and eligibility, don't just wait on a human to
+                    // notice — queue the exact-commit self-upgrade that
+                    // clears it. releases:retry-awaiting-artifact then
+                    // re-attempts this same build once the Agent's heartbeat
+                    // verifies the upgrade, so this Release recovers without
+                    // needing a brand-new push. Never persisted as a Release
+                    // failure: this is an ordinary, self-recoverable
+                    // ordering condition, not a build defect.
+                    $blockedAgent = $buildAgents->agentPendingVersionUpgradeOnly($this->project);
+                    $upgradeJobId = null;
+                    if ($blockedAgent !== null) {
+                        try {
+                            $upgradeJobId = $controlJobs->queueUpgrade($blockedAgent, 'system:release-orchestrator')->id;
+                        } catch (HttpExceptionInterface) {
+                            // Already upgrading, not Linux, predates remote
+                            // upgrade support, or below the exact-commit
+                            // upgrade protocol minimum — nothing more this
+                            // orchestration step can do automatically.
+                        }
+                    }
+
+                    AuditLogEntry::record(
+                        actorType: AuditLogEntry::ACTOR_SYSTEM,
+                        actorIdentifier: null,
+                        action: 'release.artifact_build_blocked_by_authoritative_agent',
+                        subjectType: Release::class,
+                        subjectId: $release->id,
+                        metadata: array_filter([
+                            'project_id' => $this->project->id,
+                            'commit_hash' => $commitHash,
+                            'branch' => $this->branch,
+                            'reason' => $blocked->getMessage(),
+                            'auto_queued_agent_upgrade_job_id' => $upgradeJobId,
+                        ], static fn ($value): bool => $value !== null),
+                    );
                 }
             }
 

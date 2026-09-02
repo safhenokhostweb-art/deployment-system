@@ -71,4 +71,39 @@ final class AuthoritativeBuildAgentResolver
         // no-source-change publish evidence checks).
         return $mapping;
     }
+
+    /**
+     * Root-cause fix (release-orchestration bootstrap deadlock): tells
+     * automatic Release orchestration apart "this Agent needs its
+     * exact-commit self-upgrade" from every other reason resolve() can
+     * 409 (unconfigured, missing, wrong role, offline, missing
+     * capabilities) — those must stay silent-and-blocked exactly as
+     * before; only a version-only shortfall is something orchestration
+     * can act on itself, by queuing the very upgrade that clears it.
+     * Returns null unless the Agent is otherwise fully healthy and
+     * eligible and version is the ONLY thing standing between it and
+     * supportsAssignedArtifactUploads().
+     */
+    public function agentPendingVersionUpgradeOnly(Project $project): ?LocalAgent
+    {
+        if ($project->authoritative_build_local_agent_id === null) {
+            return null;
+        }
+
+        $agent = LocalAgent::query()->find($project->authoritative_build_local_agent_id);
+        if ($agent === null || !$agent->canBuildProductionArtifacts() || !$agent->isOnline()) {
+            return null;
+        }
+
+        $minimumVersion = (string) config('deployment.min_local_agent_version_for_artifact');
+        if (!is_string($agent->agent_version) || version_compare($agent->agent_version, $minimumVersion, '<')) {
+            return null;
+        }
+
+        if (($agent->capabilities['git'] ?? false) !== true || ($agent->capabilities['laravel_release_manifest'] ?? false) !== true) {
+            return null;
+        }
+
+        return $agent->supportsAssignedArtifactUploads() ? null : $agent;
+    }
 }

@@ -3,6 +3,9 @@
 namespace Tests\Feature\Jobs;
 
 use App\Jobs\ProcessGitHubWebhookPush;
+use App\Models\AuditLogEntry;
+use App\Models\Deployment;
+use App\Models\LocalAgentControlJob;
 use App\Models\Project;
 use App\Models\LocalAgent;
 use App\Models\LocalProjectMapping;
@@ -81,6 +84,79 @@ class ProcessGitHubWebhookPushTest extends TestCase
         $this->assertSame($agent->id, $build->local_agent_id);
         $this->assertSame($release->id, $build->release_id);
         $this->assertDatabaseCount('deployments', 0);
+    }
+
+    /**
+     * Reproduces the exact production release-orchestration deadlock end
+     * to end: an authoritative production_build Agent still on 1.5.2 (the
+     * exact version installed in production) is otherwise fully healthy
+     * (approved, online, capable) but below
+     * min_local_agent_version_for_assigned_artifact (1.5.3) — so no
+     * build_artifact PublishJob can be created for this push (Release #39
+     * had none). Under the old design this was a bare silent catch: no
+     * PublishJob, no failure_code, no audit trail, and no path back to
+     * eligibility. Orchestration must now instead (a) leave the Release
+     * awaiting_artifact with no PublishJob (never a fabricated
+     * failed/blocked job), (b) auto-queue the Agent's own exact-commit
+     * self-upgrade so the deadlock is not left for a human to notice, and
+     * (c) record an explicit, non-silent audit trail of both facts.
+     */
+    public function test_handle_auto_queues_the_agent_upgrade_and_audit_logs_when_only_the_version_gate_blocks_the_build(): void
+    {
+        $sha = str_repeat('e', 40);
+        $project = Project::factory()->create(['branch' => 'main', 'requires_complete_artifact' => true]);
+        $agent = LocalAgent::factory()->productionBuild()->create([
+            'operating_system' => 'Linux',
+            'agent_version' => '1.5.2',
+            'capabilities' => [
+                'git' => true,
+                'laravel_release_manifest' => true,
+                'assigned_artifact_publish_job_id' => true,
+                'linux_self_upgrade' => true,
+            ],
+        ]);
+        $project->update(['authoritative_build_local_agent_id' => $agent->id]);
+
+        // The Agent's own exact-commit upgrade authority: a ready Release
+        // and succeeded Deployment for the deployment-system project,
+        // shipping canonical Agent 1.5.3 (the real, currently checked-out
+        // agent.php — see LocalAgentVersionResolver::canonical()).
+        $upgradeCommit = str_repeat('c', 40);
+        $upgradeProject = Project::factory()->create(['project_key' => 'deployment-system', 'branch' => 'master']);
+        $upgradeRelease = Release::factory()->ready()->create(['project_id' => $upgradeProject->id, 'commit_hash' => $upgradeCommit, 'branch' => 'master']);
+        Deployment::factory()->create([
+            'project_id' => $upgradeProject->id,
+            'server_id' => $upgradeProject->server_id,
+            'release_id' => $upgradeRelease->id,
+            'status' => Deployment::STATUS_SUCCEEDED,
+            'commit_hash' => $upgradeCommit,
+            'branch' => 'master',
+            'finished_at' => now(),
+        ]);
+
+        $job = new ProcessGitHubWebhookPush($project->fresh(), $sha, 'main', 'octocat');
+        $job->handle(
+            app(\App\Services\Releases\ReleaseOrchestrator::class),
+            app(\App\Services\Releases\ReleaseGitFactsResolver::class),
+            app(\App\Services\Publish\AuthoritativeBuildAgentResolver::class),
+            app(\App\Services\Publish\PublishJobService::class),
+        );
+
+        $release = Release::where('project_id', $project->id)->where('commit_hash', $sha)->sole();
+        $this->assertSame(Release::STATUS_AWAITING_ARTIFACT, $release->status);
+        $this->assertDatabaseCount('publish_jobs', 0);
+
+        $upgradeJob = LocalAgentControlJob::where('local_agent_id', $agent->id)->where('action', LocalAgentControlJob::ACTION_UPGRADE)->sole();
+        $this->assertSame(LocalAgentControlJob::STATUS_QUEUED, $upgradeJob->status);
+        $this->assertSame('1.5.3', $upgradeJob->expected_version);
+
+        $this->assertDatabaseHas('audit_log_entries', [
+            'action' => 'release.artifact_build_blocked_by_authoritative_agent',
+            'subject_type' => Release::class,
+            'subject_id' => $release->id,
+        ]);
+        $audit = AuditLogEntry::where('action', 'release.artifact_build_blocked_by_authoritative_agent')->sole();
+        $this->assertSame($upgradeJob->id, $audit->metadata['auto_queued_agent_upgrade_job_id']);
     }
 
     /**

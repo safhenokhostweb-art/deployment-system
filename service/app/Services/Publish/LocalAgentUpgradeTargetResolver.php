@@ -5,11 +5,24 @@ namespace App\Services\Publish;
 use App\Models\Deployment;
 use App\Models\Project;
 use App\Models\Release;
+use App\Support\Deployment\LocalAgentVersionResolver;
 
-/** Resolves the Agent package authority from the Hub's last verified deployment. */
+/**
+ * Resolves the Agent package authority from the Hub's last verified
+ * deployment — and, since deployment-system is self-hosted, that
+ * deployment's commit is by construction the exact tree currently running
+ * this Hub instance. agent_version therefore comes from
+ * LocalAgentVersionResolver::canonical() (this release's own packaged
+ * agent.php), never from config('deployment.latest_local_agent_version'):
+ * that value is a soft, operator-overridable notification setting, and
+ * using it to gate/verify an actual upgrade let a stale override there
+ * block the exact-commit upgrade path too, not just the dashboard badge
+ * (see LocalAgentControlJobServiceTest's bootstrap-deadlock regression
+ * guard).
+ */
 final class LocalAgentUpgradeTargetResolver
 {
-    /** @return array{commit_hash:string,branch:string,repository_mapping:string,release_id:int} */
+    /** @return array{commit_hash:string,branch:string,repository_mapping:string,release_id:int,agent_version:string} */
     public function resolve(): array
     {
         $project = Project::query()
@@ -38,6 +51,7 @@ final class LocalAgentUpgradeTargetResolver
             'branch' => (string) $deployment->branch,
             'repository_mapping' => 'deployment-system',
             'release_id' => $release->id,
+            'agent_version' => LocalAgentVersionResolver::canonical(),
         ];
     }
 }

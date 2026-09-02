@@ -21,7 +21,7 @@ class LocalAgentControlJobService
     ) {
     }
 
-    /** @param array{commit_hash:string,branch:string,repository_mapping:string,release_id:int}|null $upgradeTarget */
+    /** @param array{commit_hash:string,branch:string,repository_mapping:string,release_id:int,agent_version:string}|null $upgradeTarget */
     public function queue(LocalAgent $localAgent, string $action, ?string $requestedBy, ?array $upgradeTarget = null): LocalAgentControlJob
     {
         abort_unless(
@@ -36,13 +36,25 @@ class LocalAgentControlJobService
         );
 
         abort_if($action === LocalAgentControlJob::ACTION_UPGRADE && $upgradeTarget === null, 409, 'An exact-commit package target is required for a Local Agent upgrade.');
+        abort_if(
+            $action === LocalAgentControlJob::ACTION_UPGRADE && !is_string($upgradeTarget['agent_version'] ?? null),
+            409,
+            'The exact-commit upgrade target must include the Agent version it actually ships.',
+        );
         $job = LocalAgentControlJob::create([
             'local_agent_id' => $localAgent->id,
             'action' => $action,
             'status' => LocalAgentControlJob::STATUS_QUEUED,
             'requested_by' => $requestedBy,
+            // The version this job is expected to converge on: the exact
+            // upgrade target's own shipped version, never
+            // config('deployment.latest_local_agent_version') — that
+            // config is a soft, operator-overridable notification value
+            // (see LocalAgentVersionResolver), and reusing it here would
+            // let a stale/overridden value silently block or misverify a
+            // real upgrade instead of merely mis-displaying a badge.
             'expected_version' => $action === LocalAgentControlJob::ACTION_UPGRADE
-                ? (string) config('deployment.latest_local_agent_version')
+                ? (string) $upgradeTarget['agent_version']
                 : null,
             'expected_commit_hash' => $upgradeTarget['commit_hash'] ?? null,
             'expected_branch' => $upgradeTarget['branch'] ?? null,
@@ -79,7 +91,12 @@ class LocalAgentControlJobService
             "SERVER BOOTSTRAP REQUIRED — Agent versions below {$exactCommitMinimum} cannot validate exact-commit upgrade jobs. Run the official one-time 1.5.2 bootstrap before using Dashboard upgrades.",
         );
 
-        $expected = (string) config('deployment.latest_local_agent_version');
+        // The upgrade target's own shipped version is the eligibility
+        // truth, not config('deployment.latest_local_agent_version') — a
+        // stale override of that soft notification value must never be
+        // able to block (or wrongly permit) an actual upgrade.
+        $target = $this->upgradeTargets->resolve();
+        $expected = $target['agent_version'];
         abort_unless(is_string($localAgent->agent_version) && version_compare($localAgent->agent_version, $expected, '<'), 409, 'This Local Agent is already at the latest version.');
         abort_if(
             LocalAgentControlJob::query()
@@ -91,7 +108,7 @@ class LocalAgentControlJobService
             'An upgrade is already active for this Local Agent.'
         );
 
-        return $this->queue($localAgent, LocalAgentControlJob::ACTION_UPGRADE, $requestedBy, $this->upgradeTargets->resolve());
+        return $this->queue($localAgent, LocalAgentControlJob::ACTION_UPGRADE, $requestedBy, $target);
     }
 
     /**
