@@ -10,6 +10,7 @@ use App\Services\Publish\LocalAgentControlJobService;
 use App\Services\Publish\PublishJobService;
 use App\Services\Releases\ReleaseGitFactsResolver;
 use App\Services\Releases\ReleaseOrchestrator;
+use App\Services\Releases\ReleaseRecoveryEligibility;
 use App\Services\Webhooks\WebhookDeliveryOwnershipService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -67,8 +68,10 @@ class ProcessGitHubWebhookPush implements ShouldQueue
         PublishJobService $publishJobs,
         ?WebhookDeliveryOwnershipService $deliveries = null,
         ?LocalAgentControlJobService $controlJobs = null,
+        ?ReleaseRecoveryEligibility $eligibility = null,
     ): void {
         $controlJobs ??= app(LocalAgentControlJobService::class);
+        $eligibility ??= app(ReleaseRecoveryEligibility::class);
         $deliveries ??= app(WebhookDeliveryOwnershipService::class);
         $ownedToken = null;
         if ($this->webhookDeliveryId !== null) {
@@ -101,7 +104,14 @@ class ProcessGitHubWebhookPush implements ShouldQueue
                 );
             }
 
-            if ($release->status === Release::STATUS_AWAITING_ARTIFACT && $this->project->requires_complete_artifact) {
+            // Historical-recovery regression fix: a delayed queue retry or
+            // a GitHub-redelivered webhook can, in principle, process this
+            // exact commit's Release after a newer push has already
+            // superseded it for this project+branch. isCurrent() is the
+            // same shared check the scheduled sweep relies on -- applying
+            // it here too means an out-of-order delivery can never queue a
+            // build for a Release that is no longer the branch tip.
+            if ($release->status === Release::STATUS_AWAITING_ARTIFACT && $this->project->requires_complete_artifact && $eligibility->isCurrent($release)) {
                 try {
                     $mapping = $buildAgents->resolve($this->project, $this->branch);
                     $publishJobs->queueArtifactBuild(

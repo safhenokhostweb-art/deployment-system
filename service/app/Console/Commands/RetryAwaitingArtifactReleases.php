@@ -25,8 +25,9 @@ class RetryAwaitingArtifactReleases extends Command
         $result = $retry->retry();
 
         $this->info(sprintf(
-            '%d awaiting_artifact Release(s) checked: %d build(s) queued.',
+            '%d current awaiting_artifact Release(s) checked (%d superseded and skipped): %d build(s) queued.',
             $result['checked'],
+            $result['superseded'],
             $result['queued'],
         ));
 

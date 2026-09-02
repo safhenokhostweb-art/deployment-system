@@ -87,6 +87,32 @@ class ProcessGitHubWebhookPushTest extends TestCase
     }
 
     /**
+     * Historical-recovery regression fix, applied defensively to the
+     * webhook path too: a delayed queue retry or a GitHub-redelivered
+     * webhook could otherwise process an old commit's Release after a
+     * newer push already superseded it for the same project+branch.
+     * ReleaseRecoveryEligibility::isCurrent() — the same check the
+     * scheduled sweep relies on — must block queuing a build here as well.
+     */
+    public function test_handle_never_queues_a_build_for_a_release_already_superseded_by_a_newer_push(): void
+    {
+        $project = Project::factory()->create(['branch' => 'main', 'requires_complete_artifact' => true]);
+        Release::factory()->create(['project_id' => $project->id, 'branch' => 'main', 'status' => Release::STATUS_AWAITING_ARTIFACT]);
+
+        $oldSha = str_repeat('9', 40);
+        $job = new ProcessGitHubWebhookPush($project->fresh(), $oldSha, 'main', 'octocat');
+        $job->handle(
+            app(\App\Services\Releases\ReleaseOrchestrator::class),
+            app(\App\Services\Releases\ReleaseGitFactsResolver::class),
+            app(\App\Services\Publish\AuthoritativeBuildAgentResolver::class),
+            app(\App\Services\Publish\PublishJobService::class),
+        );
+
+        $this->assertDatabaseHas('releases', ['project_id' => $project->id, 'commit_hash' => $oldSha]);
+        $this->assertDatabaseCount('publish_jobs', 0);
+    }
+
+    /**
      * Reproduces the exact production release-orchestration deadlock end
      * to end: an authoritative production_build Agent still on 1.5.2 (the
      * exact version installed in production) is otherwise fully healthy

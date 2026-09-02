@@ -961,6 +961,58 @@ class PublishJobService
     }
 
     /**
+     * Root-cause fix (historical-release-recovery regression):
+     * releases:reconcile-obsolete-artifact-builds' only write path into
+     * PublishJob — invalidates a build_artifact job that automatic
+     * recovery queued for a Release since superseded by a newer push to
+     * the same project+branch, before the Agent ever claimed it.
+     * Deliberately does NOT call syncFailedBuildRelease()/markFailed(): a
+     * superseded Release was never actually attempted and failed, so
+     * recording it as "failed" would misstate history. The caller
+     * separately re-runs ReleaseOrchestrator::syncArtifactState() on the
+     * Release once its job is no longer active, which reconciles status
+     * back to whatever is actually true (typically awaiting_artifact) —
+     * the exact same reconciliation any other job completion already
+     * relies on, not a new state invented for this path.
+     *
+     * Deliberately does not fire PublishJobAbandoned: that event notifies
+     * the project's publish audience ("your publish was abandoned"), which
+     * would misrepresent this as something going wrong with a legitimate
+     * publish rather than silent cleanup of a job automatic recovery
+     * should never have created. The AuditLogEntry alone is the record.
+     */
+    public function invalidateObsoleteArtifactBuild(PublishJob $job, string $reason): PublishJob
+    {
+        abort_unless($job->action === PublishJob::ACTION_BUILD_ARTIFACT, 422, 'Only a build_artifact job can be invalidated as obsolete.');
+        abort_unless(
+            in_array($job->status, [PublishJob::STATUS_QUEUED, PublishJob::STATUS_APPROVED], true),
+            409,
+            'Only a not-yet-started Artifact build can be invalidated as obsolete; a running or already-terminal job must be left alone.',
+        );
+
+        $job->update([
+            'status' => PublishJob::STATUS_ABANDONED,
+            'active_build_key' => null,
+            'error_message' => $reason,
+            'failure_code' => 'obsolete_release_superseded',
+            'finished_at' => now(),
+        ]);
+
+        $this->releaseProjectLock($job);
+
+        AuditLogEntry::record(
+            actorType: AuditLogEntry::ACTOR_SYSTEM,
+            actorIdentifier: null,
+            action: 'publish_job.invalidated_obsolete_artifact_build',
+            subjectType: PublishJob::class,
+            subjectId: $job->id,
+            metadata: ['release_id' => $job->release_id, 'reason' => $reason],
+        );
+
+        return $job->refresh();
+    }
+
+    /**
      * deployments:recover-stale's other write path: a job whose total
      * elapsed runtime exceeds publish_job_max_runtime_seconds — a hard
      * Hub-enforced ceiling that applies even if the agent's own
