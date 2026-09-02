@@ -63,6 +63,26 @@ check 'project cache is byte-for-byte preserved' test "$cache_before" = "$(sha25
 check 'new lib files are activated' test -f "$success_install/lib/NewRuntimeLibrary.php"
 check 'timestamped backup stores the old version' grep -R -q 'old_version=1.4.3' "$success_install/storage/upgrades/backups"
 
+# Version ordering is enforced by the activation boundary itself, not only
+# by the Hub queue policy. A stale/replayed package can never downgrade an
+# already newer runtime.
+downgrade_install="$TMP_ROOT/downgrade-install"
+downgrade_source="$TMP_ROOT/downgrade-source"
+make_runtime "$downgrade_install" 1.5.3
+make_source "$downgrade_source" 1.5.2
+printf '%s\n' '<?php return ["token" => "downgrade-preserve"];' >"$downgrade_install/config.php"
+downgrade_agent_before="$(sha256sum "$downgrade_install/agent.php" | awk '{print $1}')"
+if LOCAL_AGENT_UPGRADER_TEST_MODE=1 \
+    LOCAL_AGENT_UPGRADER_PHP_BIN="${LOCAL_AGENT_TEST_PHP_BIN:-php}" \
+    LOCAL_AGENT_UPGRADER_BACKUP_ROOT="$downgrade_install/storage/upgrades/backups" \
+    bash "$UPGRADER" --source-dir "$downgrade_source" --install-dir "$downgrade_install" --agent-managed-restart --expected-version 1.5.2 >/dev/null 2>&1; then
+    downgrade_rejected=1
+else
+    downgrade_rejected=0
+fi
+check 'Linux upgrader rejects a 1.5.3 to 1.5.2 downgrade' test "$downgrade_rejected" -eq 0
+check 'rejected downgrade leaves active runtime unchanged' test "$downgrade_agent_before" = "$(sha256sum "$downgrade_install/agent.php" | awk '{print $1}')"
+
 # Invalid PHP must fail before any active file changes.
 syntax_install="$TMP_ROOT/syntax-install"
 syntax_source="$TMP_ROOT/syntax-source"
@@ -132,14 +152,17 @@ check 'rollback attempts to restart the restored runtime' test -f "$restart_stat
 # package once its exact source is made available; 1.5.2+ uses the new
 # exact-commit materializer for every subsequent Dashboard upgrade.
 bootstrap_install="$TMP_ROOT/bootstrap-1.5.2-install"
+bootstrap_source="$TMP_ROOT/bootstrap-1.5.2-source"
 make_runtime "$bootstrap_install" 1.5.1
+make_source "$bootstrap_source" 1.5.2
+printf '%s\n' '<?php final class LinuxUpgradePackageMaterializer {}' >"$bootstrap_source/lib/LinuxUpgradePackageMaterializer.php"
 printf '%s\n' '<?php return ["token" => "bootstrap-preserve"];' >"$bootstrap_install/config.php"
 bootstrap_output="$(
     LOCAL_AGENT_UPGRADER_TEST_MODE=1 \
     LOCAL_AGENT_UPGRADER_PHP_BIN="${LOCAL_AGENT_TEST_PHP_BIN:-php}" \
     LOCAL_AGENT_UPGRADER_BACKUP_ROOT="$bootstrap_install/storage/upgrades/backups" \
     bash "$UPGRADER" \
-        --source-dir "$ROOT/deployment-local-agent/agent" \
+        --source-dir "$bootstrap_source" \
         --install-dir "$bootstrap_install" \
         --agent-managed-restart \
         --expected-version 1.5.2
@@ -147,6 +170,27 @@ bootstrap_output="$(
 check 'historical 1.5.1 runtime can bootstrap through the official 1.5.2 package' grep -q 'UPGRADE_OK old_version=1.5.1 new_version=1.5.2' <<<"$bootstrap_output"
 check 'bootstrap activates canonical Agent 1.5.2' grep -q "LOCAL_AGENT_VERSION = '1.5.2'" "$bootstrap_install/agent.php"
 check 'bootstrap package includes exact-commit upgrade materialization' test -f "$bootstrap_install/lib/LinuxUpgradePackageMaterializer.php"
+
+# Normal post-bootstrap delivery: an installed 1.5.2 runtime activates the
+# current official 1.5.3 package through upgrade-linux.sh, with no bootstrap
+# script, manual copy, downgrade, or mutable-workspace authority involved.
+normal_install="$TMP_ROOT/normal-1.5.3-install"
+make_runtime "$normal_install" 1.5.2
+printf '%s\n' '<?php return ["token" => "normal-upgrade-preserve"];' >"$normal_install/config.php"
+normal_config_before="$(sha256sum "$normal_install/config.php" | awk '{print $1}')"
+normal_output="$(
+    LOCAL_AGENT_UPGRADER_TEST_MODE=1 \
+    LOCAL_AGENT_UPGRADER_PHP_BIN="${LOCAL_AGENT_TEST_PHP_BIN:-php}" \
+    LOCAL_AGENT_UPGRADER_BACKUP_ROOT="$normal_install/storage/upgrades/backups" \
+    bash "$UPGRADER" \
+        --source-dir "$ROOT/deployment-local-agent/agent" \
+        --install-dir "$normal_install" \
+        --agent-managed-restart \
+        --expected-version 1.5.3
+)"
+check 'installed 1.5.2 normally upgrades to official 1.5.3' grep -q 'UPGRADE_OK old_version=1.5.2 new_version=1.5.3' <<<"$normal_output"
+check 'normal upgrade activates canonical Agent 1.5.3' grep -q "LOCAL_AGENT_VERSION = '1.5.3'" "$normal_install/agent.php"
+check 'normal 1.5.2 to 1.5.3 upgrade preserves config.php' test "$normal_config_before" = "$(sha256sum "$normal_install/config.php" | awk '{print $1}')"
 
 printf '\nLinux upgrader: %d passed, %d failed\n' "$passed" "$failed"
 test "$failed" -eq 0

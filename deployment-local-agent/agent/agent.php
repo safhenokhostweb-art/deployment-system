@@ -104,7 +104,7 @@ use LocalAgent\WorkspaceSourcePreparer;
  * Hub side for why this never triggers an automatic download). Bump
  * when agent.php or lib/* changes in a way that matters operationally.
  */
-const LOCAL_AGENT_VERSION = '1.5.2';
+const LOCAL_AGENT_VERSION = '1.5.3';
 
 $configPath = __DIR__ . '/config.php';
 

@@ -11,6 +11,10 @@ WORKSPACE="$TMP_ROOT/workspace"
 INSTALL="$TMP_ROOT/install"
 mkdir -p "$SEED/deployment-local-agent" "$INSTALL/lib" "$INSTALL/storage/cache"
 cp -R "$ROOT/deployment-local-agent/." "$SEED/deployment-local-agent/"
+# Freeze this fixture at the historical package version even after the
+# canonical packaged runtime advances. The one-time bootstrap itself must
+# never be repurposed to deliver 1.5.3 or any later release.
+sed -i -E "s/const LOCAL_AGENT_VERSION = '[^']+';/const LOCAL_AGENT_VERSION = '1.5.2';/" "$SEED/deployment-local-agent/agent/agent.php"
 git -C "$SEED" init -q --initial-branch=master
 git -C "$SEED" config user.email bootstrap@example.test
 git -C "$SEED" config user.name 'Bootstrap Test'

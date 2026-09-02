@@ -69,6 +69,10 @@ if [[ -n "$EXPECTED_VERSION" && "$NEW_VERSION" != "$EXPECTED_VERSION" ]]; then
     echo "Upgrade package version ${NEW_VERSION} does not match expected version ${EXPECTED_VERSION}." >&2
     exit 4
 fi
+if ! "$PHP_BIN" -r 'exit(version_compare($argv[1], $argv[2], ">") ? 0 : 1);' "$NEW_VERSION" "$OLD_VERSION"; then
+    echo "Refusing Local Agent downgrade or same-version activation: installed ${OLD_VERSION}, package ${NEW_VERSION}." >&2
+    exit 4
+fi
 
 CONFIG_HASH_BEFORE="$(sha256sum "${INSTALL_DIR}/config.php" | awk '{print $1}')"
 CONFIG_OWNER="$(stat -c '%U' "${INSTALL_DIR}/config.php")"

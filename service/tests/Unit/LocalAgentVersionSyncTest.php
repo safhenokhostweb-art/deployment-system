@@ -28,6 +28,7 @@ class LocalAgentVersionSyncTest extends TestCase
             $localAgentVersion,
             'deployment-local-agent/agent/agent.php and local-agent/agent.php must ship the exact same LOCAL_AGENT_VERSION — they are kept as mirrored copies.',
         );
+        $this->assertSame('1.5.3', $localAgentVersion, 'The primary Artifact transport fix must ship as official Local Agent 1.5.3.');
     }
 
     public function test_hub_default_latest_version_matches_the_shipped_agent_version(): void
@@ -48,6 +49,7 @@ class LocalAgentVersionSyncTest extends TestCase
 
         $this->assertSame($shippedVersion, config('deployment.min_local_agent_version_for_assigned_artifact'));
         $this->assertSame('1.5.2', config('deployment.min_local_agent_version_for_exact_commit_upgrade'));
+        $this->assertTrue(version_compare('1.5.2', $shippedVersion, '<'), 'Installed 1.5.2 must remain eligible for the normal exact-commit upgrade to 1.5.3.');
         $this->assertStringContainsString("'assigned_artifact_publish_job_id' => true", $source);
     }
 
