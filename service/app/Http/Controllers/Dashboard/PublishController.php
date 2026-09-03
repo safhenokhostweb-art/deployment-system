@@ -13,6 +13,7 @@ use App\Services\Publish\ArtifactCommitSelector;
 use App\Services\Publish\AuthoritativeBuildAgentResolver;
 use App\Services\Publish\PublishJobService;
 use App\Services\Releases\ReleaseReadiness;
+use App\Services\Releases\ReleaseRecoveryEligibility;
 use App\Services\Releases\ReleaseVerificationStatus;
 use App\Services\GitHub\GitHubAppClient;
 use App\Services\GitHub\GitHubApiException;
@@ -38,30 +39,56 @@ class PublishController extends Controller
         private readonly GitHubAppClient $github,
         private readonly ReleaseReadiness $releaseReadiness,
         private readonly ReleaseVerificationStatus $releaseVerificationStatus,
+        private readonly ReleaseRecoveryEligibility $releaseRecoveryEligibility,
     ) {
     }
 
-    /** Side-effect-free confirmation page for the newest valid release. */
+    /**
+     * Side-effect-free confirmation page for the CURRENT Release (the
+     * newest Release row for this project's configured branch — see
+     * ReleaseRecoveryEligibility::currentReleaseFor(), the single
+     * definition of "current" shared with automatic recovery). Never
+     * searches backward to an older ready Release: an existing, non-ready
+     * current Release fails closed via readiness below instead.
+     */
     public function deployLatestConfirmation(Project $project)
     {
         Gate::authorize('deployments.create');
         Gate::authorize('deploy', $project);
-        [$latestRemoteCommit, $artifact, $release] = $this->latestRemoteArtifact($project);
-        $readiness = $this->releaseReadiness->for($latestRemoteCommit, $release, $artifact);
+        [$currentCommit, $artifact, $release] = $this->latestRemoteArtifact($project);
+        $readiness = $this->releaseReadiness->for($currentCommit, $release, $artifact);
         $verification = $this->releaseVerificationStatus->for($release);
 
-        return view('publish.deploy-latest', compact('project', 'artifact', 'release', 'readiness', 'verification', 'latestRemoteCommit'));
+        return view('publish.deploy-latest', compact('project', 'artifact', 'release', 'readiness', 'verification', 'currentCommit'));
     }
 
-    /** Create the exact pending deployment candidate selected by the operator. */
+    /**
+     * Create the exact pending deployment candidate for the CURRENT
+     * Release. The Release/Artifact pair is always re-resolved here from
+     * the server-side current-Release definition — never taken from the
+     * request — so a client cannot influence which Artifact gets used.
+     * `reviewed_release_id` carries only what the operator's GET actually
+     * displayed, and is used exclusively to detect drift: if a newer
+     * Release superseded it between review and confirm, this fails closed
+     * rather than silently creating a candidate for a Release the operator
+     * never saw (see class docblock invariant: what was reviewed is what
+     * gets created).
+     */
     public function deployLatest(Request $request, Project $project): RedirectResponse
     {
         Gate::authorize('deployments.create');
         Gate::authorize('deploy', $project);
-        [$latestRemoteCommit, $artifact, $release] = $this->latestRemoteArtifact($project);
-        $readiness = $this->releaseReadiness->for($latestRemoteCommit, $release, $artifact);
-        abort_unless($latestRemoteCommit !== null, 409, 'The latest remote production-branch commit is unavailable.');
+
+        [$currentCommit, $artifact, $release] = $this->latestRemoteArtifact($project);
+        $readiness = $this->releaseReadiness->for($currentCommit, $release, $artifact);
         abort_unless($readiness['deployable'] && $artifact !== null && $release !== null, 409, $readiness['message']);
+
+        $reviewedReleaseId = $request->input('reviewed_release_id');
+        abort_unless(
+            $reviewedReleaseId !== null && ctype_digit((string) $reviewedReleaseId) && (int) $reviewedReleaseId === $release->id,
+            409,
+            'The current Release changed since this page was reviewed. Please re-review before creating a deployment candidate.'
+        );
 
         $deployment = $this->deployments->createFromExistingArtifact($project, $artifact, $request->user()->email);
 
@@ -307,26 +334,30 @@ class PublishController extends Controller
         }
     }
 
-    /** @return array{0: string|null, 1: \App\Models\Artifact|null, 2: \App\Models\Release|null} */
+    /**
+     * Root-cause fix (deploy-latest stale-commit bug): resolves the
+     * CURRENT Release (ReleaseRecoveryEligibility::currentReleaseFor() —
+     * the newest Release row for this project's configured branch, the
+     * same definition automatic recovery uses) FIRST, then its exact
+     * Artifact. Deliberately does not consult GitHub's branch HEAD or a
+     * LocalProjectMapping's self-reported remote_tracking_sha as a
+     * selector — both are side channels a Local Agent's own heartbeat
+     * cadence can leave arbitrarily behind the Hub's own Release table,
+     * which is what previously let an old Release/Artifact pair
+     * (matching a stale reported commit) shadow a newer ready one. Never
+     * searches backward to an older ready Release when the current one
+     * isn't ready — callers must fail closed on that via ReleaseReadiness
+     * instead.
+     *
+     * @return array{0: string|null, 1: \App\Models\Artifact|null, 2: \App\Models\Release|null}
+     */
     private function latestRemoteArtifact(Project $project): array
     {
-        $mapping = LocalProjectMapping::query()
-            ->where('project_id', $project->id)
-            ->where('local_agent_id', $project->authoritative_build_local_agent_id)
-            ->with('project')
-            ->first();
-
-        $githubCommit = $this->remoteBranchHead($project, $project->branch);
-        $latestRemoteCommit = $mapping === null
-            ? $githubCommit
-            : $this->artifactCommits->latestRemoteCommit($mapping, $githubCommit);
-        $artifact = $latestRemoteCommit === null
+        $release = $this->releaseRecoveryEligibility->currentReleaseFor($project);
+        $artifact = $release === null
             ? null
-            : $this->artifactCommits->findAvailableArtifact($project, $latestRemoteCommit, $project->branch);
-        $release = $latestRemoteCommit === null
-            ? null
-            : $project->releases()->where('commit_hash', $latestRemoteCommit)->where('branch', $project->branch)->first();
+            : $this->artifactCommits->findAvailableArtifact($project, $release->commit_hash, $release->branch);
 
-        return [$latestRemoteCommit, $artifact, $release];
+        return [$release?->commit_hash, $artifact, $release];
     }
 }

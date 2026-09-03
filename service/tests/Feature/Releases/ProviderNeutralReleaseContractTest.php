@@ -69,10 +69,13 @@ class ProviderNeutralReleaseContractTest extends TestCase
             ->assertDontSee('name="artifact_id"', false);
         $this->assertDatabaseCount('deployments', 0);
 
-        $this->actingAs($user)->post(route('projects.deploy-latest', $project))->assertRedirect();
+        $release = Release::sole();
+        $this->actingAs($user)->post(route('projects.deploy-latest', $project), [
+            'reviewed_release_id' => $release->id,
+        ])->assertRedirect();
         $deployment = Deployment::sole();
         $this->assertSame($artifact->id, $deployment->artifact_id);
-        $this->assertSame(Release::sole()->id, $deployment->release_id);
+        $this->assertSame($release->id, $deployment->release_id);
     }
 
     public function test_exact_older_artifact_does_not_make_latest_release_ready(): void

@@ -76,6 +76,57 @@ class ReleaseRecoveryEligibilityTest extends TestCase
         $this->assertTrue(app(ReleaseRecoveryEligibility::class)->isCurrent($releaseA->fresh()));
     }
 
+    /**
+     * currentReleaseFor() is the finder counterpart callers without a
+     * Release instance already in hand use (e.g. deploy-latest) — must
+     * agree with isCurrent() exactly, so the two can never independently
+     * drift on what "current" means for the same project+branch.
+     */
+    public function test_current_release_for_returns_the_newest_release_for_the_project_and_branch(): void
+    {
+        $project = Project::factory()->create(['branch' => 'main']);
+        Release::factory()->create(['project_id' => $project->id, 'branch' => 'main', 'source_received_at' => now()->subDay()]);
+        $newest = Release::factory()->create(['project_id' => $project->id, 'branch' => 'main']);
+
+        $current = app(ReleaseRecoveryEligibility::class)->currentReleaseFor($project);
+
+        $this->assertNotNull($current);
+        $this->assertTrue($current->is($newest));
+        $this->assertTrue(app(ReleaseRecoveryEligibility::class)->isCurrent($current));
+    }
+
+    public function test_current_release_for_ignores_a_newer_release_on_a_different_branch(): void
+    {
+        $project = Project::factory()->create(['branch' => 'main']);
+        $mainRelease = Release::factory()->create(['project_id' => $project->id, 'branch' => 'main']);
+        // Created after (higher id than) the main-branch Release above.
+        Release::factory()->create(['project_id' => $project->id, 'branch' => 'develop']);
+
+        $current = app(ReleaseRecoveryEligibility::class)->currentReleaseFor($project);
+
+        $this->assertNotNull($current);
+        $this->assertTrue($current->is($mainRelease));
+    }
+
+    public function test_current_release_for_returns_a_not_ready_current_release_rather_than_an_older_ready_one(): void
+    {
+        $project = Project::factory()->create(['branch' => 'main']);
+        Release::factory()->create(['project_id' => $project->id, 'branch' => 'main', 'status' => Release::STATUS_READY]);
+        $newerNotReady = Release::factory()->create(['project_id' => $project->id, 'branch' => 'main', 'status' => Release::STATUS_AWAITING_ARTIFACT]);
+
+        $current = app(ReleaseRecoveryEligibility::class)->currentReleaseFor($project);
+
+        $this->assertTrue($current->is($newerNotReady));
+    }
+
+    public function test_current_release_for_returns_null_when_the_project_has_no_release_for_its_branch(): void
+    {
+        $project = Project::factory()->create(['branch' => 'main']);
+        Release::factory()->create(['project_id' => $project->id, 'branch' => 'develop']);
+
+        $this->assertNull(app(ReleaseRecoveryEligibility::class)->currentReleaseFor($project));
+    }
+
     public function test_automatic_recovery_eligibility_also_requires_the_project_to_want_a_complete_artifact_and_be_active(): void
     {
         $project = Project::factory()->create(['branch' => 'main', 'requires_complete_artifact' => false, 'is_active' => true]);

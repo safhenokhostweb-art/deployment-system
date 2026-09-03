@@ -2,6 +2,7 @@
 
 namespace App\Services\Releases;
 
+use App\Models\Project;
 use App\Models\Release;
 
 /**
@@ -41,6 +42,27 @@ final class ReleaseRecoveryEligibility
             ->where('branch', $release->branch)
             ->where('id', '>', $release->id)
             ->exists();
+    }
+
+    /**
+     * Finder counterpart to isCurrent() above, expressing the exact same
+     * "newest row for this project+branch is the tip" rule — the single
+     * place any operator-facing "what is the current Release right now"
+     * question (e.g. Review & Deploy Latest) resolves it from, so it can
+     * never independently drift from what automatic recovery agrees is
+     * current. Deliberately status-agnostic: a current Release that is
+     * awaiting_artifact/failed is still returned as-is — never skipped
+     * backward to an older ready sibling, exactly like isCurrent() never
+     * lets one supersede an older Release only when the newer one itself
+     * passes.
+     */
+    public function currentReleaseFor(Project $project): ?Release
+    {
+        return Release::query()
+            ->where('project_id', $project->id)
+            ->where('branch', $project->branch)
+            ->latest('id')
+            ->first();
     }
 
     /**

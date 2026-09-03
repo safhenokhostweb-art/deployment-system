@@ -291,8 +291,24 @@ class SmartArtifactCommitSelectionTest extends TestCase
     public function test_existing_available_artifact_creates_a_new_deployment_with_the_artifact_and_no_build_job(): void
     {
         [$user, $project, $mapping] = $this->verifiedProject('customer-site', str_repeat('c', 40));
+        // Review & Deploy Latest resolves from the current Release row,
+        // not merely from an available Artifact for the reported commit
+        // — see DeployLatestVerificationTest for the dedicated coverage.
+        $release = Release::factory()->create([
+            'project_id' => $project->id,
+            'branch' => 'main',
+            'commit_hash' => str_repeat('c', 40),
+            'status' => Release::STATUS_READY,
+            'readiness_policy' => Release::READINESS_POLICY_LEGACY_FALLBACK,
+            'source' => 'legacy',
+            'legacy_fallback_eligible_at' => now(),
+            'legacy_fallback_reason' => 'test fixture',
+            'legacy_fallback_eligible_by' => $user->email,
+            'metadata' => ['release_ready' => true],
+        ]);
         $artifact = Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
+            'release_id' => $release->id,
             'commit_hash' => str_repeat('c', 40),
             'branch' => 'main',
             'status' => Artifact::STATUS_AVAILABLE,
@@ -402,21 +418,59 @@ class SmartArtifactCommitSelectionTest extends TestCase
         }
     }
 
-    public function test_deploy_latest_rejects_older_artifact_and_get_is_side_effect_free(): void
+    /**
+     * Root-cause regression (deploy-latest stale-commit bug): a Local
+     * Agent's self-reported remote_tracking_sha is NOT the selector for
+     * deploy-latest — only the newest Release row for project+branch is
+     * (ReleaseRecoveryEligibility::currentReleaseFor()). Here the agent
+     * claims a SHA ('b') the Hub has no Release for at all, an available
+     * Artifact exists for an OLDER, superseded Release's commit ('a'),
+     * and the actual current Release ('c') has no Artifact yet — the
+     * page must resolve/display 'c' and fail closed, never silently
+     * reuse the older ready-looking Artifact for 'a', and never surface
+     * the stale agent-reported 'b' at all.
+     */
+    public function test_deploy_latest_ignores_stale_agent_reported_sha_and_never_falls_back_to_an_older_artifact(): void
     {
         [$user, $project, $mapping] = $this->verifiedProject('customer-site', str_repeat('a', 40));
         $mapping->update(['remote_tracking_sha' => str_repeat('b', 40)]);
+
+        $olderRelease = Release::factory()->create([
+            'project_id' => $project->id,
+            'branch' => 'main',
+            'commit_hash' => str_repeat('a', 40),
+            'status' => Release::STATUS_READY,
+            'readiness_policy' => Release::READINESS_POLICY_LEGACY_FALLBACK,
+            'source' => 'legacy',
+            'legacy_fallback_eligible_at' => now(),
+            'legacy_fallback_reason' => 'pre-modern-release backfill',
+            'legacy_fallback_eligible_by' => $user->email,
+            'metadata' => ['release_ready' => true],
+        ]);
         Artifact::factory()->physicallyAvailable()->create([
             'project_id' => $project->id,
+            'release_id' => $olderRelease->id,
             'commit_hash' => str_repeat('a', 40),
             'branch' => 'main',
             'status' => Artifact::STATUS_AVAILABLE,
         ]);
 
+        // A later push superseded it; no Artifact has been built for the
+        // new tip yet.
+        Release::factory()->create([
+            'project_id' => $project->id,
+            'branch' => 'main',
+            'commit_hash' => str_repeat('c', 40),
+            'status' => Release::STATUS_AWAITING_ARTIFACT,
+            'metadata' => ['release_ready' => false],
+        ]);
+
         $this->actingAs($user)->get(route('projects.deploy-latest.show', $project))
             ->assertOk()
-            ->assertSee(str_repeat('b', 40))
-            ->assertSee('NOT READY');
+            ->assertSee('NOT READY')
+            ->assertSee(str_repeat('c', 40))
+            ->assertDontSee(str_repeat('a', 40))
+            ->assertDontSee(str_repeat('b', 40));
 
         $this->assertDatabaseCount('deployments', 0);
         $this->assertDatabaseCount('publish_jobs', 0);

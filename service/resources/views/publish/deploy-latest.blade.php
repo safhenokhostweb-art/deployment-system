@@ -31,11 +31,12 @@
         </dl>
         <form method="POST" action="{{ route('projects.deploy-latest', $project) }}">
             @csrf
+            <input type="hidden" name="reviewed_release_id" value="{{ $release->id }}">
             <button class="btn btn-primary" type="submit">Create deployment candidate</button>
             <a class="btn" href="{{ route('projects.show', $project) }}">Cancel</a>
         </form>
     @else
-        <p class="alert alert-warning">{{ $readiness['code'] }}{{ $latestRemoteCommit ? ' — '.$latestRemoteCommit : '' }}</p>
+        <p class="alert alert-warning">{{ $readiness['code'] }}{{ $currentCommit ? ' — '.$currentCommit : '' }}</p>
         <a class="btn" href="{{ route('projects.show', $project) }}">Back to project</a>
         @can('releases.backfill')
             @if($artifact)
