@@ -350,6 +350,7 @@ return [
         'workspace_not_reported' => 'هنوز تأیید نشده',
         'workspace_branch_mismatch' => 'Branch گزارش‌شده مطابقت ندارد',
         'github_head' => 'Latest remote branch HEAD',
+        'current_release_head' => 'Commit فعلی Release',
         'github_unavailable' => 'در دسترس نیست',
         'github_workspace_mismatch' => 'هشدار: HEAD شاخه GitHub با HEAD تأییدشده Workspace متفاوت است.',
         'advanced_choose_commit' => 'Advanced: انتخاب Commit دیگر',

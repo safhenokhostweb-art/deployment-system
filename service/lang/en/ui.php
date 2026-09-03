@@ -350,6 +350,7 @@ return [
         'workspace_not_reported' => 'Not verified yet',
         'workspace_branch_mismatch' => 'Reported branch does not match',
         'github_head' => 'Latest remote branch HEAD',
+        'current_release_head' => 'Current Release commit',
         'github_unavailable' => 'Remote HEAD unavailable',
         'github_workspace_mismatch' => 'The remote branch is newer than the source workspace. The exact remote commit will be built.',
         'advanced_choose_commit' => 'Advanced: choose another commit',

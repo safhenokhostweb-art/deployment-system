@@ -69,7 +69,11 @@ class SmartArtifactCommitSelectionTest extends TestCase
 
         $response = $this->actingAs($user)->get(route('projects.show', $project));
 
-        $response->assertOk()->assertSee($remote);
+        // Bootstrap case (no Release yet): the label stays "Latest remote
+        // branch HEAD", not the current-Release label — see
+        // test_current_release_commit_wins_over_stale_mapping_remote_tracking_sha()
+        // for the labeling once a Release exists.
+        $response->assertOk()->assertSee($remote)->assertSee(__('ui.publish.github_head'));
         $this->assertSelectorTargets($response->getContent(), $remote);
         $this->assertBuildButtonEnabled($response->getContent());
         $this->assertDeployLatestDisabled($response->getContent());
@@ -404,6 +408,15 @@ class SmartArtifactCommitSelectionTest extends TestCase
         $this->assertSame(str_repeat('e', 40), $job->reviewed_head_sha);
     }
 
+    /**
+     * Bootstrap-only case: no Release row exists yet for either project's
+     * branch, so options() falls back to the GitHub/mapping-derived
+     * latestRemoteCommit() — the one case where that remains correct (a
+     * brand-new project must still be able to build its first Artifact
+     * before any push/Release has ever been recorded). See
+     * test_customer_site_and_saas_platform_select_current_release_commit_once_a_release_exists()
+     * below for the current-Release-authoritative counterpart.
+     */
     public function test_customer_site_and_saas_platform_share_remote_head_selection_logic(): void
     {
         foreach (['customer-site', 'saas-platform'] as $projectKey) {
@@ -416,6 +429,286 @@ class SmartArtifactCommitSelectionTest extends TestCase
             $this->assertTrue($option['is_build_ready']);
             $this->assertNull($option['existing_artifact_id']);
         }
+    }
+
+    /**
+     * Current-Release-authoritative counterpart to the bootstrap test
+     * above: once a Release row exists for project+branch, both
+     * saas-platform and customer-site must select its exact commit_hash
+     * — never the mapping's self-reported remote_tracking_sha, even
+     * though that field still reports something else entirely.
+     */
+    public function test_customer_site_and_saas_platform_select_current_release_commit_once_a_release_exists(): void
+    {
+        foreach (['customer-site', 'saas-platform'] as $projectKey) {
+            [, $project, $mapping] = $this->verifiedProject($projectKey, str_repeat('a', 40));
+            $mapping->update(['remote_tracking_sha' => str_repeat('b', 40)]);
+            Release::factory()->create([
+                'project_id' => $project->id,
+                'branch' => 'main',
+                'commit_hash' => str_repeat('c', 40),
+                'status' => Release::STATUS_READY,
+            ]);
+
+            $option = app(\App\Services\Publish\ArtifactCommitSelector::class)->options($project->fresh()->load('localProjectMappings.localAgent'))[0];
+
+            $this->assertSame(str_repeat('c', 40), $option['remote_sha']);
+            $this->assertSame('release', $option['remote_source']);
+            $this->assertTrue($option['is_build_ready']);
+            $this->assertNull($option['existing_artifact_id']);
+        }
+    }
+
+    /**
+     * Root-cause fix (default Build Artifact stale-commit bug): once a
+     * current Release exists, its exact commit_hash is the canonical
+     * default target — never GitHub's live HEAD, never the Local Agent's
+     * self-reported remote_tracking_sha — even when both the persistent
+     * workspace's own local_head_sha AND its remote_tracking_sha are
+     * stale relative to the current Release, and even when a client
+     * submits a different commit_hash for 'latest' mode (which must be
+     * ignored, exactly like before this fix). GET display and the actual
+     * POST execution must agree on the exact same target.
+     */
+    public function test_current_release_commit_wins_over_stale_mapping_remote_tracking_sha(): void
+    {
+        $staleWorkspaceHead = str_repeat('1', 40);
+        $staleRemoteTracking = str_repeat('2', 40);
+        $currentReleaseSha = str_repeat('3', 40);
+        [$user, $project, $mapping] = $this->verifiedProject('saas-platform', $staleWorkspaceHead);
+        $mapping->update(['remote_tracking_sha' => $staleRemoteTracking]);
+        $release = Release::factory()->create([
+            'project_id' => $project->id,
+            'branch' => 'main',
+            'commit_hash' => $currentReleaseSha,
+            'status' => Release::STATUS_READY,
+        ]);
+
+        $response = $this->actingAs($user)->get(route('projects.show', $project));
+
+        $response->assertOk()->assertSee($currentReleaseSha)->assertSee(__('ui.publish.current_release_head'));
+        // Scoped to the Artifact selector fragment specifically — the
+        // separate "Transfer trace" diagnostic card legitimately keeps
+        // showing the mapping's raw self-reported remote_tracking_sha
+        // elsewhere on the page; that surface is untouched by this fix.
+        $this->assertStringNotContainsString($staleRemoteTracking, $this->artifactSelectorHtml($response->getContent()));
+        $this->assertSelectorTargets($response->getContent(), $currentReleaseSha);
+        $this->assertBuildButtonEnabled($response->getContent());
+
+        $this->actingAs($user)->post(route('projects.publish', $project), [
+            'local_project_mapping_id' => $mapping->id,
+            'commit_selection_mode' => 'latest',
+            'commit_hash' => $staleRemoteTracking,
+        ])->assertRedirect();
+
+        $job = PublishJob::sole();
+        $this->assertSame($currentReleaseSha, $job->reviewed_head_sha, 'POST must target the current Release SHA, not the stale mapping SHA.');
+        $this->assertSame($release->id, $job->release_id);
+        // The existing current Release must be reused, never duplicated.
+        $this->assertDatabaseCount('releases', 1);
+    }
+
+    public function test_awaiting_artifact_current_release_still_selects_its_exact_commit(): void
+    {
+        $sha = str_repeat('b', 40);
+        [$user, $project, $mapping] = $this->verifiedProject('saas-platform', str_repeat('e', 40));
+        $mapping->update(['remote_tracking_sha' => str_repeat('e', 40)]);
+        Release::factory()->create([
+            'project_id' => $project->id,
+            'branch' => 'main',
+            'commit_hash' => $sha,
+            'status' => Release::STATUS_AWAITING_ARTIFACT,
+        ]);
+
+        $response = $this->actingAs($user)->get(route('projects.show', $project));
+        $this->assertSelectorTargets($response->getContent(), $sha);
+        $this->assertBuildButtonEnabled($response->getContent());
+
+        $this->actingAs($user)->post(route('projects.publish', $project), [
+            'local_project_mapping_id' => $mapping->id,
+            'commit_selection_mode' => 'latest',
+        ])->assertRedirect();
+
+        $this->assertSame($sha, PublishJob::sole()->reviewed_head_sha);
+    }
+
+    public function test_ready_current_release_with_existing_artifact_offers_use_existing(): void
+    {
+        $sha = str_repeat('a', 40);
+        [$user, $project] = $this->verifiedProject('saas-platform', $sha);
+        $release = Release::factory()->create([
+            'project_id' => $project->id,
+            'branch' => 'main',
+            'commit_hash' => $sha,
+            'status' => Release::STATUS_READY,
+        ]);
+        Artifact::factory()->physicallyAvailable()->create([
+            'project_id' => $project->id,
+            'release_id' => $release->id,
+            'commit_hash' => $sha,
+            'branch' => 'main',
+            'status' => Artifact::STATUS_AVAILABLE,
+        ]);
+
+        $response = $this->actingAs($user)->get(route('projects.show', $project));
+        $this->assertSelectorTargets($response->getContent(), $sha);
+        $this->assertBuildButtonDisabled($response->getContent());
+        $response->assertSee(__('ui.publish.artifact_already_exists'));
+    }
+
+    /**
+     * Root-cause fix (failed-Release retry via the DEFAULT/non-Advanced
+     * path): a current Release left `failed` — e.g. a transient
+     * repository-fetch failure during the isolated build, exactly the
+     * production incident this fix addresses — must still be the
+     * default Build Artifact target, with no Advanced/manual SHA entry
+     * needed. The exact same Release row is reused (never a duplicate),
+     * a new build_artifact PublishJob is queued, the Release transitions
+     * failed -> artifact_building via the existing
+     * ReleaseOrchestrator::markArtifactBuilding() (which already clears
+     * failed_at/failure_code/failure_message — unchanged behavior, not
+     * modified by this fix), and the prior failed PublishJob is left
+     * completely untouched for audit history.
+     */
+    public function test_failed_current_release_is_retried_through_the_default_build_artifact_path(): void
+    {
+        $sha = str_repeat('4', 40);
+        [$user, $project, $mapping] = $this->verifiedProject('saas-platform', $sha);
+        $mapping->update(['remote_tracking_sha' => str_repeat('9', 40)]);
+        $release = Release::factory()->create([
+            'project_id' => $project->id,
+            'branch' => 'main',
+            'commit_hash' => $sha,
+            'status' => Release::STATUS_FAILED,
+            'failed_at' => now(),
+            'failure_code' => 'artifact_build_local_workspace_prepare_failed',
+            'failure_message' => 'Primary repository materialization failed while fetching the authoritative branch.',
+        ]);
+        $failedJob = PublishJob::factory()->create([
+            'project_id' => $project->id,
+            'local_agent_id' => $mapping->local_agent_id,
+            'release_id' => $release->id,
+            'action' => PublishJob::ACTION_BUILD_ARTIFACT,
+            'status' => PublishJob::STATUS_FAILED,
+            'reviewed_head_sha' => $sha,
+            'reviewed_branch' => 'main',
+            'error_message' => 'Primary repository materialization failed while fetching the authoritative branch.',
+            'failure_code' => 'local_workspace_prepare_failed',
+            'active_build_key' => null,
+            'finished_at' => now(),
+        ]);
+
+        $response = $this->actingAs($user)->get(route('projects.show', $project));
+        $response->assertOk()->assertSee($sha);
+        $this->assertSelectorTargets($response->getContent(), $sha);
+        $this->assertBuildButtonEnabled($response->getContent());
+
+        $this->actingAs($user)->post(route('projects.publish', $project), [
+            'local_project_mapping_id' => $mapping->id,
+            'commit_selection_mode' => 'latest',
+        ])->assertRedirect();
+
+        // Retrying must never create another Release for the same commit.
+        $this->assertDatabaseCount('releases', 1);
+        $newJob = PublishJob::where('id', '!=', $failedJob->id)->sole();
+        $this->assertSame($release->id, $newJob->release_id);
+        $this->assertSame($sha, $newJob->reviewed_head_sha);
+        $this->assertContains($newJob->status, [PublishJob::STATUS_APPROVED, PublishJob::STATUS_QUEUED]);
+
+        $release->refresh();
+        $this->assertSame(Release::STATUS_ARTIFACT_BUILDING, $release->status);
+        $this->assertNull($release->failed_at);
+        $this->assertNull($release->failure_code);
+        $this->assertNull($release->failure_message);
+
+        $failedJob->refresh();
+        $this->assertSame(PublishJob::STATUS_FAILED, $failedJob->status, 'The prior failed PublishJob must never be mutated by a retry.');
+        $this->assertSame('local_workspace_prepare_failed', $failedJob->failure_code);
+        $this->assertNotNull($failedJob->finished_at);
+    }
+
+    /**
+     * Superseded-safety: the default/latest mode must never select an
+     * older Release when a newer current Release exists, even when the
+     * newer one is itself failed/awaiting_artifact and the older one is
+     * ready with an available Artifact — same "newest row wins,
+     * regardless of its own status" rule as
+     * ReleaseRecoveryEligibility::isCurrent().
+     */
+    public function test_newer_failed_current_release_is_selected_over_an_older_ready_release(): void
+    {
+        $olderSha = str_repeat('5', 40);
+        $newerSha = str_repeat('6', 40);
+        $mappingHead = str_repeat('7', 40);
+        [$user, $project, $mapping] = $this->verifiedProject('saas-platform', $mappingHead);
+        $mapping->update(['remote_tracking_sha' => $mappingHead]);
+
+        $olderRelease = Release::factory()->create([
+            'project_id' => $project->id,
+            'branch' => 'main',
+            'commit_hash' => $olderSha,
+            'status' => Release::STATUS_READY,
+        ]);
+        Artifact::factory()->physicallyAvailable()->create([
+            'project_id' => $project->id,
+            'release_id' => $olderRelease->id,
+            'commit_hash' => $olderSha,
+            'branch' => 'main',
+            'status' => Artifact::STATUS_AVAILABLE,
+        ]);
+        Release::factory()->create([
+            'project_id' => $project->id,
+            'branch' => 'main',
+            'commit_hash' => $newerSha,
+            'status' => Release::STATUS_FAILED,
+            'failed_at' => now(),
+            'failure_code' => 'artifact_build_local_workspace_prepare_failed',
+        ]);
+
+        $response = $this->actingAs($user)->get(route('projects.show', $project));
+        $response->assertOk()->assertSee($newerSha);
+        // Scoped to the Artifact selector fragment — the separate
+        // "Transfer trace" diagnostic card legitimately surfaces the
+        // older, genuinely-available Artifact from its own unrelated
+        // perspective; that surface is untouched by this fix.
+        $this->assertStringNotContainsString($olderSha, $this->artifactSelectorHtml($response->getContent()));
+        $this->assertSelectorTargets($response->getContent(), $newerSha);
+        $this->assertBuildButtonEnabled($response->getContent());
+        $this->assertExistingArtifactIndicatorHidden($response->getContent());
+
+        $this->actingAs($user)->post(route('projects.publish', $project), [
+            'local_project_mapping_id' => $mapping->id,
+            'commit_selection_mode' => 'latest',
+        ])->assertRedirect();
+
+        $this->assertSame($newerSha, PublishJob::sole()->reviewed_head_sha);
+    }
+
+    /**
+     * The workspace-trust gate (isEligibleForExactRemoteBuild) is
+     * unchanged by this fix: it still blocks the default build whenever
+     * the persistent workspace itself can't be trusted as a fetch
+     * anchor, regardless of whether a current Release exists.
+     */
+    public function test_workspace_trust_gate_still_blocks_default_build_even_with_a_current_release(): void
+    {
+        [$user, $project, $mapping] = $this->verifiedProject('saas-platform', str_repeat('8', 40));
+        $mapping->update(['reported_branch' => 'some-other-branch']);
+        Release::factory()->create([
+            'project_id' => $project->id,
+            'branch' => 'main',
+            'commit_hash' => str_repeat('9', 40),
+            'status' => Release::STATUS_READY,
+        ]);
+
+        $response = $this->actingAs($user)->get(route('projects.show', $project));
+        $this->assertBuildButtonDisabled($response->getContent());
+
+        $this->actingAs($user)->post(route('projects.publish', $project), [
+            'local_project_mapping_id' => $mapping->id,
+            'commit_selection_mode' => 'latest',
+        ])->assertStatus(409);
+        $this->assertDatabaseCount('publish_jobs', 0);
     }
 
     /**

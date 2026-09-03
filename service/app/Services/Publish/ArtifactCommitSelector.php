@@ -6,22 +6,36 @@ use App\Models\Artifact;
 use App\Models\LocalProjectMapping;
 use App\Models\Project;
 use App\Services\Deployment\Artifact\ArtifactService;
+use App\Services\Releases\ReleaseRecoveryEligibility;
 use App\Support\Deployment\SourceWorkspacePath;
 
 final class ArtifactCommitSelector
 {
-    public function __construct(private readonly ArtifactService $artifacts)
-    {
+    public function __construct(
+        private readonly ArtifactService $artifacts,
+        private readonly ReleaseRecoveryEligibility $releaseEligibility,
+    ) {
     }
     public const MODE_LATEST = 'latest';
 
     public const MODE_ADVANCED = 'advanced';
 
     /**
-     * Build the read model used by the Artifact commit selector. Normal
-     * latest-release builds target the exact remote production-branch HEAD.
-     * The workspace HEAD remains health/evidence only and must never shadow
-     * a newer remote commit.
+     * Build the read model used by the Artifact commit selector.
+     *
+     * Root-cause fix (default-Build-Artifact stale-commit bug): once a
+     * current Release exists for project+branch
+     * (ReleaseRecoveryEligibility::currentReleaseFor() — the same "newest
+     * Release row" definition deploy-latest and automatic recovery already
+     * share), its exact commit_hash is the canonical/default target — never
+     * GitHub's live branch HEAD, never LocalProjectMapping.remote_tracking_sha.
+     * Both remain informational-only (surfaced as github_sha/workspace_sha
+     * for the mismatch diagnostics), because the Local Agent's persistent
+     * workspace and its own remote-tracking self-report are allowed to lag
+     * arbitrarily behind the Hub's own Release table by design. Only when NO
+     * Release exists yet at all (a brand-new project's first build, before
+     * any push has been recorded) does this fall back to the GitHub/agent
+     * -derived latestRemoteCommit() bootstrap behavior below.
      *
      * @param  array<string, string|null>  $githubHeadsByBranch
      * @return array<int, array<string, mixed>>
@@ -32,11 +46,14 @@ final class ArtifactCommitSelector
             ? $project->localProjectMappings->where('local_agent_id', $project->authoritative_build_local_agent_id)
             : $project->localProjectMappings;
 
-        return $mappings->map(function (LocalProjectMapping $mapping) use ($project, $githubHeadsByBranch): array {
+        $currentRelease = $this->releaseEligibility->currentReleaseFor($project);
+
+        return $mappings->map(function (LocalProjectMapping $mapping) use ($project, $githubHeadsByBranch, $currentRelease): array {
             $branch = $project->branch;
             $workspaceSha = $this->validSha($mapping->local_head_sha) ? $mapping->local_head_sha : null;
             $githubSha = $githubHeadsByBranch[$branch] ?? null;
-            $remoteSha = $this->latestRemoteCommit($mapping, $githubSha);
+            $bootstrapSha = $this->latestRemoteCommit($mapping, $githubSha);
+            $remoteSha = $currentRelease?->commit_hash ?? $bootstrapSha;
             $state = $this->workspaceState($mapping, $branch);
             $reportedSource = $this->reportedSourcePath($mapping);
             $artifact = $remoteSha === null ? null : $this->findAvailableArtifact($project, $remoteSha, $branch);
@@ -57,7 +74,7 @@ final class ArtifactCommitSelector
                 'github_short_sha' => $githubSha === null ? null : substr($githubSha, 0, 12),
                 'remote_sha' => $remoteSha,
                 'remote_short_sha' => $remoteSha === null ? null : substr($remoteSha, 0, 12),
-                'remote_source' => $this->validSha($githubSha) ? 'github' : ($remoteSha === null ? null : 'agent'),
+                'remote_source' => $currentRelease !== null ? 'release' : ($this->validSha($githubSha) ? 'github' : ($remoteSha === null ? null : 'agent')),
                 'remote_matches_workspace' => $remoteSha === null || $workspaceSha === null ? null : hash_equals($remoteSha, $workspaceSha),
                 'existing_artifact_id' => $artifact?->id,
             ];
@@ -76,7 +93,10 @@ final class ArtifactCommitSelector
 
         abort_unless($this->isEligibleForExactRemoteBuild($this->workspaceState($mapping, $mapping->project->branch)), 422, 'The source workspace does not currently have a valid, verified state for the production branch. Wait for Local Agent sync.');
 
-        $remoteCommit = $this->latestRemoteCommit($mapping, $latestRemoteCommit);
+        // Same canonical-Release-first rule as options() above — GET
+        // display and POST execution must never disagree on the target.
+        $currentRelease = $this->releaseEligibility->currentReleaseFor($mapping->project);
+        $remoteCommit = $currentRelease?->commit_hash ?? $this->latestRemoteCommit($mapping, $latestRemoteCommit);
         abort_unless($remoteCommit !== null, 422, 'The latest remote production-branch commit is not available. Wait for Local Agent sync or restore GitHub access.');
 
         return $remoteCommit;
