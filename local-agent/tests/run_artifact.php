@@ -193,6 +193,41 @@ function buildFixtureRepoMinimal(GitManager $git, string $workspace, bool $withC
 }
 
 /**
+ * The deployment-system monorepo shape: an application_root'd `service/`
+ * subdirectory (carrying its own committed
+ * service/.deployment/local-agent-version.json marker — see
+ * LocalAgentVersionResolver::canonical()) alongside SIBLING
+ * `local-agent/` and `deployment-local-agent/` trees at the repo root —
+ * both tracked by git, both git-archived along with everything else, so
+ * this proves any exclusion is ApplicationRoot narrowing, not merely
+ * "the fixture never committed them".
+ */
+function buildFixtureMonorepoWithServiceRoot(GitManager $git, string $workspace): array
+{
+    $repo = $workspace . '/repo';
+    mkdir("{$repo}/service/app", 0777, true);
+    mkdir("{$repo}/service/.deployment", 0777, true);
+    runGit($git, ['init', '--quiet', '-b', 'main'], $repo);
+    runGit($git, ['config', 'user.email', 'test@example.test'], $repo);
+    runGit($git, ['config', 'user.name', 'Artifact Test'], $repo);
+
+    file_put_contents("{$repo}/service/app/Kernel.php", "<?php\n// fixture app code\n");
+    file_put_contents("{$repo}/service/composer.json", json_encode(['name' => 'fixture/service'], JSON_PRETTY_PRINT));
+    file_put_contents("{$repo}/service/.deployment/local-agent-version.json", json_encode(['version' => '1.5.4'], JSON_PRETTY_PRINT) . "\n");
+
+    mkdir("{$repo}/local-agent", 0777, true);
+    file_put_contents("{$repo}/local-agent/agent.php", "<?php\nconst LOCAL_AGENT_VERSION = '1.5.4';\n");
+    mkdir("{$repo}/deployment-local-agent/agent", 0777, true);
+    file_put_contents("{$repo}/deployment-local-agent/agent/agent.php", "<?php\nconst LOCAL_AGENT_VERSION = '1.5.4';\n");
+
+    runGit($git, ['add', '-A'], $repo);
+    runGit($git, ['commit', '--quiet', '-m', 'initial'], $repo);
+    $commitHash = trim(runGit($git, ['rev-parse', 'HEAD'], $repo)['output']);
+
+    return ['path' => $repo, 'commitHash' => $commitHash];
+}
+
+/**
  * @return array{process: resource, port: int, storageDir: string, serverLogPath: string}
  */
 function startFakeHub(): array
@@ -475,6 +510,49 @@ if ($metaFiles !== [] && $metaFiles !== false) {
         $passCount,
     );
 }
+
+// application_root=service (the real deployment-system shape): the
+// Artifact must include the in-service local-agent-version.json marker
+// (LocalAgentVersionResolver::canonical() depends on it) and must NOT
+// include the sibling local-agent/ or deployment-local-agent/ trees,
+// even though both are git-tracked and archived right alongside
+// service/ — proving the exclusion is application_root narrowing, not
+// mere fixture omission (root cause for Deployment #182's stale
+// canonical Agent version report, see LocalAgentVersionSyncTest.php).
+// ============================================================
+@array_map('unlink', glob("{$hub['storageDir']}/*"));
+$monorepoWorkspace = makeWorkspace();
+$monorepoFixture = buildFixtureMonorepoWithServiceRoot($git, $monorepoWorkspace);
+$monorepoResult = $uploader->buildAndUpload('deployment-system-fixture', $monorepoFixture['path'], $monorepoFixture['commitHash'], 'main', 'job-service-root', null, 'service');
+check('ArtifactUploader (application_root=service): pipeline succeeds', $monorepoResult['succeeded'] === true, $failures, $passCount);
+
+$monorepoMetaFiles = glob("{$hub['storageDir']}/*.meta.json");
+if ($monorepoMetaFiles !== [] && $monorepoMetaFiles !== false) {
+    $monorepoArtifactId = basename($monorepoMetaFiles[0], '.meta.json');
+    $monorepoZipEntries = zipEntryNames("{$hub['storageDir']}/{$monorepoArtifactId}.bin");
+
+    check(
+        'ArtifactUploader (application_root=service): the artifact contains the in-service local-agent-version.json marker at its zip root',
+        in_array('.deployment/local-agent-version.json', $monorepoZipEntries, true),
+        $failures,
+        $passCount,
+    );
+    check(
+        'ArtifactUploader (application_root=service): the artifact does NOT contain the sibling local-agent/ tree',
+        !in_array('local-agent/agent.php', $monorepoZipEntries, true),
+        $failures,
+        $passCount,
+    );
+    check(
+        'ArtifactUploader (application_root=service): the artifact does NOT contain the sibling deployment-local-agent/ tree',
+        !in_array('deployment-local-agent/agent/agent.php', $monorepoZipEntries, true),
+        $failures,
+        $passCount,
+    );
+} else {
+    check('ArtifactUploader (application_root=service): exactly one artifact metadata record was created', false, $failures, $passCount);
+}
+rrmdir($monorepoWorkspace);
 
 // Failure path: LocalBuildRunner fails (broken composer.json) — the
 // Publish Job must be reported as failed, with the specific failure

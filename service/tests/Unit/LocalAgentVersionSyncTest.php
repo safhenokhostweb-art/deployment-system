@@ -6,7 +6,7 @@ use App\Support\Deployment\LocalAgentVersionResolver;
 use Tests\TestCase;
 
 /**
- * Regression guard for two compounding version-drift incidents:
+ * Regression guard for three compounding version-drift incidents:
  *
  *  1. Production Readiness verification: LOCAL_AGENT_VERSION was bumped
  *     across two phases of real functional changes (project-config sync,
@@ -22,14 +22,32 @@ use Tests\TestCase;
  *     from an earlier release, which env() always prefers over the code
  *     default — permanently pinning the Hub's reported "latest version" to
  *     1.5.2 no matter how many later releases bumped the shipped Agent.
+ *  3. Deployment #182 (commit fe93f38): LocalAgentVersionResolver::canonical()
+ *     used to read local-agent-version content from
+ *     base_path('../deployment-local-agent/agent/agent.php') — a sibling
+ *     of service/, one directory up. That path is NOT release-managed by
+ *     this project's Artifact pipeline at all: the Local Agent's own build
+ *     narrows every deployment-system Artifact to application_root
+ *     ('service') before the zip is created, and the Server Agent's
+ *     ArtifactManager::activate() only ever atomically swaps that one
+ *     working directory — never a sibling. Production's sibling
+ *     local-agent/deployment-local-agent copies were legacy, unmanaged
+ *     files nothing ever updated, so canonical() kept reporting a stale
+ *     1.4.3 long after service/ itself had shipped 1.5.4. canonical() now
+ *     reads a small marker committed INSIDE service/
+ *     (service/.deployment/local-agent-version.json) — the one location
+ *     every deployment-system Artifact actually ships and activation
+ *     actually places — so it can never again depend on a directory the
+ *     deploy pipeline does not manage.
  *
- * Both were the same root cause wearing two costumes: a second,
- * independently mutable copy of the version number that a normal release
- * has no obligation to touch. LocalAgentVersionResolver eliminates it by
- * deriving latest_local_agent_version from the LOCAL_AGENT_VERSION actually
- * shipped in this release's packaged agent.php, and by bounding the
- * remaining env override so it can only pin at or above that canonical
- * version — never silently below it.
+ * All three were the same root cause wearing different costumes: a
+ * second, independently mutable (or simply unmanaged) copy of the version
+ * number that a normal release has no obligation — or, for the sibling
+ * trees, no mechanism at all — to keep in sync. LocalAgentVersionResolver
+ * eliminates it by deriving latest_local_agent_version from the
+ * LOCAL_AGENT_VERSION actually shipped in THIS release's activated
+ * service/ tree, and by bounding the remaining env override so it can
+ * only pin at or above that canonical version — never silently below it.
  */
 class LocalAgentVersionSyncTest extends TestCase
 {
@@ -46,20 +64,42 @@ class LocalAgentVersionSyncTest extends TestCase
         $this->assertSame('1.5.4', $localAgentVersion, 'The transient artifact-fetch retry fix must ship as official Local Agent 1.5.4.');
     }
 
+    /**
+     * The exact contract that closes Deployment #182's incident (see the
+     * class docblock, item 3): the in-service marker is the ONLY thing
+     * LocalAgentVersionResolver::canonical() reads, so it must be kept in
+     * lockstep — by hand, in the same release commit — with both agent
+     * trees' LOCAL_AGENT_VERSION and with the assigned-artifact protocol
+     * minimum. A future release that bumps one and forgets the marker (or
+     * vice versa) fails this test, exactly like the sibling-tree mirror
+     * check above already catches a forgotten bump in either tree.
+     */
+    public function test_marker_matches_both_agent_trees_and_assigned_artifact_minimum(): void
+    {
+        $marker = $this->extractMarkerVersion();
+        $deploymentLocalAgentVersion = $this->extractLocalAgentVersion(base_path('../deployment-local-agent/agent/agent.php'));
+        $localAgentVersion = $this->extractLocalAgentVersion(base_path('../local-agent/agent.php'));
+
+        $this->assertSame('1.5.4', $marker, 'service/.deployment/local-agent-version.json must declare the exact shipped Local Agent version.');
+        $this->assertSame($marker, $deploymentLocalAgentVersion, 'The in-service marker must match deployment-local-agent/agent/agent.php\'s LOCAL_AGENT_VERSION.');
+        $this->assertSame($marker, $localAgentVersion, 'The in-service marker must match local-agent/agent.php\'s LOCAL_AGENT_VERSION.');
+        $this->assertSame($marker, config('deployment.min_local_agent_version_for_assigned_artifact'));
+    }
+
     public function test_hub_default_latest_version_matches_the_shipped_agent_version(): void
     {
-        $shippedVersion = $this->extractLocalAgentVersion(base_path('../deployment-local-agent/agent/agent.php'));
+        $shippedVersion = $this->extractMarkerVersion();
 
         $this->assertSame(
             $shippedVersion,
             config('deployment.latest_local_agent_version'),
-            "config('deployment.latest_local_agent_version') must match the LOCAL_AGENT_VERSION actually shipped in agent.php, or the outdated-agent warning can never fire for a real out-of-date install.",
+            "config('deployment.latest_local_agent_version') must match the LOCAL_AGENT_VERSION actually shipped in this release's service/ tree, or the outdated-agent warning can never fire for a real out-of-date install.",
         );
     }
 
     public function test_assigned_artifact_protocol_minimum_matches_the_shipped_agent_and_capability(): void
     {
-        $shippedVersion = $this->extractLocalAgentVersion(base_path('../deployment-local-agent/agent/agent.php'));
+        $shippedVersion = $this->extractMarkerVersion();
         $source = file_get_contents(base_path('../deployment-local-agent/agent/agent.php'));
 
         $this->assertSame($shippedVersion, config('deployment.min_local_agent_version_for_assigned_artifact'));
@@ -121,12 +161,32 @@ class LocalAgentVersionSyncTest extends TestCase
         );
     }
 
-    public function test_resolver_canonical_matches_the_shipped_agent_version(): void
+    public function test_resolver_canonical_matches_the_in_service_marker(): void
     {
-        $this->assertSame(
-            $this->extractLocalAgentVersion(base_path('../deployment-local-agent/agent/agent.php')),
-            LocalAgentVersionResolver::canonical(),
-        );
+        $this->assertSame($this->extractMarkerVersion(), LocalAgentVersionResolver::canonical());
+    }
+
+    /**
+     * Deployment #182's exact incident, reproduced directly against the
+     * resolver: a stale sibling agent tree (the shape Production actually
+     * had — deployment-local-agent/agent/agent.php stuck at an old
+     * version because no artifact-based deploy of this project has any
+     * mechanism to update it) must have zero effect on canonical(), since
+     * it no longer reads that path at all.
+     */
+    public function test_canonical_ignores_a_stale_sibling_agent_tree(): void
+    {
+        $tmp = sys_get_temp_dir() . '/local-agent-version-sync-' . bin2hex(random_bytes(6));
+        mkdir($tmp . '/service/.deployment', 0777, true);
+        file_put_contents($tmp . '/service/.deployment/local-agent-version.json', json_encode(['version' => '1.5.4']));
+        mkdir($tmp . '/deployment-local-agent/agent', 0777, true);
+        file_put_contents($tmp . '/deployment-local-agent/agent/agent.php', "<?php\nconst LOCAL_AGENT_VERSION = '1.4.3';\n");
+
+        try {
+            $this->assertSame('1.5.4', LocalAgentVersionResolver::canonical($tmp . '/service/.deployment/local-agent-version.json'));
+        } finally {
+            $this->recursiveDelete($tmp);
+        }
     }
 
     /**
@@ -177,6 +237,34 @@ class LocalAgentVersionSyncTest extends TestCase
         $this->assertSame(1, $matched, "Could not find a LOCAL_AGENT_VERSION constant declaration in {$path}");
 
         return $matches[1];
+    }
+
+    private function extractMarkerVersion(): string
+    {
+        $path = base_path('.deployment/local-agent-version.json');
+        $this->assertFileExists($path, "Expected the Local Agent version marker at {$path}");
+        $decoded = json_decode((string) file_get_contents($path), true);
+
+        $this->assertIsArray($decoded);
+        $this->assertArrayHasKey('version', $decoded);
+
+        return $decoded['version'];
+    }
+
+    private function recursiveDelete(string $dir): void
+    {
+        if (!is_dir($dir)) {
+            return;
+        }
+        $items = scandir($dir) ?: [];
+        foreach ($items as $item) {
+            if ($item === '.' || $item === '..') {
+                continue;
+            }
+            $path = $dir . DIRECTORY_SEPARATOR . $item;
+            is_dir($path) ? $this->recursiveDelete($path) : unlink($path);
+        }
+        rmdir($dir);
     }
 
     /** @return array<string, string> */
