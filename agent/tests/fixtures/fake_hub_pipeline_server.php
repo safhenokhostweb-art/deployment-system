@@ -61,6 +61,35 @@ $entry = [
     'body' => $decoded,
 ];
 
+// Root-cause fix (Deployment #183 — sequence collision): the real Hub
+// enforces unique(agent_job_id, sequence) on agent_job_log_entries and a
+// second write to an already-used sequence throws an uncaught
+// QueryException, surfacing as HTTP 500 (see
+// AgentTaskService::recordLog()). `php -S` starts a fresh process per
+// request, so this reconstructs "already seen" from FAKE_HUB_LOG itself
+// (the same durable, cross-request store every other request already
+// appends to) rather than in-memory state that wouldn't survive between
+// requests. Without this, the fixture could never have caught the real
+// production defect — a duplicate /log POST here used to just succeed
+// silently, exactly like it silently DIDN'T on the real Hub.
+if (preg_match('#^/api/agent/jobs/([^/]+)/log$#', (string) $path, $logMatch) === 1 && is_array($decoded) && isset($decoded['sequence'])) {
+    $priorLines = $logPath !== false && $logPath !== '' ? array_filter(explode("\n", (string) @file_get_contents($logPath))) : [];
+    foreach ($priorLines as $priorLine) {
+        $prior = json_decode($priorLine, true);
+        if (
+            is_array($prior)
+            && ($prior['path'] ?? null) === $path
+            && (($prior['body']['sequence'] ?? null) === $decoded['sequence'])
+        ) {
+            http_response_code(500);
+            header('Content-Type: application/json');
+            echo json_encode(['message' => 'duplicate sequence for this agent job (unique(agent_job_id, sequence) violation)']);
+
+            return;
+        }
+    }
+}
+
 if ($logPath !== false && $logPath !== '') {
     file_put_contents($logPath, json_encode($entry) . "\n", FILE_APPEND | LOCK_EX);
 }

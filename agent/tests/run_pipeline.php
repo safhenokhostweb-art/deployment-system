@@ -269,10 +269,18 @@ $artifactStatuses = array_values(array_filter(array_map(static fn ($e) => $e['pa
 check('artifact present: reports running then succeeded', $artifactStatuses === ['running', 'succeeded'], $failures, $passCount);
 
 $artifactLogEntries = array_values(array_filter($logWithArtifact, static fn ($e) => $e['path'] === '/api/agent/jobs/job-with-artifact/log'));
-check('artifact present: exactly 2 log entries (deploy artifact + the one non-skipped step)', count($artifactLogEntries) === 2, $failures, $passCount);
-if (count($artifactLogEntries) >= 1) {
-    check('artifact present: the first log entry is the artifact deploy step', ($artifactLogEntries[0]['body']['step_name'] ?? null) === 'deploy artifact', $failures, $passCount);
-}
+// Root-cause fix (Deployment #183 observability gap): a successful
+// PREPARE is now its own always-logged, distinct event — prepare
+// artifact, deploy artifact (activation), migrate.
+check('artifact present: exactly 3 log entries (prepare + activate + the one non-skipped step)', count($artifactLogEntries) === 3, $failures, $passCount);
+check(
+    'artifact present: log order is prepare artifact, then deploy artifact, then the application step',
+    array_map(static fn ($e) => $e['body']['step_name'] ?? null, $artifactLogEntries) === ['prepare artifact', 'deploy artifact', 'migrate'],
+    $failures,
+    $passCount,
+);
+$artifactSequences = array_map(static fn ($e) => $e['body']['sequence'] ?? null, $artifactLogEntries);
+check('artifact present: sequence numbers are unique and strictly increasing', $artifactSequences === array_unique($artifactSequences) && $artifactSequences === [1, 2, 3], $failures, $passCount);
 
 @unlink($hub['logPath']);
 file_put_contents($hub['logPath'], '');
@@ -320,7 +328,9 @@ check('artifact runtime permissions: application command ran only after immediat
 check('artifact runtime permissions: normalizer was invoked exactly once', count($normalizationCalls) === 1, $failures, $passCount);
 check('artifact runtime permissions: normalizer received the project key before pipeline execution', ($normalizationCalls[0][0] ?? null) === 'deployment-system', $failures, $passCount);
 $orderedLogEntries = array_values(array_filter(readHubLog($hub['logPath']), static fn ($e) => $e['path'] === '/api/agent/jobs/job-with-ordered-normalization/log'));
-check('artifact runtime permissions: Hub logs activation, immediate normalization, then the application command', array_map(static fn ($e) => $e['body']['step_name'] ?? null, $orderedLogEntries) === ['deploy artifact', 'runtime permissions (post-artifact)', 'migrate'], $failures, $passCount);
+check('artifact runtime permissions: Hub logs prepare, activation, immediate normalization, then the application command', array_map(static fn ($e) => $e['body']['step_name'] ?? null, $orderedLogEntries) === ['prepare artifact', 'deploy artifact', 'runtime permissions (post-artifact)', 'migrate'], $failures, $passCount);
+$orderedSequences = array_map(static fn ($e) => $e['body']['sequence'] ?? null, $orderedLogEntries);
+check('artifact runtime permissions: sequence numbers are unique and strictly increasing', $orderedSequences === array_unique($orderedSequences) && $orderedSequences === [1, 2, 3, 4], $failures, $passCount);
 
 @unlink($hub['logPath']);
 file_put_contents($hub['logPath'], '');
@@ -359,7 +369,7 @@ check('failed immediate normalization: reports running then failed', $normalizat
 $normalizationFailureStatusPayloads = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-with-failed-normalization/status' ? $e['body'] : null, readHubLog($hub['logPath']))));
 check('failed immediate normalization: reports the runtime permission failure code', (end($normalizationFailureStatusPayloads)['failure_code'] ?? null) === 'runtime_permissions_failed', $failures, $passCount);
 $normalizationFailureLogs = array_values(array_filter(readHubLog($hub['logPath']), static fn ($e) => $e['path'] === '/api/agent/jobs/job-with-failed-normalization/log'));
-check('failed immediate normalization: logs activation and failed normalization only', array_map(static fn ($e) => $e['body']['step_name'] ?? null, $normalizationFailureLogs) === ['deploy artifact', 'runtime permissions (post-artifact)'], $failures, $passCount);
+check('failed immediate normalization: logs prepare, activation, and failed normalization only', array_map(static fn ($e) => $e['body']['step_name'] ?? null, $normalizationFailureLogs) === ['prepare artifact', 'deploy artifact', 'runtime permissions (post-artifact)'], $failures, $passCount);
 check('failed immediate normalization: normalizer was still invoked exactly once', count($normalizationCalls) === 1, $failures, $passCount);
 
 // Persistent-runtime preparation happens before artifact preparation and
@@ -844,13 +854,106 @@ check('maintenance-first: post-activation steps run against the NEW release', fi
 check('maintenance-first: the closing exit-maintenance step ran', is_file($maintenanceExitMarker), $failures, $passCount);
 
 $maintenanceLogEntries = array_values(array_filter(readHubLog($hub['logPath']), static fn ($e) => $e['path'] === '/api/agent/jobs/job-maintenance-first/log'));
-check('maintenance-first: Hub log order is maintenance entry, artifact activation, then post-activation steps', array_map(static fn ($e) => $e['body']['step_name'] ?? null, $maintenanceLogEntries) === ['maintenance mode', 'deploy artifact', 'migrate', 'exit maintenance mode'], $failures, $passCount);
+check('maintenance-first: Hub log order is prepare, maintenance entry, artifact activation, then post-activation steps', array_map(static fn ($e) => $e['body']['step_name'] ?? null, $maintenanceLogEntries) === ['prepare artifact', 'maintenance mode', 'deploy artifact', 'migrate', 'exit maintenance mode'], $failures, $passCount);
+// Root-cause fix (Deployment #183 — sequence collision): the fake Hub now
+// enforces the same unique(agent_job_id, sequence) semantics as the real
+// one (see fake_hub_pipeline_server.php) — if 'maintenance mode' and
+// 'deploy artifact' still shared a sequence number, this scenario would
+// have surfaced a duplicate-sequence 500 (and a missing Hub log row),
+// exactly reproducing Deployment #183. Every entry got through and every
+// sequence is unique and strictly increasing.
+$maintenanceSequences = array_map(static fn ($e) => $e['body']['sequence'] ?? null, $maintenanceLogEntries);
+check('maintenance-first: sequence numbers are unique and strictly increasing (no collision between maintenance and activation)', $maintenanceSequences === array_unique($maintenanceSequences) && $maintenanceSequences === [1, 2, 3, 4, 5], $failures, $passCount);
 $maintenanceStatuses = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-maintenance-first/status' ? ($e['body']['status'] ?? null) : null, readHubLog($hub['logPath']))));
 check('maintenance-first: reports running then succeeded', $maintenanceStatuses === ['running', 'succeeded'], $failures, $passCount);
 
 @unlink($hub['logPath']);
 file_put_contents($hub['logPath'], '');
 
+// ============================================================
+// Scenario 7b: a before_activation maintenance step genuinely FAILS
+// (real non-zero exit, no masking) — the Agent must fail closed BEFORE
+// ArtifactManager::activate() ever runs. The live release must be left
+// byte-for-byte untouched, no backup/staging directory left behind, and
+// the failure must be visible to the Hub with its own unique sequence.
+// ============================================================
+$maintenanceFailSiteDir = $workspace . '/maintenance-fail-site';
+mkdir($maintenanceFailSiteDir, 0777, true);
+file_put_contents("{$maintenanceFailSiteDir}/index.php", "<?php // OLD RELEASE\n");
+$maintenanceFailZip = buildFixtureZip($workspace, 'maintenance-fail-artifact');
+registerManifestEntry($hub['manifestPath'], 'artifact-maintenance-fail', $maintenanceFailZip['path']);
+$activationNeverReachedMarker = $workspace . '/activation-never-reached.marker';
+
+$jobMaintenanceFail = [
+    'id' => 'job-maintenance-fail',
+    'action' => 'deploy',
+    'project_key' => 'artifact-project',
+    'commit_hash' => str_repeat('n', 40),
+    'branch' => 'main',
+    'artifact' => ['public_id' => 'artifact-maintenance-fail', 'checksum_sha256' => $maintenanceFailZip['checksum'], 'size_bytes' => $maintenanceFailZip['size']],
+    'pipeline' => [
+        ['name' => 'maintenance mode', 'command' => 'node -e "process.exit(1)"', 'before_activation' => true],
+        ['name' => 'migrate', 'command' => 'node -e "require(\'fs\').writeFileSync(process.argv[1], \'ran\')" ' . escapeshellarg($activationNeverReachedMarker)],
+    ],
+];
+$pipelineExecutor->execute($jobMaintenanceFail, ['working_directory' => $maintenanceFailSiteDir, 'allowed_services' => []], 30);
+
+check('failed maintenance: the live release directory is completely untouched', file_get_contents("{$maintenanceFailSiteDir}/index.php") === "<?php // OLD RELEASE\n", $failures, $passCount);
+check('failed maintenance: no backup directory was ever created (activate() never ran)', count(glob("{$workspace}/maintenance-fail-site.backup-*")) === 0, $failures, $passCount);
+check('failed maintenance: no staging directory was left behind', count(glob("{$workspace}/maintenance-fail-site.staging-*")) === 0, $failures, $passCount);
+check('failed maintenance: the later application step never ran', !is_file($activationNeverReachedMarker), $failures, $passCount);
+
+$maintenanceFailLogEntries = array_values(array_filter(readHubLog($hub['logPath']), static fn ($e) => $e['path'] === '/api/agent/jobs/job-maintenance-fail/log'));
+$maintenanceFailStepNames = array_map(static fn ($e) => $e['body']['step_name'] ?? null, $maintenanceFailLogEntries);
+check('failed maintenance: prepare and the failed maintenance step are logged, activation and migrate are not', $maintenanceFailStepNames === ['prepare artifact', 'maintenance mode'], $failures, $passCount);
+check('failed maintenance: the maintenance step is logged with a non-zero exit code', ($maintenanceFailLogEntries[1]['body']['exit_code'] ?? null) !== 0, $failures, $passCount);
+$maintenanceFailStatuses = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-maintenance-fail/status' ? ($e['body']['status'] ?? null) : null, readHubLog($hub['logPath']))));
+check('failed maintenance: final status is failed', end($maintenanceFailStatuses) === 'failed', $failures, $passCount);
+
+@unlink($hub['logPath']);
+file_put_contents($hub['logPath'], '');
+
+// ============================================================
+// Scenario 7c: a before_activation command equivalent to the historical
+// "artisan down || true" must NOT be able to mask a genuine failure —
+// the real, effective exit code of the underlying command (1) must still
+// gate activation, exactly as if the masking suffix were never there.
+// ============================================================
+$maskedFailSiteDir = $workspace . '/masked-fail-site';
+mkdir($maskedFailSiteDir, 0777, true);
+file_put_contents("{$maskedFailSiteDir}/index.php", "<?php // OLD RELEASE\n");
+$maskedFailZip = buildFixtureZip($workspace, 'masked-fail-artifact');
+registerManifestEntry($hub['manifestPath'], 'artifact-masked-fail', $maskedFailZip['path']);
+
+$jobMaskedFail = [
+    'id' => 'job-masked-fail',
+    'action' => 'deploy',
+    'project_key' => 'artifact-project',
+    'commit_hash' => str_repeat('x', 40),
+    'branch' => 'main',
+    'artifact' => ['public_id' => 'artifact-masked-fail', 'checksum_sha256' => $maskedFailZip['checksum'], 'size_bytes' => $maskedFailZip['size']],
+    'pipeline' => [
+        // The historical production shape: a genuinely failing command
+        // with a trailing unconditional-success shell suffix. Left to a
+        // raw shell, `$?` would be 0 here — the whole point of this
+        // scenario is proving the effective runtime path does not trust
+        // that masked 0.
+        ['name' => 'maintenance mode', 'command' => 'node -e "process.exit(1)" || true', 'before_activation' => true],
+    ],
+];
+$pipelineExecutor->execute($jobMaskedFail, ['working_directory' => $maskedFailSiteDir, 'allowed_services' => []], 30);
+
+check('masked failure: activation did not happen despite the "|| true" suffix', file_get_contents("{$maskedFailSiteDir}/index.php") === "<?php // OLD RELEASE\n", $failures, $passCount);
+check('masked failure: no backup directory was ever created', count(glob("{$workspace}/masked-fail-site.backup-*")) === 0, $failures, $passCount);
+$maskedFailLogEntries = array_values(array_filter(readHubLog($hub['logPath']), static fn ($e) => $e['path'] === '/api/agent/jobs/job-masked-fail/log'));
+$maintenanceStepLog = array_values(array_filter($maskedFailLogEntries, static fn ($e) => ($e['body']['step_name'] ?? null) === 'maintenance mode'))[0] ?? null;
+check('masked failure: the maintenance step is logged with the REAL non-zero exit code, not the masked 0', ($maintenanceStepLog['body']['exit_code'] ?? null) === 1, $failures, $passCount);
+check('masked failure: the logged command no longer carries the masking suffix', str_ends_with((string) ($maintenanceStepLog['body']['command'] ?? ''), '|| true') === false, $failures, $passCount);
+$maskedFailStatuses = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-masked-fail/status' ? ($e['body']['status'] ?? null) : null, readHubLog($hub['logPath']))));
+check('masked failure: final status is failed', end($maskedFailStatuses) === 'failed', $failures, $passCount);
+
+@unlink($hub['logPath']);
+file_put_contents($hub['logPath'], '');
 
 // ============================================================
 // Scenario 8: a pipeline step FAILS after activation — the agent restores
@@ -879,9 +982,12 @@ $jobRollback = [
     'branch' => 'main',
     'artifact' => ['public_id' => 'artifact-rollback', 'checksum_sha256' => $rollbackZip['checksum'], 'size_bytes' => $rollbackZip['size']],
     'pipeline' => [
-        // The trailing `echo artisan down` literal is what the agent detects
-        // (str_contains) to remember that maintenance mode was entered.
-        ['name' => 'maintenance mode', 'command' => 'node -e "require(\'fs\').writeFileSync(process.argv[1], \'down\')" ' . escapeshellarg($rollbackMaintenanceMarker) . ' && echo artisan down', 'before_activation' => true],
+        // Root-cause fix (Deployment #183): maintenanceEnabled is now set
+        // unconditionally whenever a before_activation step is attempted
+        // (see PipelineExecutor) — no "artisan down" text detection is
+        // involved any more, so this step's command needs no special
+        // literal to be recognized as maintenance-entering.
+        ['name' => 'maintenance mode', 'command' => 'node -e "require(\'fs\').writeFileSync(process.argv[1], \'down\')" ' . escapeshellarg($rollbackMaintenanceMarker), 'before_activation' => true],
         ['name' => 'broken migrate', 'command' => 'node -e "process.exit(1)"'],
         ['name' => 'never reached', 'command' => 'node -e "require(\'fs\').writeFileSync(process.argv[1], \'ran\')" ' . escapeshellarg($rollbackAfterMarker)],
     ],
@@ -896,7 +1002,9 @@ check('rollback: the failed release left no backup or failed-release directory b
 $rollbackLogEntries = array_values(array_filter(readHubLog($hub['logPath']), static fn ($e) => $e['path'] === '/api/agent/jobs/job-rollback/log'));
 $rollbackStepNames = array_map(static fn ($e) => $e['body']['step_name'] ?? null, $rollbackLogEntries);
 check('rollback: maintenance cleanup entry was reported (guaranteed artisan up)', in_array('maintenance cleanup', $rollbackStepNames, true), $failures, $passCount);
-check('rollback: the failing step is the last application step in the log', array_slice($rollbackStepNames, 0, -1) === ['maintenance mode', 'deploy artifact', 'broken migrate'], $failures, $passCount);
+check('rollback: the failing step is the last application step in the log', array_slice($rollbackStepNames, 0, -1) === ['prepare artifact', 'maintenance mode', 'deploy artifact', 'broken migrate'], $failures, $passCount);
+$rollbackSequences = array_map(static fn ($e) => $e['body']['sequence'] ?? null, $rollbackLogEntries);
+check('rollback: sequence numbers are unique and strictly increasing throughout, including cleanup', $rollbackSequences === array_unique($rollbackSequences), $failures, $passCount);
 $rollbackStatuses = array_values(array_filter(array_map(static fn ($e) => $e['path'] === '/api/agent/jobs/job-rollback/status' ? ($e['body']['status'] ?? null) : null, readHubLog($hub['logPath']))));
 check('rollback: final status is failed', end($rollbackStatuses) === 'failed', $failures, $passCount);
 

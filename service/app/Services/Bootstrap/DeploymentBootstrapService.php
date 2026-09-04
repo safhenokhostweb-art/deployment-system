@@ -348,11 +348,19 @@ class DeploymentBootstrapService
      * every step the SAME single working_directory, so which one that is
      * has to be chosen per command rather than assumed).
      *
-     * `php artisan down`/`up` are deliberately wrapped with `|| true` on
-     * the down side only — a failure entering maintenance mode should
-     * not abort the deploy, but a failure leaving it should be visible
-     * (silently swallowing that would leave the site down with no error).
+     * Root-cause fix (Deployment #183): `artisan down` used to be wrapped
+     * with `|| true`, on the theory that a failure entering maintenance
+     * mode shouldn't abort the deploy. In practice this let a genuinely
+     * failed `artisan down` report shell exit 0, defeating the
+     * before_activation gate below — the agent believed maintenance had
+     * engaged and proceeded straight to activation while the site
+     * remained fully live (`artisan up` later reported "Application is
+     * already up", proving maintenance had never actually been entered).
+     * A before_activation step's real exit code is safety-load-bearing,
+     * so this step now fails closed like any other: if `artisan down`
+     * fails, activation does not happen and the deploy fails visibly.
      *
+
      * When the Hub attaches a matching Local-Agent-built artifact, the
      * maintenance entry is marked `before_activation` so the agent runs it
      * against the CURRENT release before the atomic swap, and `git pull`
@@ -365,7 +373,7 @@ class DeploymentBootstrapService
     public function buildPipeline(DeploymentBootstrapConfig $config): array
     {
         $steps = [
-            ['name' => 'maintenance mode', 'command' => "cd {$config->laravelPath} && {$config->phpBinary} artisan down || true", 'before_activation' => true],
+            ['name' => 'maintenance mode', 'command' => "cd {$config->laravelPath} && {$config->phpBinary} artisan down", 'before_activation' => true],
             ['name' => 'git pull', 'command' => "cd {$config->repositoryPath} && git fetch origin {branch} && git reset --hard {commit}", 'skip_when_artifact' => true],
         ];
 

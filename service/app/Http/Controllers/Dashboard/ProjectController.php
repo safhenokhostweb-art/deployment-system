@@ -55,7 +55,14 @@ class ProjectController extends Controller
         // point after activation). For a plain git-pipeline project (no
         // artifact) the flag is ignored by the agent and the step simply
         // runs first in the normal order.
-        ['name' => 'maintenance mode', 'command' => '{php_binary} artisan down || true', 'before_activation' => true],
+        //
+        // Root-cause fix (Deployment #183): no `|| true` — a
+        // before_activation step's exit code is what gates whether
+        // activation is allowed to proceed (see PipelineExecutor). A
+        // masked failure here previously let the agent believe
+        // maintenance had engaged when it hadn't, activating the new
+        // release onto a fully live site with zero visible error.
+        ['name' => 'maintenance mode', 'command' => '{php_binary} artisan down', 'before_activation' => true],
         ['name' => 'git pull', 'command' => 'git fetch origin {branch} && git reset --hard {commit}', 'skip_when_artifact' => true],
         ['name' => 'composer install', 'command' => 'composer install --no-dev --optimize-autoloader --no-interaction', 'skip_when_artifact' => true],
         ['name' => 'migrate', 'command' => '{php_binary} artisan migrate --force'],

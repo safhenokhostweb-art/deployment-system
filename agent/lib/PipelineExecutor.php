@@ -116,7 +116,7 @@ final class PipelineExecutor
                 $command = 'sudo -n /usr/local/sbin/deployment-runtime-permissions ' . $job['project_key'];
                 $contractError = self::persistentContractError($job['project_key'], $persistentPaths, $persistentRoot, $workingDirectory);
                 if ($contractError !== null) {
-                    $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+                    $this->sendLog($job, [
                         'sequence' => $sequence,
                         'step_name' => 'prepare persistent runtime',
                         'command' => $command,
@@ -135,7 +135,7 @@ final class PipelineExecutor
                     return;
                 }
                 $result = $this->runRuntimePermissions($job['project_key'], $workingDirectory, $stepTimeout);
-                $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+                $this->sendLog($job, [
                     'sequence' => $sequence,
                     'step_name' => 'prepare persistent runtime',
                     'command' => $command,
@@ -177,9 +177,9 @@ final class PipelineExecutor
             );
 
             if ($prepared['status'] !== 'succeeded' || $prepared['stagingPath'] === null) {
-                $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+                $this->sendLog($job, [
                     'sequence' => $sequence,
-                    'step_name' => 'deploy artifact',
+                    'step_name' => 'prepare artifact',
                     'command' => "prepare artifact {$job['artifact']['public_id']}",
                     'output' => mb_substr((string) ($prepared['message'] ?? 'Artifact preparation failed.'), -50000),
                     'exit_code' => 1,
@@ -197,6 +197,24 @@ final class PipelineExecutor
                 return;
             }
 
+            // Root-cause fix (Deployment #183 observability gap): a
+            // successful PREPARE used to be invisible in the Hub's own
+            // log — this sequence number was silently consumed and no row
+            // was ever written for it, so an operator reading the Hub log
+            // could not tell prepare ever ran versus never having reached
+            // this phase at all. Every phase of an artifact deploy
+            // (prepare, each before_activation step, activate) is now a
+            // distinct, always-logged, ordered event.
+            $this->sendLog($job, [
+                'sequence' => $sequence,
+                'step_name' => 'prepare artifact',
+                'command' => "prepare artifact {$job['artifact']['public_id']}",
+                'output' => mb_substr((string) ($prepared['message'] ?? 'Artifact prepared successfully.'), -50000),
+                'exit_code' => 0,
+                'duration_ms' => null,
+                'timed_out' => false,
+            ]);
+
             // Before-activation steps (e.g. `artisan down` maintenance entry
             // marked 'before_activation') run against the CURRENT release
             // while the prepared staging is not yet live. A failure here means
@@ -209,14 +227,33 @@ final class PipelineExecutor
 
                 $sequence++;
                 $command = strtr($step['command'], $replacements);
+
+                // Root-cause fix (Deployment #183 — masked maintenance
+                // failure): a before_activation step's exit code is
+                // safety-load-bearing — it is the ONLY signal that gates
+                // whether activation is allowed to proceed (below). A
+                // trailing unconditional-success shell suffix (`|| true`,
+                // `|| :`) defeats that signal for ANY before_activation
+                // command, regardless of what it runs, by forcing the
+                // shell's own exit code to 0 even when the real command
+                // failed. Stripped ONLY for before_activation steps —
+                // every other pipeline step keeps whatever best-effort
+                // semantics its own command expresses.
+                $command = self::withoutUnconditionalSuccessSuffix($command);
                 $result = $this->executor->run($command, $workingDirectory, $stepTimeout);
                 $this->logger->info("Job {$job['id']} step {$sequence} ({$step['name']}) [before activation]: {$command}");
 
-                if (str_contains($command, 'artisan down') && $result['exitCode'] === 0) {
-                    $maintenanceEnabled = true;
-                }
+                // A before_activation step is, by definition, the
+                // mechanism that makes activation safe — whether it
+                // succeeds or fails below, maintenance cleanup (a
+                // harmless, idempotent `artisan up`) must be considered
+                // eligible on any later failure. This generic contract
+                // holds for every before_activation step regardless of
+                // what command it runs or which project it belongs to —
+                // no command-text inspection needed.
+                $maintenanceEnabled = true;
 
-                $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+                $this->sendLog($job, [
                     'sequence' => $sequence,
                     'step_name' => $step['name'],
                     'command' => $command,
@@ -240,6 +277,16 @@ final class PipelineExecutor
             }
 
             // PHASE 2 — ACTIVATE: atomic swap of the prepared staging.
+            //
+            // Root-cause fix (Deployment #183 — sequence collision): this
+            // used to log at the SAME $sequence value as the
+            // before_activation step just above (no increment between
+            // them), which the Hub's own unique(agent_job_id, sequence)
+            // constraint cannot accept — one of the two log writes was
+            // guaranteed to be silently lost (an uncaught, never-checked
+            // HTTP 500 to a call site that discarded its response).
+            // Activation now always gets its own, distinct sequence.
+            $sequence++;
             $artifactResult = $this->artifactManager->activate(
                 $workingDirectory,
                 $prepared['stagingPath'],
@@ -248,7 +295,7 @@ final class PipelineExecutor
                 $persistentRoot,
             );
 
-            $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+            $this->sendLog($job, [
                 'sequence' => $sequence,
                 'step_name' => 'deploy artifact',
                 'command' => "download+extract+activate artifact {$job['artifact']['public_id']}",
@@ -307,7 +354,7 @@ final class PipelineExecutor
                     );
                 }
 
-                $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+                $this->sendLog($job, [
                     'sequence' => $sequence,
                     'step_name' => 'runtime permissions (post-artifact)',
                     'command' => $command,
@@ -376,7 +423,7 @@ final class PipelineExecutor
                 $maintenanceEnabled = true;
             }
 
-            $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+            $this->sendLog($job, [
                 'sequence' => $sequence,
                 'step_name' => $step['name'],
                 'command' => $command,
@@ -406,7 +453,7 @@ final class PipelineExecutor
         if (!$failed && (($job['http_health_check']['enabled'] ?? false) === true)) {
             $sequence++;
             $health = ($this->httpHealth ?? new HttpHealthCheckRunner())->run($job['http_health_check']);
-            $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+            $this->sendLog($job, [
                 'sequence' => $sequence,
                 'step_name' => 'customer-facing HTTP health',
                 'step_type' => 'http_health_check',
@@ -461,12 +508,56 @@ final class PipelineExecutor
         }
 
         $cleanup = $this->executor->runArgv([$projectConfig['php_binary'] ?? 'php', 'artisan', 'up'], $workingDirectory, min($stepTimeout, 60));
-        $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", [
+        $this->sendLog($job, [
             'sequence' => ++$sequence, 'step_name' => 'maintenance cleanup', 'command' => 'artisan up',
             'output' => mb_substr($cleanup['output'], -50000), 'exit_code' => $cleanup['exitCode'],
             'duration_ms' => $cleanup['durationMs'], 'timed_out' => $cleanup['timedOut'],
         ]);
         $this->logger->error("Job {$job['id']}: maintenance cleanup " . ($cleanup['exitCode'] === 0 ? 'succeeded' : 'failed') . ' after the original failure.');
+    }
+
+    /**
+     * Every call site in this file posts a deploy-log entry and discards
+     * the response. A Hub-side rejection (e.g. Deployment #183's sequence
+     * collision, a unique(agent_job_id, sequence) violation surfacing as
+     * an HTTP 500) was therefore completely invisible — the Hub's own
+     * record silently lost the entry with no trace anywhere. This does
+     * not retry or redesign the transport: it only guarantees a local,
+     * server-side diagnostic survives whenever the Hub could not persist
+     * the entry, so deployment execution evidence is never silently
+     * misleading about what this server actually did.
+     *
+     * @param array<string, mixed> $job
+     * @param array<string, mixed> $payload
+     */
+    private function sendLog(array $job, array $payload): void
+    {
+        $response = $this->client->request('POST', "/api/agent/jobs/{$job['id']}/log", $payload);
+
+        if ($response['status'] >= 300) {
+            $this->logger->error(
+                "Job {$job['id']}: Hub rejected log entry for sequence {$payload['sequence']} ('{$payload['step_name']}') with HTTP {$response['status']} "
+                . '— this step\'s evidence may be missing from the Hub\'s own record. '
+                . 'command=' . $payload['command'] . ' exit_code=' . ($payload['exit_code'] ?? 'null')
+            );
+        }
+    }
+
+    /**
+     * Root-cause fix (Deployment #183 — masked maintenance failure): strips
+     * a trailing unconditional-success shell suffix (`|| true`, `|| :`)
+     * so a before_activation step's real exit code — the sole signal that
+     * gates whether artifact activation is allowed to proceed — can never
+     * be silently forced to 0 by the command text itself. Generic by
+     * design: it inspects only the shell construct, never any specific
+     * command (e.g. "artisan down") or project, so it applies uniformly
+     * to every before_activation step regardless of what it runs — old,
+     * already-persisted pipeline commands are covered automatically, with
+     * no Dashboard resave required.
+     */
+    private static function withoutUnconditionalSuccessSuffix(string $command): string
+    {
+        return (string) preg_replace('/\s*\|\|\s*(true|:)\s*$/', '', $command);
     }
 
     /** @param array<int, mixed> $pipeline */
