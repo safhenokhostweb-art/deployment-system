@@ -137,6 +137,73 @@ try {
 
     $message = $failure(fn () => $materializer->withPackage($mapping, 'unrelated-project', 'master', $newCommit, '1.4.1', static fn () => null));
     $check('an unknown repository mapping fails closed', str_contains($message, 'invalid Server Agent package repository mapping'));
+
+    // Regression coverage for Production ServerAgentPackageBuildJob #1
+    // ("Class SafeFilesystem not found"). Every check above only ever
+    // drove withPackage() with a synthetic closure defined in THIS
+    // test's own top-level scope — which already has
+    // `use LocalAgent\SafeFilesystem;` at the top of this file, so it
+    // could never reproduce the real incident. The real incident lived
+    // entirely in local-agent/agent.php's pollAndBuildServerAgentPackage(),
+    // a global-namespace top-level script that cannot safely be
+    // require()'d here (it starts a live poll loop). Two checks close
+    // that gap: (1) reproduce the exact failure mechanism — a bare
+    // SafeFilesystem:: reference in a file with no `use` import and no
+    // `namespace` declaration, matching agent.php's pre-fix shape byte
+    // for byte — proving the bug is real and would recur if the import
+    // were ever dropped again; (2) exercise the actual shipped
+    // replacement, ServerAgentPackageMaterializer::buildZip(), through
+    // the exact same [$materializer, 'buildZip'] callable agent.php's
+    // pollAndBuildServerAgentPackage() passes to withPackage() today —
+    // proving the real production code path now works end to end.
+    $brokenClosureSource = <<<'PHP'
+    <?php
+    return static function (string $packageRoot): array {
+        $files = [];
+        SafeFilesystem::collectFilesSafely($packageRoot, $packageRoot, '', $files);
+
+        return $files;
+    };
+    PHP;
+    $brokenClosureFile = $root . '/pre-fix-inline-closure.php';
+    file_put_contents($brokenClosureFile, $brokenClosureSource);
+    $reproducedMessage = '';
+    try {
+        $brokenClosure = require $brokenClosureFile;
+        $brokenClosure($workspace . '/agent');
+    } catch (\Throwable $e) {
+        $reproducedMessage = $e->getMessage();
+    }
+    $check(
+        'root cause reproduced: an unimported bare SafeFilesystem:: reference in a global-namespace file fails exactly like Production job #1',
+        str_contains($reproducedMessage, 'SafeFilesystem') && str_contains($reproducedMessage, 'not found'),
+    );
+
+    $zipResult = null;
+    $zipError = $failure(function () use ($materializer, $mapping, $newCommit, &$zipResult): void {
+        $zipResult = $materializer->withPackage($mapping, 'deployment-system', 'master', $newCommit, '1.4.1', [$materializer, 'buildZip']);
+    });
+    $check('the real production callable [$materializer, "buildZip"] (exactly what agent.php now passes to withPackage()) completes without a namespace-resolution error', $zipError === '');
+    $check('buildZip() reports the exact requested commit', ($zipResult['source_commit'] ?? null) === $newCommit);
+    $check('buildZip() reports a well-formed tree hash', preg_match('/^[0-9a-f]{40}$/', (string) ($zipResult['tree_hash'] ?? '')) === 1);
+    $check('buildZip() reports a well-formed sha256 checksum', preg_match('/^[0-9a-f]{64}$/', (string) ($zipResult['checksum_sha256'] ?? '')) === 1);
+    $check('buildZip() checksum matches the returned content', ($zipResult !== null) && hash('sha256', $zipResult['content']) === $zipResult['checksum_sha256']);
+    $check('buildZip() reports a positive size matching the returned content', ($zipResult !== null) && $zipResult['size_bytes'] === strlen($zipResult['content']));
+
+    $zipEntries = [];
+    if ($zipResult !== null) {
+        $zipFile = $root . '/produced-package.zip';
+        file_put_contents($zipFile, $zipResult['content']);
+        $zipArchive = new \ZipArchive();
+        if ($zipArchive->open($zipFile) === true) {
+            for ($i = 0; $i < $zipArchive->numFiles; $i++) {
+                $zipEntries[] = $zipArchive->getNameIndex($i);
+            }
+            $zipArchive->close();
+        }
+    }
+    $check('the produced zip actually contains agent.php', in_array('agent.php', $zipEntries, true));
+    $check('the produced zip actually contains lib/PipelineExecutor.php', in_array('lib/PipelineExecutor.php', $zipEntries, true));
 } finally {
     if (is_dir($root)) {
         SafeFilesystem::recursiveDelete($root);

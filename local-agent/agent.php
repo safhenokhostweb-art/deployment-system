@@ -85,6 +85,7 @@ use LocalAgent\JobMaxRuntimeExceededException;
 use LocalAgent\LocalBuildRunner;
 use LocalAgent\LinuxUpgradePackageMaterializer;
 use LocalAgent\LinuxUpgradeRunner;
+use LocalAgent\SafeFilesystem;
 use LocalAgent\ServerAgentPackageMaterializer;
 use LocalAgent\Logger;
 use LocalAgent\LogTail;
@@ -109,7 +110,7 @@ use LocalAgent\WorkspaceSourcePreparer;
  * Hub side for why this never triggers an automatic download). Bump
  * when agent.php or lib/* changes in a way that matters operationally.
  */
-const LOCAL_AGENT_VERSION = '1.5.5';
+const LOCAL_AGENT_VERSION = '1.5.6';
 
 $configPath = __DIR__ . '/config.php';
 
@@ -838,6 +839,14 @@ function pollAndBuildServerAgentPackage(Client $client, GitManager $git, array $
     try {
         $logger->info("Server Agent package build job {$job['id']}: materializing {$repositoryMapping}@{$commit} as {$agentVersion}");
 
+        // Root-cause fix (Production job #1 — "Class SafeFilesystem not
+        // found"): the deterministic-zip step now lives as a plain,
+        // directly-testable, already-namespaced method on
+        // ServerAgentPackageMaterializer itself
+        // (ServerAgentPackageMaterializer::buildZip()) instead of an
+        // inline closure defined here in agent.php's own global
+        // namespace, where a bare SafeFilesystem:: reference has no
+        // implicit import to resolve against.
         $materializer = new ServerAgentPackageMaterializer($git);
         $result = $materializer->withPackage(
             $projects,
@@ -845,35 +854,7 @@ function pollAndBuildServerAgentPackage(Client $client, GitManager $git, array $
             $branch,
             $commit,
             $agentVersion,
-            static function (string $packageRoot, string $treeHash, string $sourceCommit): array {
-                $zipPath = tempnam(sys_get_temp_dir(), 'server-agent-package-') . '.zip';
-                @unlink($zipPath);
-
-                $files = [];
-                SafeFilesystem::collectFilesSafely($packageRoot, $packageRoot, '', $files);
-                ksort($files, SORT_STRING);
-
-                $zip = new ZipArchive();
-                if ($zip->open($zipPath, ZipArchive::CREATE) !== true) {
-                    throw new \RuntimeException("Could not create Server Agent package zip at {$zipPath}.");
-                }
-                foreach ($files as $relativePath => $absolutePath) {
-                    $zip->addFile($absolutePath, $relativePath);
-                    $zip->setExternalAttributesName($relativePath, ZipArchive::OPSYS_UNIX, (0100644 << 16));
-                }
-                $zip->close();
-
-                $content = (string) file_get_contents($zipPath);
-                @unlink($zipPath);
-
-                return [
-                    'content' => $content,
-                    'checksum_sha256' => hash('sha256', $content),
-                    'size_bytes' => strlen($content),
-                    'tree_hash' => $treeHash,
-                    'source_commit' => $sourceCommit,
-                ];
-            },
+            [$materializer, 'buildZip'],
         );
 
         $client->request('POST', $reportPath, [

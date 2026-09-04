@@ -258,6 +258,123 @@ class ServerAgentControlJobServiceTest extends TestCase
         $this->assertDatabaseCount('server_agent_package_build_jobs', 1);
     }
 
+    // ------------------------------------------------------------------
+    // Root-cause fix (Production job #1, "Class SafeFilesystem not
+    // found"): once a build job is FAILED, queueBuildIfMissing() must
+    // reuse that SAME row rather than attempt a second create() for the
+    // same (commit_hash, repository_mapping) — that key is uniquely
+    // constrained, so a naive second create() throws an uncaught
+    // QueryException/500.
+    // ------------------------------------------------------------------
+
+    public function test_a_failed_build_job_is_reused_not_recreated_on_retry(): void
+    {
+        $commit = str_repeat('1', 40);
+        $originalBuilder = LocalAgent::factory()->productionBuild()->create(['agent_version' => '1.5.5']);
+        $service = app(ServerAgentPackageService::class);
+        $job = $service->queueBuildIfMissing($commit, 'main', '1.4.1', 'deployment-system', $originalBuilder);
+        $job->update(['status' => ServerAgentPackageBuildJob::STATUS_FAILED, 'error_message' => 'Class "SafeFilesystem" not found']);
+
+        $newBuilder = LocalAgent::factory()->productionBuild()->create(['agent_version' => '1.5.6']);
+        $retried = $service->queueBuildIfMissing($commit, 'main', '1.4.1', 'deployment-system', $newBuilder);
+
+        $this->assertSame($job->id, $retried->id, 'A failed job must be reused on the same row, never recreated.');
+        $this->assertDatabaseCount('server_agent_package_build_jobs', 1);
+        $this->assertSame(ServerAgentPackageBuildJob::STATUS_QUEUED, $retried->status);
+        $this->assertNull($retried->error_message, 'A retried job must have its stale failure message cleared.');
+        $this->assertSame($newBuilder->id, $retried->local_agent_id, 'A retried job must be reassigned to the current authoritative builder.');
+        $this->assertSame('1.5.6', $retried->builder_agent_version, 'A retried job must record the current builder version, not the one that failed.');
+        $this->assertSame($commit, $retried->commit_hash);
+        $this->assertSame('deployment-system', $retried->repository_mapping);
+        $this->assertSame('1.4.1', $retried->agent_version, 'The target Server Agent version must survive a retry untouched.');
+        $this->assertSame('main', $retried->branch);
+    }
+
+    public function test_a_queued_build_job_remains_idempotently_reused_not_duplicated(): void
+    {
+        $commit = str_repeat('2', 40);
+        $builder = LocalAgent::factory()->productionBuild()->create();
+        $service = app(ServerAgentPackageService::class);
+        $job = $service->queueBuildIfMissing($commit, 'main', '1.4.1', 'deployment-system', $builder);
+
+        $again = $service->queueBuildIfMissing($commit, 'main', '1.4.1', 'deployment-system', $builder);
+
+        $this->assertSame($job->id, $again->id);
+        $this->assertSame(ServerAgentPackageBuildJob::STATUS_QUEUED, $again->status);
+        $this->assertDatabaseCount('server_agent_package_build_jobs', 1);
+    }
+
+    public function test_a_running_build_job_remains_idempotently_reused_not_duplicated(): void
+    {
+        $commit = str_repeat('3', 40);
+        $builder = LocalAgent::factory()->productionBuild()->create();
+        $service = app(ServerAgentPackageService::class);
+        $job = $service->queueBuildIfMissing($commit, 'main', '1.4.1', 'deployment-system', $builder);
+        $service->claimNextBuildJob($builder);
+
+        $again = $service->queueBuildIfMissing($commit, 'main', '1.4.1', 'deployment-system', $builder);
+
+        $this->assertSame($job->id, $again->id);
+        $this->assertSame(ServerAgentPackageBuildJob::STATUS_RUNNING, $again->status, 'A running job must not be reset to queued by a concurrent retry.');
+        $this->assertDatabaseCount('server_agent_package_build_jobs', 1);
+    }
+
+    public function test_retrying_a_failed_build_job_through_queue_upgrade_still_requires_an_eligible_builder(): void
+    {
+        ['project' => $project, 'commit' => $commit] = $this->createUpgradeAuthority();
+        $agent = Agent::factory()->approved()->create(['agent_version' => '1.4.0']);
+
+        // First attempt: the default authoritative builder is eligible,
+        // so a build job gets queued (queueUpgrade() still fails closed
+        // with 409 pending the package, exactly like
+        // test_queue_upgrade_fails_closed_when_no_package_exists_yet).
+        // The queued job then fails in the field (mirrors Production job
+        // #1).
+        try {
+            app(ServerAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException) {
+            // Expected — no package exists yet.
+        }
+        $job = ServerAgentPackageBuildJob::sole();
+        $job->update(['status' => ServerAgentPackageBuildJob::STATUS_FAILED, 'error_message' => 'Class "SafeFilesystem" not found']);
+
+        // The project's authoritative builder now regresses below the
+        // minimum before anyone retries.
+        $project->authoritativeBuildAgent->update(['agent_version' => '1.5.4']);
+
+        try {
+            app(ServerAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
+            $this->fail('Expected the retry to fail closed for a builder that regressed below the eligibility minimum.');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
+            $this->assertSame(409, $e->getStatusCode());
+            $this->assertStringContainsString('does not support Server Agent package builds', $e->getMessage());
+        }
+
+        // The eligibility gate must reject the retry BEFORE touching the
+        // failed row at all — it must remain exactly as it failed.
+        $job->refresh();
+        $this->assertSame(ServerAgentPackageBuildJob::STATUS_FAILED, $job->status);
+        $this->assertSame('Class "SafeFilesystem" not found', $job->error_message);
+        $this->assertDatabaseCount('server_agent_package_build_jobs', 1);
+    }
+
+    public function test_concurrent_retries_of_the_same_failed_build_job_resolve_to_one_row_without_a_unique_constraint_error(): void
+    {
+        $commit = str_repeat('5', 40);
+        $builder = LocalAgent::factory()->productionBuild()->create();
+        $service = app(ServerAgentPackageService::class);
+        $job = $service->queueBuildIfMissing($commit, 'main', '1.4.1', 'deployment-system', $builder);
+        $job->update(['status' => ServerAgentPackageBuildJob::STATUS_FAILED]);
+
+        $first = $service->queueBuildIfMissing($commit, 'main', '1.4.1', 'deployment-system', $builder);
+        $second = $service->queueBuildIfMissing($commit, 'main', '1.4.1', 'deployment-system', $builder);
+
+        $this->assertSame($job->id, $first->id);
+        $this->assertSame($job->id, $second->id);
+        $this->assertDatabaseCount('server_agent_package_build_jobs', 1);
+        $this->assertSame(ServerAgentPackageBuildJob::STATUS_QUEUED, $second->status);
+    }
+
     public function test_claim_next_build_job_only_claims_for_the_requesting_local_agent(): void
     {
         $builder = LocalAgent::factory()->productionBuild()->create();

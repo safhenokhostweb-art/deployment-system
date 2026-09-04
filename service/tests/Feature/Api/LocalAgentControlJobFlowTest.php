@@ -202,7 +202,7 @@ class LocalAgentControlJobFlowTest extends TestCase
         $this->get('/api/local-agent/control-jobs/next', $headers)
             ->assertOk()
             ->assertJsonPath('job.action', LocalAgentControlJob::ACTION_UPGRADE)
-            ->assertJsonPath('job.expected_version', '1.5.5')
+            ->assertJsonPath('job.expected_version', '1.5.6')
             ->assertJsonPath('job.expected_commit_hash', $commit);
 
         $reportBody = [
@@ -218,13 +218,13 @@ class LocalAgentControlJobFlowTest extends TestCase
             ->assertOk()
             ->assertJson(['status' => LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT]);
 
-        $heartbeat = ['agent_version' => '1.5.5', 'hostname' => 'linux-builder', 'operating_system' => 'Linux', 'capabilities' => ['linux_self_upgrade' => true]];
+        $heartbeat = ['agent_version' => '1.5.6', 'hostname' => 'linux-builder', 'operating_system' => 'Linux', 'capabilities' => ['linux_self_upgrade' => true]];
         $heartbeatHeaders = $this->headersFor($agent, 'POST', '/api/local-agent/heartbeat', json_encode($heartbeat));
         $this->postJson('/api/local-agent/heartbeat', $heartbeat, $heartbeatHeaders)->assertOk();
 
         $this->assertSame(LocalAgentControlJob::STATUS_SUCCEEDED, $job->fresh()->status);
-        $this->assertSame('1.5.5', $job->fresh()->reported_version);
-        $this->assertSame('1.5.5', $agent->fresh()->agent_version);
+        $this->assertSame('1.5.6', $job->fresh()->reported_version);
+        $this->assertSame('1.5.6', $agent->fresh()->agent_version);
     }
 
     public function test_1_5_1_agent_must_use_the_one_time_bootstrap_before_dashboard_upgrade(): void
@@ -268,11 +268,11 @@ class LocalAgentControlJobFlowTest extends TestCase
             ->assertOk()
             ->assertJsonPath('status', LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT);
 
-        $higher = ['agent_version' => '1.5.6', 'hostname' => 'linux-builder', 'operating_system' => 'Linux'];
+        $higher = ['agent_version' => '1.5.7', 'hostname' => 'linux-builder', 'operating_system' => 'Linux'];
         $this->postJson('/api/local-agent/heartbeat', $higher, $this->headersFor($agent, 'POST', '/api/local-agent/heartbeat', json_encode($higher)))->assertOk();
         $this->assertSame(LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT, $job->fresh()->status);
 
-        $exact = array_replace($higher, ['agent_version' => '1.5.5']);
+        $exact = array_replace($higher, ['agent_version' => '1.5.6']);
         $this->postJson('/api/local-agent/heartbeat', $exact, $this->headersFor($agent, 'POST', '/api/local-agent/heartbeat', json_encode($exact)))->assertOk();
         $this->assertSame(LocalAgentControlJob::STATUS_SUCCEEDED, $job->fresh()->status);
         $this->assertSame($commit, $job->fresh()->reported_commit_hash);

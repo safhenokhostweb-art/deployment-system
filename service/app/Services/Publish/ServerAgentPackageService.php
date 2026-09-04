@@ -29,9 +29,23 @@ class ServerAgentPackageService
     }
 
     /**
-     * Idempotent: a build already queued/running for the exact same
-     * commit is reused rather than duplicated, mirroring
-     * PublishJobService's own dedupe reasoning for artifact builds.
+     * Idempotent AND recoverable for the exact (commit_hash,
+     * repository_mapping) key the table's own unique constraint
+     * enforces: a build already QUEUED/RUNNING is reused unchanged; a
+     * FAILED build (e.g. Production ServerAgentPackageBuildJob #1,
+     * "Class SafeFilesystem not found") is atomically reset back to
+     * QUEUED on THAT SAME ROW rather than left stranded — a naive
+     * second create() for the same key would hit the unique constraint
+     * and throw an uncaught QueryException. lockForUpdate() inside this
+     * transaction is what makes a concurrent double-click (two
+     * "Upgrade Server Agent" clicks racing) resolve to exactly one
+     * outcome rather than a duplicate-key 500 for the loser.
+     *
+     * The caller (ServerAgentControlJobService::queueUpgrade()) has
+     * already verified $builder->supportsServerAgentPackageBuild()
+     * before this method is ever reached — never re-checked here, so
+     * there is exactly one place that guard can be bypassed from, and
+     * this isn't it.
      */
     public function queueBuildIfMissing(string $commitHash, string $branch, string $agentVersion, string $repositoryMapping, LocalAgent $builder): ServerAgentPackageBuildJob
     {
@@ -39,12 +53,28 @@ class ServerAgentPackageService
             $existing = ServerAgentPackageBuildJob::query()
                 ->where('commit_hash', $commitHash)
                 ->where('repository_mapping', $repositoryMapping)
-                ->whereIn('status', [ServerAgentPackageBuildJob::STATUS_QUEUED, ServerAgentPackageBuildJob::STATUS_RUNNING])
                 ->lockForUpdate()
                 ->first();
 
             if ($existing !== null) {
-                return $existing;
+                if ($existing->status !== ServerAgentPackageBuildJob::STATUS_FAILED) {
+                    return $existing;
+                }
+
+                // Reuse the SAME row — never a second create() for this
+                // exact-commit key. commit_hash/repository_mapping/
+                // agent_version(target)/branch are the immutable target
+                // identity and are left untouched; only what genuinely
+                // changed between attempts (which builder, its
+                // point-in-time version, and the stale failure) is reset.
+                $existing->update([
+                    'status' => ServerAgentPackageBuildJob::STATUS_QUEUED,
+                    'local_agent_id' => $builder->id,
+                    'builder_agent_version' => $builder->agent_version,
+                    'error_message' => null,
+                ]);
+
+                return $existing->fresh();
             }
 
             return ServerAgentPackageBuildJob::create([
