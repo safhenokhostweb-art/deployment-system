@@ -122,4 +122,20 @@ class Agent extends Model
             && $this->registration_token_expires_at !== null
             && $this->registration_token_expires_at->isFuture();
     }
+
+    /**
+     * Root-cause fix (Deployment #183/#184): whether this Server Agent's
+     * last-heartbeated build carries the before_activation
+     * sequence/masking fix (agent/lib/PipelineExecutor.php, commit
+     * bcc7670f, shipped as Server Agent 1.4.1). A capability check only
+     * — deliberately NOT yet consulted by any deploy-claim gate (see
+     * config('deployment.min_server_agent_version_for_pre_activation_maintenance')'s
+     * own docblock for why activating that block prematurely would
+     * deadlock the existing 1.4.0 fleet's own path to upgrading).
+     */
+    public function enforcesPreActivationMaintenanceOrdering(): bool
+    {
+        return is_string($this->agent_version)
+            && version_compare($this->agent_version, (string) config('deployment.min_server_agent_version_for_pre_activation_maintenance'), '>=');
+    }
 }

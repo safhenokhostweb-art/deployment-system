@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Agent;
 use App\Models\AuditLogEntry;
 use App\Models\Server;
+use App\Services\Publish\ServerAgentControlJobService;
 use App\Services\Security\AgentCredentialService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -16,6 +17,7 @@ class AgentController extends Controller
 {
     public function __construct(
         private readonly AgentCredentialService $credentials,
+        private readonly ServerAgentControlJobService $controlJobs,
     ) {
     }
 
@@ -155,6 +157,24 @@ class AgentController extends Controller
             'generated_agent_identity' => $agent->public_id,
             'status' => 'Agent credentials reissued. Replace the existing Agent credentials immediately; they are shown only once.',
         ]);
+    }
+
+    /**
+     * Root-cause fix (Deployment #184): the Hub's only channel to
+     * remotely upgrade a running Server Agent process — deliberately
+     * its own action/service (ServerAgentControlJobService), never
+     * LocalAgentController::upgrade()'s LocalAgentControlJobService, so
+     * Server Agent and Local/Build Agent identity are never conflated.
+     */
+    public function upgrade(Request $request, Agent $agent): RedirectResponse
+    {
+        Gate::authorize('agents.approve');
+        abort_unless($agent->status === Agent::STATUS_APPROVED, 409, 'Only an approved agent can be upgraded.');
+
+        $job = $this->controlJobs->queueUpgrade($agent, $request->user()->email);
+
+        return redirect()->route('agents.show', $agent)
+            ->with('status', "Server Agent upgrade to {$job->target_version} queued. Completion requires a verified post-restart heartbeat.");
     }
 
     public function reject(Request $request, Agent $agent): RedirectResponse

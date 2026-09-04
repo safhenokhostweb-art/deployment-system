@@ -94,6 +94,12 @@
             <button type="button" class="btn" onclick="document.getElementById('reissue-agent-credentials-dialog').showModal()">Reissue credentials</button>
             <x-confirm-dialog id="reissue-agent-credentials-dialog" form-id="reissue-agent-credentials-form" title="Reissue Agent credentials" :body="'The previous credentials stop working immediately. Update the installed Agent configuration before restarting it.'" confirm-label="Reissue credentials" :danger="false" />
             @endcan
+            @can('agents.approve')
+            <form method="POST" action="{{ route('agents.upgrade', $agent) }}" style="display:inline">
+                @csrf
+                <button type="submit" class="btn btn-primary">Upgrade Server Agent</button>
+            </form>
+            @endcan
             @can('agents.disable')
             <form method="POST" action="{{ route('agents.disable', $agent) }}" id="disable-agent-form" style="display:inline">
                 @csrf

@@ -121,12 +121,18 @@ class LocalAgentVersionSyncTest extends TestCase
     {
         $runner = file_get_contents(base_path('../deployment-local-agent/agent/lib/LinuxUpgradeRunner.php'));
         $materializer = file_get_contents(base_path('../deployment-local-agent/agent/lib/LinuxUpgradePackageMaterializer.php'));
+        // Root-cause fix (Deployment #184): the fetch/archive/tree-hash-verify
+        // core moved into GitExactCommitSubtreeMaterializer, shared with
+        // ServerAgentPackageMaterializer — LinuxUpgradePackageMaterializer
+        // now only supplies the deployment-local-agent subtree name and its
+        // own required-file/version validation.
+        $core = file_get_contents(base_path('../deployment-local-agent/agent/lib/GitExactCommitSubtreeMaterializer.php'));
         $upgrader = file_get_contents(base_path('../deployment-local-agent/upgrade-linux.sh'));
 
         $this->assertStringContainsString('LinuxUpgradePackageMaterializer', $runner);
-        $this->assertStringContainsString("['git', 'fetch', '--no-tags', '--prune', 'origin', 'refs/heads/' . \$branch]", $materializer);
-        $this->assertStringContainsString("['git', 'archive', '--format=zip'", $materializer);
-        $this->assertStringContainsString("\$expectedCommit . ':deployment-local-agent'", $materializer);
+        $this->assertStringContainsString("SUBTREE = 'deployment-local-agent'", $materializer);
+        $this->assertStringContainsString("['git', 'fetch', '--no-tags', '--prune', 'origin', 'refs/heads/' . \$branch]", $core);
+        $this->assertStringContainsString("['git', 'archive', '--format=zip'", $core);
         $this->assertStringContainsString("'--expected-version'", $runner);
         $this->assertStringContainsString('SOURCE_DIR="${SCRIPT_DIR}/agent"', $upgrader);
         $this->assertStringContainsString('does not match expected version', $upgrader);
@@ -137,12 +143,14 @@ class LocalAgentVersionSyncTest extends TestCase
         $critical = [
             'agent.php',
             'lib/DependencyRepositoryResolver.php',
+            'lib/GitExactCommitSubtreeMaterializer.php',
             'lib/GitManager.php',
             'lib/LinuxUpgradePackageMaterializer.php',
             'lib/LinuxUpgradeRunner.php',
             'lib/PinnedDependencyMaterializer.php',
             'lib/SafeFilesystem.php',
             'lib/SafetyChecker.php',
+            'lib/ServerAgentPackageMaterializer.php',
         ];
         $local = $this->runtimeFingerprints(base_path('../local-agent'), $critical);
         $packaged = $this->runtimeFingerprints(base_path('../deployment-local-agent/agent'), $critical);

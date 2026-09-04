@@ -68,8 +68,10 @@ require __DIR__ . '/lib/LocalBuildFailedException.php';
 require __DIR__ . '/lib/ArtifactSourceResolver.php';
 require __DIR__ . '/lib/ApplicationRoot.php';
 require __DIR__ . '/lib/LocalBuildRunner.php';
+require __DIR__ . '/lib/GitExactCommitSubtreeMaterializer.php';
 require __DIR__ . '/lib/LinuxUpgradePackageMaterializer.php';
 require __DIR__ . '/lib/LinuxUpgradeRunner.php';
+require __DIR__ . '/lib/ServerAgentPackageMaterializer.php';
 
 use LocalAgent\ArtifactBuilder;
 use LocalAgent\ArtifactSourceResolver;
@@ -83,6 +85,7 @@ use LocalAgent\JobMaxRuntimeExceededException;
 use LocalAgent\LocalBuildRunner;
 use LocalAgent\LinuxUpgradePackageMaterializer;
 use LocalAgent\LinuxUpgradeRunner;
+use LocalAgent\ServerAgentPackageMaterializer;
 use LocalAgent\Logger;
 use LocalAgent\LogTail;
 use LocalAgent\LocalProjectStateReporter;
@@ -329,6 +332,19 @@ do {
         }
     } catch (\Throwable $e) {
         $logger->error('Unhandled error during control-job poll cycle: ' . $e->getMessage());
+    }
+
+    // Root-cause fix (Deployment #184 — no channel from the Hub to the
+    // Server Agent runtime at all): this Local Agent is the only
+    // already-trusted, git-capable machine in the system, so it also
+    // materializes exact-commit Server Agent (agent/) packages the Hub
+    // asks for — see ServerAgentPackageMaterializer and
+    // pollAndBuildServerAgentPackage()'s own docblock. Kept in its own
+    // try/catch, same as every other independent poll cycle above.
+    try {
+        pollAndBuildServerAgentPackage($client, $git, $projects, $logger);
+    } catch (\Throwable $e) {
+        $logger->error('Unhandled error during Server Agent package build poll cycle: ' . $e->getMessage());
     }
 
     // Checked only here — once a full cycle has finished cleanly, never
@@ -783,6 +799,97 @@ function pollAndHandleControl(Client $client, GitManager $git, array $config, ar
         $client->request('POST', $reportPath, ['status' => 'failed', 'error_message' => $e->getMessage()]);
 
         return false;
+    }
+}
+
+/**
+ * Root-cause fix (Deployment #184): materializes and uploads one
+ * exact-commit Server Agent (agent/) package on request — the same
+ * "isolated repo, exact-commit git archive, per-file blob-hash verify"
+ * contract ServerAgentPackageMaterializer already proves, plus a small,
+ * deterministic zip (no vendor/, no build step — this is plain PHP
+ * source) uploaded to the Hub. Never activates anything itself: this
+ * Local Agent has no relationship to any Server Agent's runtime — it
+ * only proves and delivers the bytes.
+ *
+ * @param array<string, array<string, mixed>> $projects
+ */
+function pollAndBuildServerAgentPackage(Client $client, GitManager $git, array $projects, Logger $logger): void
+{
+    $response = $client->request('GET', '/api/local-agent/server-agent-package-jobs/next');
+
+    if ($response['status'] !== 200) {
+        $logger->warn("Server Agent package build poll returned HTTP {$response['status']}");
+
+        return;
+    }
+
+    $job = $response['body']['job'] ?? null;
+    if ($job === null) {
+        return; // nothing queued
+    }
+
+    $reportPath = "/api/local-agent/server-agent-package-jobs/{$job['id']}/report";
+    $commit = (string) ($job['commit_hash'] ?? '');
+    $branch = (string) ($job['branch'] ?? '');
+    $agentVersion = (string) ($job['agent_version'] ?? '');
+    $repositoryMapping = (string) ($job['repository_mapping'] ?? '');
+
+    try {
+        $logger->info("Server Agent package build job {$job['id']}: materializing {$repositoryMapping}@{$commit} as {$agentVersion}");
+
+        $materializer = new ServerAgentPackageMaterializer($git);
+        $result = $materializer->withPackage(
+            $projects,
+            $repositoryMapping,
+            $branch,
+            $commit,
+            $agentVersion,
+            static function (string $packageRoot, string $treeHash, string $sourceCommit): array {
+                $zipPath = tempnam(sys_get_temp_dir(), 'server-agent-package-') . '.zip';
+                @unlink($zipPath);
+
+                $files = [];
+                SafeFilesystem::collectFilesSafely($packageRoot, $packageRoot, '', $files);
+                ksort($files, SORT_STRING);
+
+                $zip = new ZipArchive();
+                if ($zip->open($zipPath, ZipArchive::CREATE) !== true) {
+                    throw new \RuntimeException("Could not create Server Agent package zip at {$zipPath}.");
+                }
+                foreach ($files as $relativePath => $absolutePath) {
+                    $zip->addFile($absolutePath, $relativePath);
+                    $zip->setExternalAttributesName($relativePath, ZipArchive::OPSYS_UNIX, (0100644 << 16));
+                }
+                $zip->close();
+
+                $content = (string) file_get_contents($zipPath);
+                @unlink($zipPath);
+
+                return [
+                    'content' => $content,
+                    'checksum_sha256' => hash('sha256', $content),
+                    'size_bytes' => strlen($content),
+                    'tree_hash' => $treeHash,
+                    'source_commit' => $sourceCommit,
+                ];
+            },
+        );
+
+        $client->request('POST', $reportPath, [
+            'status' => 'succeeded',
+            'commit_hash' => $result['source_commit'],
+            'repository_mapping' => $repositoryMapping,
+            'agent_version' => $agentVersion,
+            'tree_hash' => $result['tree_hash'],
+            'checksum_sha256' => $result['checksum_sha256'],
+            'size_bytes' => $result['size_bytes'],
+            'content_base64' => base64_encode($result['content']),
+        ]);
+        $logger->info("Server Agent package build job {$job['id']}: uploaded {$result['size_bytes']} bytes for {$repositoryMapping}@{$result['source_commit']}.");
+    } catch (\Throwable $e) {
+        $logger->error("Server Agent package build job {$job['id']} failed: " . $e->getMessage());
+        $client->request('POST', $reportPath, ['status' => 'failed', 'error_message' => $e->getMessage()]);
     }
 }
 

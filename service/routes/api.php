@@ -14,6 +14,9 @@ use App\Http\Controllers\Api\LocalAgentProjectSyncController;
 use App\Http\Controllers\Api\LocalAgentRegistrationController;
 use App\Http\Controllers\Api\LocalAgentWorkspaceInventoryController;
 use App\Http\Controllers\Api\ProjectReleaseController;
+use App\Http\Controllers\Api\ServerAgentControlJobController;
+use App\Http\Controllers\Api\ServerAgentPackageBuildJobController;
+use App\Http\Controllers\Api\ServerAgentPackageController;
 use Illuminate\Support\Facades\Route;
 
 // GitHub -> Deployment Service. Authenticated by per-project HMAC signature
@@ -61,6 +64,15 @@ Route::middleware('agent.signed')->prefix('agent')->group(function () {
     // downloads an artifact the Local Agent already uploaded — see
     // AgentArtifactController and ArtifactManager on the agent side.
     Route::get('/artifacts/{id}/download', [AgentArtifactController::class, 'download'])->name('agent.artifacts.download');
+
+    // Root-cause fix (Deployment #184 — no channel from the Hub to the
+    // Server Agent runtime at all): the Server Agent's own exact-commit
+    // self-upgrade contract, deliberately separate from every
+    // local-agent/* route above — see ServerAgentControlJobService and
+    // ServerAgentPackageController.
+    Route::get('/control-jobs/next', [ServerAgentControlJobController::class, 'next'])->name('agent.control-jobs.next');
+    Route::post('/control-jobs/{id}/report', [ServerAgentControlJobController::class, 'report'])->name('agent.control-jobs.report');
+    Route::get('/server-agent-packages/{id}/download', [ServerAgentPackageController::class, 'download'])->name('agent.server-agent-packages.download');
 });
 
 // Phase 5: Local Development Publisher Agent. A pending local agent has
@@ -114,4 +126,12 @@ Route::middleware('local-agent.signed')->prefix('local-agent')->group(function (
     // ArtifactBuilder on the agent side.
     Route::post('/artifacts', [LocalAgentArtifactController::class, 'create'])->name('local-agent.artifacts.create');
     Route::post('/artifacts/{id}/content', [LocalAgentArtifactController::class, 'uploadContent'])->name('local-agent.artifacts.upload-content');
+
+    // Root-cause fix (Deployment #184): the Hub asking this (the only
+    // already-trusted, git-capable) Local Agent to materialize one
+    // exact-commit Server Agent package — see
+    // ServerAgentPackageBuildJobController and
+    // LinuxUpgradePackageMaterializer::withPackage() on the agent side.
+    Route::get('/server-agent-package-jobs/next', [ServerAgentPackageBuildJobController::class, 'next'])->name('local-agent.server-agent-package-jobs.next');
+    Route::post('/server-agent-package-jobs/{id}/report', [ServerAgentPackageBuildJobController::class, 'report'])->name('local-agent.server-agent-package-jobs.report');
 });

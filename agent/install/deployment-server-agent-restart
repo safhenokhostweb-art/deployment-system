@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Root-owned, fixed-function helper. Restarts exactly one systemd unit —
+# deployment-server-agent.service — and nothing else. Accepts NO arguments;
+# sudoers below grants NOPASSWD only for this exact, argument-free
+# invocation, so no caller-controlled input ever reaches a privileged
+# command (see SelfUpgradeManager, which invokes this as the very last step
+# of an already-validated, already-activated Server Agent self-upgrade).
+set -Eeuo pipefail
+
+if [ "$#" -ne 0 ]; then
+    exit 64
+fi
+
+exec /usr/bin/systemctl restart deployment-server-agent.service

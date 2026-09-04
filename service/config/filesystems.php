@@ -58,6 +58,20 @@ return [
             'report' => false,
         ],
 
+        // Root-cause fix (Deployment #184 — no channel to the Server
+        // Agent runtime at all): where materialized, hash-verified
+        // Server Agent (agent/**) upgrade packages live — private, never
+        // served directly, downloaded only through the signed
+        // ServerAgentPackageController route. Deliberately its own disk,
+        // never the 'artifacts' one — a ServerAgentPackage is Server
+        // Agent runtime code, never an application deployment Artifact.
+        'server-agent-packages' => [
+            'driver' => 'local',
+            'root' => storage_path('app/server-agent-packages'),
+            'throw' => false,
+            'report' => false,
+        ],
+
         's3' => [
             'driver' => 's3',
             'key' => env('AWS_ACCESS_KEY_ID'),

@@ -46,6 +46,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/agents/{agent:public_id}', [AgentController::class, 'show'])->name('agents.show');
     Route::post('/agents/{agent:public_id}/approve', [AgentController::class, 'approve'])->name('agents.approve');
     Route::post('/agents/{agent:public_id}/reissue-credentials', [AgentController::class, 'reissueCredentials'])->name('agents.reissue-credentials');
+    Route::post('/agents/{agent:public_id}/upgrade', [AgentController::class, 'upgrade'])->name('agents.upgrade');
     Route::post('/agents/{agent:public_id}/reject', [AgentController::class, 'reject'])->name('agents.reject');
     Route::post('/agents/{agent:public_id}/disable', [AgentController::class, 'disable'])->name('agents.disable');
     Route::post('/agents/{agent:public_id}/reenable', [AgentController::class, 'reenable'])->name('agents.reenable');

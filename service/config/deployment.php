@@ -281,6 +281,24 @@ return [
     // while saas-platform fails closed until the matching helper is active.
     'min_server_agent_version_for_saas_persistent_runtime' => (string) env('DEPLOYMENT_MIN_SERVER_AGENT_VERSION_FOR_SAAS_PERSISTENT_RUNTIME', '1.3.5'),
 
+    // Root-cause fix (Deployment #183/#184): the first Server Agent
+    // release that correctly gives before_activation maintenance and
+    // artifact activation their own log sequences and fails closed when
+    // a required before_activation step fails (agent/lib/PipelineExecutor.php,
+    // commit bcc7670f). Deliberately defaulted to the CURRENT '1.4.0'
+    // baseline, not '1.4.1', and deliberately NOT yet consulted by any
+    // deploy-blocking gate (see AgentJobService/AgentTaskService — no
+    // call site references this key) — activating it as an actual block
+    // before every existing 1.4.0 Server Agent has had the chance to
+    // complete the one-time exact-commit self-upgrade would recreate
+    // exactly the kind of unrecoverable bootstrap deadlock this whole
+    // mechanism exists to avoid. See
+    // Agent::enforcesPreActivationMaintenanceOrdering() for the
+    // capability check this key backs; wiring it into the deploy-claim
+    // path is a deliberate, separate follow-up once the transition is
+    // confirmed safe in production.
+    'min_server_agent_version_for_pre_activation_maintenance' => (string) env('DEPLOYMENT_MIN_SERVER_AGENT_VERSION_FOR_PRE_ACTIVATION_MAINTENANCE', '1.4.1'),
+
     /*
     |--------------------------------------------------------------------------
     | Laravel release completeness — Local Agent minimum (permanent fix)

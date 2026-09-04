@@ -32,8 +32,10 @@ require __DIR__ . '/lib/ArtifactManager.php';
 require __DIR__ . '/lib/ReleaseValidator.php';
 require __DIR__ . '/lib/PipelineExecutor.php';
 require __DIR__ . '/lib/ProductionPathGuard.php';
+require __DIR__ . '/lib/SelfUpgradeManager.php';
 
 use DeploymentAgent\ArtifactManager;
+use DeploymentAgent\SelfUpgradeManager;
 use DeploymentAgent\Client;
 use DeploymentAgent\Executor;
 use DeploymentAgent\HealthCollector;
@@ -52,7 +54,7 @@ use DeploymentAgent\WorkspaceScanner;
  * can flag servers running an outdated agent. Bump this when agent.php or
  * lib/* changes in a way that matters operationally.
  */
-const AGENT_VERSION = '1.4.0';
+const AGENT_VERSION = '1.4.1';
 
 $configPath = __DIR__ . '/config.php';
 
@@ -144,6 +146,18 @@ do {
         pollAndExecuteOperation($client, $executor, $config, $logger);
     } catch (\Throwable $e) {
         $logger->error('Unhandled error during operation poll cycle: ' . $e->getMessage());
+    }
+
+    // Root-cause fix (Deployment #184 — no channel from the Hub to this
+    // runtime at all): this Server Agent's own exact-commit self-upgrade
+    // poll — see SelfUpgradeManager and ServerAgentControlJobController
+    // on the Hub side. Kept as its own try/catch, same as every other
+    // independent poll cycle above; a successful upgrade never returns
+    // from this call (the restart helper tears down this very process).
+    try {
+        pollAndExecuteSelfUpgrade($client, $executor, $logger, __DIR__);
+    } catch (\Throwable $e) {
+        $logger->error('Unhandled error during self-upgrade poll cycle: ' . $e->getMessage());
     }
 
     if (!$runOnce) {
@@ -389,6 +403,55 @@ function pollAndExecuteOperation(Client $client, Executor $executor, array $conf
 
     $client->request('POST', $reportPath, ['status' => 'succeeded', 'output' => $output]);
     $logger->info("Operation job {$job['id']} finished: succeeded");
+}
+
+/**
+ * Root-cause fix (Deployment #184): this Server Agent's own exact-commit
+ * self-upgrade — see SelfUpgradeManager's own docblock for the full
+ * download/verify/stage/activate/restart contract. $installDir is this
+ * running script's own directory, so the upgrade always targets exactly
+ * the runtime currently executing it — never a path supplied by the Hub.
+ */
+function pollAndExecuteSelfUpgrade(Client $client, Executor $executor, Logger $logger, string $installDir): void
+{
+    $response = $client->request('GET', '/api/agent/control-jobs/next');
+
+    if ($response['status'] !== 200) {
+        $logger->warn("Self-upgrade poll returned HTTP {$response['status']}");
+
+        return;
+    }
+
+    $job = $response['body']['job'] ?? null;
+    if ($job === null) {
+        return; // nothing queued
+    }
+
+    $reportPath = "/api/agent/control-jobs/{$job['id']}/report";
+
+    try {
+        $logger->info("Control job {$job['id']}: applying official Server Agent self-upgrade to {$job['target_version']}");
+        $result = (new SelfUpgradeManager($client, $executor, $logger))->upgrade(
+            $job,
+            $installDir,
+            PHP_BINARY,
+            function (array $evidence) use ($client, $reportPath, $job): void {
+                $startReport = $client->request('POST', $reportPath, [
+                    'status' => 'started',
+                    'output' => "Exact-commit Server Agent upgrade to {$job['target_version']} validated; activation is starting.",
+                    'source_commit' => $evidence['source_commit'],
+                    'package_hash' => $evidence['package_hash'],
+                ]);
+                if ($startReport['status'] !== 200) {
+                    throw new \RuntimeException("Hub rejected the upgrade start report with HTTP {$startReport['status']}.");
+                }
+            },
+        );
+        $logger->info("Control job {$job['id']}: upgrade activated from {$result['old_version']} to {$result['new_version']}; restart helper invoked.");
+    } catch (\Throwable $e) {
+        $logger->error("Control job {$job['id']} failed: " . $e->getMessage());
+        $client->request('POST', $reportPath, ['status' => 'failed', 'error_message' => $e->getMessage()]);
+    }
 }
 
 /**

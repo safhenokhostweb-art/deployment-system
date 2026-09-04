@@ -12,6 +12,7 @@ require __DIR__ . '/../lib/SafetyChecker.php';
 require __DIR__ . '/../lib/LocalBuildFailedException.php';
 require __DIR__ . '/../lib/SafeFilesystem.php';
 require __DIR__ . '/../lib/DependencyRepositoryResolver.php';
+require __DIR__ . '/../lib/GitExactCommitSubtreeMaterializer.php';
 require __DIR__ . '/../lib/LinuxUpgradePackageMaterializer.php';
 
 $git = new GitManager(['fetch' => 60]);

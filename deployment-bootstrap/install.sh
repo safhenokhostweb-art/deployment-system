@@ -142,9 +142,29 @@ else
 fi
 
 mkdir -p "$INSTALL_DIR/lib" "$INSTALL_DIR/storage/logs"
+
+# Root-cause fix (Turn 16/17 audit — Deployment #184): files/agent/ is a
+# hand-copied mirror of the canonical agent/ source, maintained
+# separately and known to drift silently (it was found frozen at
+# AGENT_VERSION 1.1.0, missing lib/PipelineExecutor.php and 7 other
+# runtime files entirely, while the canonical source had already moved
+# through 1.4.1). Fail closed rather than provisioning a new machine with
+# an incomplete or dangerously outdated Server Agent — see
+# docs/SERVER_AGENT_1.4.1_LINEAGE_AND_ROLLBACK.md for the required
+# follow-up (regenerate this mirror from the canonical agent/ source, or
+# make this installer consume the same versioned package the exact-commit
+# self-upgrade contract now uses).
+BOOTSTRAP_MIN_AGENT_VERSION="1.4.0"
+BUNDLED_AGENT_VERSION="$(sed -n "s/^const AGENT_VERSION = '\([^']*\)';/\1/p" "$SCRIPT_DIR/files/agent/agent.php" | head -n1)"
+[ -n "$BUNDLED_AGENT_VERSION" ] || fail "نسخه Agent در files/agent/agent.php قابل تشخیص نیست — این mirror ناقص یا خراب است. لطفاً آن را از منبع اصلی agent/ بازسازی کنید."
+[ "$(printf '%s\n%s\n' "$BOOTSTRAP_MIN_AGENT_VERSION" "$BUNDLED_AGENT_VERSION" | sort -V | head -n1)" = "$BOOTSTRAP_MIN_AGENT_VERSION" ] \
+    || fail "نسخه Agent در این نصب‌کننده ($BUNDLED_AGENT_VERSION) قدیمی‌تر از حداقل مجاز ($BOOTSTRAP_MIN_AGENT_VERSION) است. این mirror باید از منبع اصلی agent/ بازسازی شود — نصب متوقف شد تا یک Server Agent ناقص/قدیمی نصب نشود."
+[ -f "$SCRIPT_DIR/files/agent/lib/PipelineExecutor.php" ] \
+    || fail "files/agent/lib/PipelineExecutor.php در این mirror موجود نیست — این mirror ناقص است و نباید برای نصب یک Server Agent جدید استفاده شود."
+
 cp "$SCRIPT_DIR/files/agent/agent.php" "$INSTALL_DIR/agent.php"
 cp "$SCRIPT_DIR"/files/agent/lib/*.php "$INSTALL_DIR/lib/"
-say "فایل‌های Agent در $INSTALL_DIR کپی شدند."
+say "فایل‌های Agent (نسخه $BUNDLED_AGENT_VERSION) در $INSTALL_DIR کپی شدند."
 
 # AGENT_CONFIG معادل null یعنی این یک اجرای مجدد بود و Secret تازه‌ای
 # ساخته نشد — config.php موجود (اگر باشد) دست‌نخورده می‌ماند؛ در غیر

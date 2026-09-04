@@ -9,6 +9,7 @@ use App\Models\Deployment;
 use App\Models\Server;
 use App\Services\Deployment\AgentJobService;
 use App\Services\Deployment\AgentTaskService;
+use App\Services\Publish\ServerAgentControlJobService;
 use Illuminate\Http\Request;
 
 /**
@@ -28,6 +29,7 @@ class AgentJobController extends Controller
     public function __construct(
         private readonly AgentJobService $jobs,
         private readonly AgentTaskService $tasks,
+        private readonly ServerAgentControlJobService $serverAgentControlJobs,
     ) {
     }
 
@@ -76,6 +78,14 @@ class AgentJobController extends Controller
                 'disk_usage_percent' => $validated['disk_usage_percent'] ?? $agent->disk_usage_percent,
                 'health_reported_at' => $reportedHealth ? now() : $agent->health_reported_at,
             ])->save();
+
+            // Root-cause fix (Deployment #184): this is the only signal
+            // that an in-flight Server Agent self-upgrade actually took
+            // effect — mirrors LocalAgentControlJobService's own
+            // heartbeat-verification pattern exactly. A heartbeat that
+            // doesn't match any awaiting_heartbeat job's target_version
+            // is simply ignored here (0 verified), never an error.
+            $this->serverAgentControlJobs->verifyUpgradeHeartbeat($agent, $validated['agent_version']);
 
             return response()->json(['status' => 'ok']);
         }
