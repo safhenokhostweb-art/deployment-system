@@ -64,6 +64,15 @@ class LocalAgentFactory extends Factory
                 'php' => '8.4',
                 'laravel_release_manifest' => true,
                 'assigned_artifact_publish_job_id' => true,
+                // Root-cause fix (commit 9f7adfd shipped this capability
+                // without a version bump, leaving a real Production
+                // build job unclaimable): a factory-created
+                // production_build agent is a CURRENT agent by
+                // convention (see agent_version above, already pinned to
+                // config('deployment.latest_local_agent_version')) — see
+                // LocalAgent::supportsServerAgentPackageBuild() for the
+                // version+capability pair this backs.
+                'server_agent_package_build' => true,
             ],
         ]);
     }

@@ -127,7 +127,7 @@ class LocalAgentControlJobServiceTest extends TestCase
         $service = app(LocalAgentControlJobService::class);
 
         $job = $service->queueUpgrade($agent, 'admin@example.test');
-        $this->assertSame('1.5.4', $job->expected_version);
+        $this->assertSame('1.5.5', $job->expected_version);
         $service->claimNext($agent);
         $job->refresh();
         $activated = $service->reportUpgradeStarted($job, 'validated', $target['commit'], str_repeat('b', 40), 'deployment-system');
@@ -135,9 +135,9 @@ class LocalAgentControlJobServiceTest extends TestCase
         $this->assertSame(LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT, $activated->status);
         $this->assertSame(0, $service->verifyUpgradeHeartbeat($agent, '1.5.2'));
         $this->assertSame(LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT, $job->fresh()->status);
-        $this->assertSame(1, $service->verifyUpgradeHeartbeat($agent, '1.5.4'));
+        $this->assertSame(1, $service->verifyUpgradeHeartbeat($agent, '1.5.5'));
         $this->assertSame(LocalAgentControlJob::STATUS_SUCCEEDED, $job->fresh()->status);
-        $this->assertSame('1.5.4', $job->fresh()->reported_version);
+        $this->assertSame('1.5.5', $job->fresh()->reported_version);
         $this->assertNotNull($job->fresh()->upgrade_verified_at);
     }
 
@@ -173,7 +173,7 @@ class LocalAgentControlJobServiceTest extends TestCase
         $job = app(LocalAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
 
         $this->assertSame(LocalAgentControlJob::ACTION_UPGRADE, $job->action);
-        $this->assertSame('1.5.4', $job->expected_version, 'expected_version must come from the upgrade target itself, not the stale latest_local_agent_version override.');
+        $this->assertSame('1.5.5', $job->expected_version, 'expected_version must come from the upgrade target itself, not the stale latest_local_agent_version override.');
     }
 
     public function test_1_5_1_agent_requires_the_one_time_exact_commit_bootstrap(): void
@@ -217,6 +217,72 @@ class LocalAgentControlJobServiceTest extends TestCase
 
         $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
         app(LocalAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
+    }
+
+    // ------------------------------------------------------------------
+    // Root-cause fix (commit 9f7adfd shipped the Server Agent
+    // package-build poller without a Local Agent version bump): the
+    // capability predicate the Hub now gates ServerAgentPackageBuildJob
+    // queueing on, and the bootstrap-independence proof this
+    // (LocalAgentControlJobService, the Agent's OWN self-upgrade) must
+    // never depend on it.
+    // ------------------------------------------------------------------
+
+    public function test_supports_server_agent_package_build_requires_both_version_and_capability(): void
+    {
+        $minimum = (string) config('deployment.min_local_agent_version_for_server_agent_package_build');
+
+        $belowMinimumWithCapability = LocalAgent::factory()->productionBuild()->create([
+            'agent_version' => '1.5.4',
+            'capabilities' => ['server_agent_package_build' => true],
+        ]);
+        $this->assertFalse($belowMinimumWithCapability->supportsServerAgentPackageBuild());
+
+        $atMinimumWithoutCapability = LocalAgent::factory()->productionBuild()->create([
+            'agent_version' => $minimum,
+            'capabilities' => ['server_agent_package_build' => false],
+        ]);
+        $this->assertFalse($atMinimumWithoutCapability->supportsServerAgentPackageBuild());
+
+        $atMinimumWithCapability = LocalAgent::factory()->productionBuild()->create([
+            'agent_version' => $minimum,
+            'capabilities' => ['server_agent_package_build' => true],
+        ]);
+        $this->assertTrue($atMinimumWithCapability->supportsServerAgentPackageBuild());
+
+        $aboveMinimumWithCapability = LocalAgent::factory()->productionBuild()->create([
+            'agent_version' => '1.5.6',
+            'capabilities' => ['server_agent_package_build' => true],
+        ]);
+        $this->assertTrue($aboveMinimumWithCapability->supportsServerAgentPackageBuild());
+    }
+
+    /**
+     * Bootstrap-independence proof: an old Build Agent (1.5.4, no idea
+     * server_agent_package_build even exists) must remain fully able to
+     * receive its OWN exact-commit self-upgrade through this exact
+     * service/action — queueUpgrade() must never consult
+     * supportsServerAgentPackageBuild() or the new minimum-version config
+     * key. If it did, a stale builder could never reach eligibility in
+     * the first place (see ServerAgentControlJobServiceTest's own
+     * eligibility-gate tests for the OTHER half of this proof).
+     */
+    public function test_queue_upgrade_remains_usable_for_a_builder_that_does_not_support_server_agent_package_build(): void
+    {
+        $this->createUpgradeAuthority();
+        $agent = LocalAgent::factory()->approved()->create([
+            'operating_system' => 'Linux',
+            'agent_version' => '1.5.4',
+            'capabilities' => ['linux_self_upgrade' => true],
+            // Explicitly absent/false — the exact shape of the real,
+            // not-yet-upgraded Build Agent #15.
+        ]);
+        $this->assertFalse($agent->supportsServerAgentPackageBuild());
+
+        $job = app(LocalAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
+
+        $this->assertSame(LocalAgentControlJob::ACTION_UPGRADE, $job->action);
+        $this->assertSame(LocalAgentControlJob::STATUS_QUEUED, $job->status);
     }
 
     /** @return array{commit:string} */

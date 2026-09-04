@@ -60,15 +60,35 @@ class ServerAgentControlJobService
         if ($package === null) {
             $project = Project::query()->where('project_key', 'deployment-system')->where('is_active', true)->first();
             $builder = $project?->authoritativeBuildAgent;
-            if ($builder !== null) {
-                $this->packages->queueBuildIfMissing(
-                    $target['commit_hash'],
-                    $target['branch'],
-                    $expectedVersion,
-                    $target['repository_mapping'],
-                    $builder,
+
+            abort_if($builder === null, 409, 'No authoritative build Local Agent is configured for deployment-system; a Server Agent package cannot be materialized.');
+
+            // Root-cause fix (commit 9f7adfd shipped the Server Agent
+            // package-build poller without a matching Local Agent
+            // version bump): fail closed here, BEFORE queueing anything,
+            // rather than leaving a ServerAgentPackageBuildJob sitting
+            // queued forever against a builder that has no idea the
+            // endpoint exists. Deliberately never consulted by
+            // queueUpgrade() itself (this class's own upgrade action) or
+            // by LocalAgentControlJobService — a stale builder must
+            // always still be reachable through its own exact-commit
+            // self-upgrade regardless of this gate.
+            if (!$builder->supportsServerAgentPackageBuild()) {
+                $minimum = (string) config('deployment.min_local_agent_version_for_server_agent_package_build');
+                abort(
+                    409,
+                    'The authoritative build Local Agent (version ' . ($builder->agent_version ?? 'unknown')
+                        . ") does not support Server Agent package builds. Upgrade it to at least {$minimum} with the server_agent_package_build capability before a Server Agent package can be materialized.",
                 );
             }
+
+            $this->packages->queueBuildIfMissing(
+                $target['commit_hash'],
+                $target['branch'],
+                $expectedVersion,
+                $target['repository_mapping'],
+                $builder,
+            );
 
             abort(409, 'No verified Server Agent package exists yet for the exact target commit; a build has been queued — retry shortly.');
         }

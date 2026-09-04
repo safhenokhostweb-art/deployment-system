@@ -105,6 +105,24 @@ class LocalAgent extends Model
             && ($this->capabilities['assigned_artifact_publish_job_id'] ?? false) === true;
     }
 
+    /**
+     * Root-cause fix (commit 9f7adfd shipped the Server Agent
+     * package-build poller without a version bump): mirrors
+     * supportsAssignedArtifactUploads()'s exact version-AND-capability
+     * shape — never version alone — so ServerAgentControlJobService can
+     * fail closed before assigning a build job to a Local Agent whose
+     * installed runtime has no idea /api/local-agent/server-agent-package-jobs/next
+     * even exists.
+     */
+    public function supportsServerAgentPackageBuild(): bool
+    {
+        $minimum = (string) config('deployment.min_local_agent_version_for_server_agent_package_build');
+
+        return is_string($this->agent_version)
+            && version_compare($this->agent_version, $minimum, '>=')
+            && ($this->capabilities['server_agent_package_build'] ?? false) === true;
+    }
+
     public function changeDetectionJobs(): HasMany
     {
         return $this->hasMany(LocalChangeDetectionJob::class);

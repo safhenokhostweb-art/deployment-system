@@ -61,7 +61,7 @@ class LocalAgentVersionSyncTest extends TestCase
             $localAgentVersion,
             'deployment-local-agent/agent/agent.php and local-agent/agent.php must ship the exact same LOCAL_AGENT_VERSION — they are kept as mirrored copies.',
         );
-        $this->assertSame('1.5.4', $localAgentVersion, 'The transient artifact-fetch retry fix must ship as official Local Agent 1.5.4.');
+        $this->assertSame('1.5.5', $localAgentVersion, 'The Server Agent package-build capability (commit 9f7adfd) must ship as official Local Agent 1.5.5.');
     }
 
     /**
@@ -80,10 +80,22 @@ class LocalAgentVersionSyncTest extends TestCase
         $deploymentLocalAgentVersion = $this->extractLocalAgentVersion(base_path('../deployment-local-agent/agent/agent.php'));
         $localAgentVersion = $this->extractLocalAgentVersion(base_path('../local-agent/agent.php'));
 
-        $this->assertSame('1.5.4', $marker, 'service/.deployment/local-agent-version.json must declare the exact shipped Local Agent version.');
+        $this->assertSame('1.5.5', $marker, 'service/.deployment/local-agent-version.json must declare the exact shipped Local Agent version.');
         $this->assertSame($marker, $deploymentLocalAgentVersion, 'The in-service marker must match deployment-local-agent/agent/agent.php\'s LOCAL_AGENT_VERSION.');
         $this->assertSame($marker, $localAgentVersion, 'The in-service marker must match local-agent/agent.php\'s LOCAL_AGENT_VERSION.');
-        $this->assertSame($marker, config('deployment.min_local_agent_version_for_assigned_artifact'));
+        // Root-cause fix (commit 9f7adfd/the Server Agent package-build
+        // capability): the shipped marker version and the
+        // assigned-artifact protocol minimum are two INDEPENDENT
+        // thresholds that only coincided by timing when both were 1.5.4
+        // — assigned-artifact uploads were introduced then and have not
+        // changed since, so their own minimum has no obligation to track
+        // every later patch release. The real, permanent invariant is
+        // that the shipped version can never fall BELOW that minimum,
+        // never that it must equal it.
+        $this->assertTrue(
+            version_compare($marker, (string) config('deployment.min_local_agent_version_for_assigned_artifact'), '>='),
+            'The shipped Local Agent version must never fall below the assigned-artifact protocol minimum.',
+        );
     }
 
     public function test_hub_default_latest_version_matches_the_shipped_agent_version(): void
@@ -102,10 +114,15 @@ class LocalAgentVersionSyncTest extends TestCase
         $shippedVersion = $this->extractMarkerVersion();
         $source = file_get_contents(base_path('../deployment-local-agent/agent/agent.php'));
 
-        $this->assertSame($shippedVersion, config('deployment.min_local_agent_version_for_assigned_artifact'));
+        // See test_marker_matches_both_agent_trees_and_assigned_artifact_minimum's
+        // own comment: the assigned-artifact minimum is an independent,
+        // one-time threshold, never obligated to equal every later
+        // shipped version — only to never exceed it.
+        $this->assertTrue(version_compare($shippedVersion, (string) config('deployment.min_local_agent_version_for_assigned_artifact'), '>='));
         $this->assertSame('1.5.2', config('deployment.min_local_agent_version_for_exact_commit_upgrade'));
-        $this->assertTrue(version_compare('1.5.2', $shippedVersion, '<'), 'Installed 1.5.2 must remain eligible for the normal exact-commit upgrade to 1.5.4.');
+        $this->assertTrue(version_compare('1.5.2', $shippedVersion, '<'), 'Installed 1.5.2 must remain eligible for the normal exact-commit upgrade to 1.5.5.');
         $this->assertStringContainsString("'assigned_artifact_publish_job_id' => true", $source);
+        $this->assertStringContainsString("'server_agent_package_build' => true", $source);
     }
 
     public function test_both_packaged_uploaders_send_the_claimed_publish_job_public_id(): void
@@ -205,7 +222,7 @@ class LocalAgentVersionSyncTest extends TestCase
     public function test_stale_env_override_below_canonical_cannot_shadow_a_newer_release(): void
     {
         $canonical = LocalAgentVersionResolver::canonical();
-        $this->assertSame('1.5.4', $canonical);
+        $this->assertSame('1.5.5', $canonical);
 
         putenv('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION=1.5.2');
         try {
@@ -228,9 +245,9 @@ class LocalAgentVersionSyncTest extends TestCase
             putenv('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION');
         }
 
-        putenv('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION=1.5.4');
+        putenv('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION=1.5.5');
         try {
-            $this->assertSame('1.5.4', LocalAgentVersionResolver::effective());
+            $this->assertSame('1.5.5', LocalAgentVersionResolver::effective());
         } finally {
             putenv('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION');
         }

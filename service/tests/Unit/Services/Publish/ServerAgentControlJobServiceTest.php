@@ -44,9 +44,71 @@ class ServerAgentControlJobServiceTest extends TestCase
         try {
             app(ServerAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
         } finally {
-            // A build job must have been auto-queued so a retry can succeed.
+            // A build job must have been auto-queued (the default
+            // production-build authoritative builder is eligible) so a
+            // retry can succeed.
             $this->assertDatabaseCount('server_agent_package_build_jobs', 1);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Root-cause fix (commit 9f7adfd shipped the Server Agent
+    // package-build poller without a Local Agent version bump, and
+    // queueBuildIfMissing() had no eligibility check at all): the
+    // authoritative-builder eligibility gate.
+    // ------------------------------------------------------------------
+
+    public function test_queue_upgrade_refuses_to_queue_a_package_build_job_for_a_stale_builder_version(): void
+    {
+        $this->createUpgradeAuthority(['agent_version' => '1.5.4']); // below the new minimum, capability present
+        $agent = Agent::factory()->approved()->create(['agent_version' => '1.4.0']);
+
+        try {
+            app(ServerAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
+            $this->fail('Expected queueUpgrade() to fail closed for a stale builder version.');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
+            $this->assertSame(409, $e->getStatusCode());
+            $this->assertStringContainsString('does not support Server Agent package builds', $e->getMessage());
+        }
+        $this->assertDatabaseCount('server_agent_package_build_jobs', 0);
+    }
+
+    public function test_queue_upgrade_refuses_to_queue_a_package_build_job_for_a_builder_missing_the_capability(): void
+    {
+        $minimum = (string) config('deployment.min_local_agent_version_for_server_agent_package_build');
+        $this->createUpgradeAuthority([
+            'agent_version' => $minimum,
+            'capabilities' => ['git' => true, 'laravel_release_manifest' => true, 'assigned_artifact_publish_job_id' => true],
+        ]);
+        $agent = Agent::factory()->approved()->create(['agent_version' => '1.4.0']);
+
+        try {
+            app(ServerAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
+            $this->fail('Expected queueUpgrade() to fail closed for a builder missing the capability.');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
+            $this->assertSame(409, $e->getStatusCode());
+            $this->assertStringContainsString('does not support Server Agent package builds', $e->getMessage());
+        }
+        $this->assertDatabaseCount('server_agent_package_build_jobs', 0);
+    }
+
+    public function test_queue_upgrade_queues_a_package_build_job_for_a_builder_exactly_at_the_minimum(): void
+    {
+        $minimum = (string) config('deployment.min_local_agent_version_for_server_agent_package_build');
+        $authority = $this->createUpgradeAuthority(['agent_version' => $minimum]);
+        $agent = Agent::factory()->approved()->create(['agent_version' => '1.4.0']);
+
+        try {
+            app(ServerAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
+            $this->fail('Expected queueUpgrade() to abort with the "retry shortly" message once a build has been queued.');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
+            $this->assertSame(409, $e->getStatusCode());
+            $this->assertStringContainsString('a build has been queued', $e->getMessage());
+        }
+
+        $job = ServerAgentPackageBuildJob::sole();
+        $this->assertSame($authority['commit'], $job->commit_hash);
+        $this->assertSame($minimum, $job->builder_agent_version);
     }
 
     public function test_queue_upgrade_creates_a_queued_job_with_verified_target(): void
@@ -210,6 +272,44 @@ class ServerAgentControlJobServiceTest extends TestCase
         $this->assertSame(ServerAgentPackageBuildJob::STATUS_RUNNING, $claimed->status);
     }
 
+    public function test_queue_build_if_missing_persists_the_builders_point_in_time_version(): void
+    {
+        $builder = LocalAgent::factory()->productionBuild()->create(['agent_version' => '1.5.5']);
+        $service = app(ServerAgentPackageService::class);
+
+        $job = $service->queueBuildIfMissing(str_repeat('9', 40), 'main', '1.4.1', 'deployment-system', $builder);
+
+        $this->assertSame('1.5.5', $job->builder_agent_version);
+        // Never overloaded with the TARGET Server Agent version.
+        $this->assertSame('1.4.1', $job->agent_version);
+    }
+
+    /**
+     * Root-cause fix compatibility proof: Production ServerAgentPackageBuildJob
+     * #1 was queued before builder_agent_version existed and must remain
+     * fully claimable — claimNextBuildJob() must never require this
+     * column to be non-null.
+     */
+    public function test_a_legacy_build_job_with_a_null_builder_version_remains_claimable(): void
+    {
+        $builder = LocalAgent::factory()->productionBuild()->create();
+        $legacyJob = ServerAgentPackageBuildJob::create([
+            'local_agent_id' => $builder->id,
+            'commit_hash' => str_repeat('8', 40),
+            'branch' => 'master',
+            'agent_version' => '1.4.1',
+            'repository_mapping' => 'deployment-system',
+            'status' => ServerAgentPackageBuildJob::STATUS_QUEUED,
+            'builder_agent_version' => null,
+        ]);
+
+        $claimed = app(ServerAgentPackageService::class)->claimNextBuildJob($builder);
+
+        $this->assertSame($legacyJob->id, $claimed->id);
+        $this->assertSame(ServerAgentPackageBuildJob::STATUS_RUNNING, $claimed->status);
+        $this->assertNull($claimed->builder_agent_version, 'Claiming a legacy row must not retroactively fabricate a builder_agent_version it never recorded.');
+    }
+
     public function test_record_package_uploaded_rejects_a_commit_mismatch(): void
     {
         $builder = LocalAgent::factory()->productionBuild()->create();
@@ -252,12 +352,18 @@ class ServerAgentControlJobServiceTest extends TestCase
         $this->assertSame($package->id, $job->fresh()->server_agent_package_id);
     }
 
-    /** @return array{project:Project,commit:string} */
-    private function createUpgradeAuthority(): array
+    /**
+     * @param array<string, mixed> $builderOverrides applied on top of the
+     *     default (eligible) productionBuild() state — used to construct
+     *     a deliberately stale/incapable builder for the eligibility-gate
+     *     tests above.
+     * @return array{project:Project,commit:string}
+     */
+    private function createUpgradeAuthority(array $builderOverrides = []): array
     {
         $commit = str_repeat('a', 40);
         $project = Project::factory()->create(['project_key' => 'deployment-system', 'branch' => 'master']);
-        $builder = LocalAgent::factory()->productionBuild()->create();
+        $builder = LocalAgent::factory()->productionBuild()->create($builderOverrides);
         $project->update(['authoritative_build_local_agent_id' => $builder->id]);
         $release = Release::factory()->ready()->create(['project_id' => $project->id, 'commit_hash' => $commit, 'branch' => 'master']);
         Deployment::factory()->create([

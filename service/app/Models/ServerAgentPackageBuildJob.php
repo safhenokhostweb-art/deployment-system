@@ -28,11 +28,19 @@ class ServerAgentPackageBuildJob extends Model
     protected $fillable = [
         'public_id',
         'local_agent_id',
+        // The TARGET Server Agent version this build is for (e.g.
+        // "1.4.1") — never the builder's own version. See
+        // builder_agent_version below for that.
+        'agent_version',
         'commit_hash',
         'branch',
-        'agent_version',
         'repository_mapping',
         'status',
+        // Point-in-time audit fact: what agent_version the assigned
+        // Local Agent (local_agent_id) reported when this job was
+        // queued — nullable for rows queued before this column existed
+        // (e.g. Production job #1), never required for claiming.
+        'builder_agent_version',
         'server_agent_package_id',
         'error_message',
     ];

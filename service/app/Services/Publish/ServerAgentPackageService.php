@@ -54,6 +54,12 @@ class ServerAgentPackageService
                 'agent_version' => $agentVersion,
                 'repository_mapping' => $repositoryMapping,
                 'status' => ServerAgentPackageBuildJob::STATUS_QUEUED,
+                // Point-in-time audit fact only — the caller is
+                // responsible for having already verified this builder
+                // is eligible (see LocalAgent::supportsServerAgentPackageBuild()
+                // / ServerAgentControlJobService::queueUpgrade()); this
+                // is not itself an eligibility check.
+                'builder_agent_version' => $builder->agent_version,
             ]);
         });
     }

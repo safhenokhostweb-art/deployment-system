@@ -322,6 +322,22 @@ return [
     // upgrade package. Older capable Agents use the explicit bootstrap mode.
     'min_local_agent_version_for_exact_commit_upgrade' => (string) env('DEPLOYMENT_MIN_LOCAL_AGENT_VERSION_FOR_EXACT_COMMIT_UPGRADE', '1.5.2'),
 
+    // Root-cause fix (commit 9f7adfd shipped the Server Agent
+    // package-build poller and materializer without a matching Local
+    // Agent version bump, leaving a real, already-queued
+    // ServerAgentPackageBuildJob unclaimable by every existing 1.5.4
+    // builder): first Local Agent release that polls
+    // /api/local-agent/server-agent-package-jobs/next and reports
+    // capabilities['server_agent_package_build']. See
+    // LocalAgent::supportsServerAgentPackageBuild() for the version +
+    // capability check this key backs, and
+    // ServerAgentControlJobService::queueUpgrade() for the fail-closed
+    // gate that consults it before queueing a new build job — never
+    // consulted by LocalAgentControlJobService::queueUpgrade() itself,
+    // so a stale builder can always still be offered its own exact-commit
+    // self-upgrade to reach this version in the first place.
+    'min_local_agent_version_for_server_agent_package_build' => (string) env('DEPLOYMENT_MIN_LOCAL_AGENT_VERSION_FOR_SERVER_AGENT_PACKAGE_BUILD', '1.5.5'),
+
     // A production artifact must be built from fresh workspace evidence
     // reported by the one authoritative Agent configured on the Project.
     'artifact_workspace_report_max_age_seconds' => (int) env('DEPLOYMENT_ARTIFACT_WORKSPACE_REPORT_MAX_AGE_SECONDS', 300),

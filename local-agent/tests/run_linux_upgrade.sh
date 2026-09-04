@@ -171,11 +171,11 @@ check 'historical 1.5.1 runtime can bootstrap through the official 1.5.2 package
 check 'bootstrap activates canonical Agent 1.5.2' grep -q "LOCAL_AGENT_VERSION = '1.5.2'" "$bootstrap_install/agent.php"
 check 'bootstrap package includes exact-commit upgrade materialization' test -f "$bootstrap_install/lib/LinuxUpgradePackageMaterializer.php"
 
-# Normal post-bootstrap delivery: an installed 1.5.3 runtime activates the
-# current official 1.5.4 package through upgrade-linux.sh, with no bootstrap
+# Normal post-bootstrap delivery: an installed 1.5.4 runtime activates the
+# current official 1.5.5 package through upgrade-linux.sh, with no bootstrap
 # script, manual copy, downgrade, or mutable-workspace authority involved.
-normal_install="$TMP_ROOT/normal-1.5.4-install"
-make_runtime "$normal_install" 1.5.3
+normal_install="$TMP_ROOT/normal-1.5.5-install"
+make_runtime "$normal_install" 1.5.4
 printf '%s\n' '<?php return ["token" => "normal-upgrade-preserve"];' >"$normal_install/config.php"
 normal_config_before="$(sha256sum "$normal_install/config.php" | awk '{print $1}')"
 normal_output="$(
@@ -186,11 +186,11 @@ normal_output="$(
         --source-dir "$ROOT/deployment-local-agent/agent" \
         --install-dir "$normal_install" \
         --agent-managed-restart \
-        --expected-version 1.5.4
+        --expected-version 1.5.5
 )"
-check 'installed 1.5.3 normally upgrades to official 1.5.4' grep -q 'UPGRADE_OK old_version=1.5.3 new_version=1.5.4' <<<"$normal_output"
-check 'normal upgrade activates canonical Agent 1.5.4' grep -q "LOCAL_AGENT_VERSION = '1.5.4'" "$normal_install/agent.php"
-check 'normal 1.5.3 to 1.5.4 upgrade preserves config.php' test "$normal_config_before" = "$(sha256sum "$normal_install/config.php" | awk '{print $1}')"
+check 'installed 1.5.4 normally upgrades to official 1.5.5' grep -q 'UPGRADE_OK old_version=1.5.4 new_version=1.5.5' <<<"$normal_output"
+check 'normal upgrade activates canonical Agent 1.5.5' grep -q "LOCAL_AGENT_VERSION = '1.5.5'" "$normal_install/agent.php"
+check 'normal 1.5.4 to 1.5.5 upgrade preserves config.php' test "$normal_config_before" = "$(sha256sum "$normal_install/config.php" | awk '{print $1}')"
 
 printf '\nLinux upgrader: %d passed, %d failed\n' "$passed" "$failed"
 test "$failed" -eq 0
