@@ -38,13 +38,27 @@ namespace LocalAgent;
 final class WorkspaceSourcePreparer
 {
     private readonly DependencyRepositoryResolver $repositories;
+    private readonly RetryPolicy $retryPolicy;
+    private readonly RetryableGitFetch $fetchRetrier;
+    /** @var \Closure(array<int,string>,string,int,?callable):array{exitCode:int,output:string,timedOut:bool}|null */
+    private readonly ?\Closure $fetchRunner;
 
     public function __construct(
         private readonly GitManager $git,
         private readonly int $archiveTimeoutSeconds = 300,
         ?DependencyRepositoryResolver $repositories = null,
+        ?RetryPolicy $retryPolicy = null,
+        private readonly ?Logger $logger = null,
+        /**
+         * @var (callable(array<int,string>,string,int,?callable):array{exitCode:int,output:string,timedOut:bool})|null
+         *     Test-only seam — see RetryableGitFetch::run()'s own docblock.
+         */
+        ?callable $fetchRunner = null,
     ) {
         $this->repositories = $repositories ?? new DependencyRepositoryResolver($git);
+        $this->retryPolicy = $retryPolicy ?? new RetryPolicy();
+        $this->fetchRetrier = new RetryableGitFetch($git, $this->retryPolicy, $logger);
+        $this->fetchRunner = $fetchRunner === null ? null : \Closure::fromCallable($fetchRunner);
     }
 
     /**
@@ -95,7 +109,7 @@ final class WorkspaceSourcePreparer
             'transport' => $transport['category'],
         ];
         $this->initializeWorkspaceRepository($workspace->projectDir(), $transport['url'], $onTick);
-        $this->runOrFail(['git', 'fetch', '--no-tags', '--prune', 'origin', $branch], $workspace->projectDir(), $this->git->timeoutFor('fetch'), 'fetching the authoritative branch', $onTick, $context);
+        $this->fetchWithRetry(['git', 'fetch', '--no-tags', '--prune', 'origin', $branch], $workspace->projectDir(), $this->git->timeoutFor('fetch'), 'fetching the authoritative branch', $onTick, $context);
         $this->runOrFail(['git', 'cat-file', '-e', "{$commitHash}^{commit}"], $workspace->projectDir(), 30, 'validating the requested commit', $onTick);
         $this->runOrFail(['git', 'merge-base', '--is-ancestor', $commitHash, 'FETCH_HEAD'], $workspace->projectDir(), 30, 'validating commit reachability', $onTick);
         $this->runOrFail(['git', 'checkout', '--detach', '--force', $commitHash], $workspace->projectDir(), 60, 'checking out the exact commit', $onTick);
@@ -116,7 +130,7 @@ final class WorkspaceSourcePreparer
             if ($composerPaths !== $requestedPaths) {
                 throw new LocalBuildFailedException('local_workspace_prepare_failed', 'Dependency contract must pin every Composer path repository exactly once.');
             }
-            $dependencyLocks = (new PinnedDependencyMaterializer($this->git))->materialize($workspace, $dependencies, $dependencyAllowlist, $repositoryMappings, $onTick);
+            $dependencyLocks = (new PinnedDependencyMaterializer($this->git, null, $this->retryPolicy, $this->logger))->materialize($workspace, $dependencies, $dependencyAllowlist, $repositoryMappings, $onTick);
         } else {
             // Contract v1 compatibility only. Projects opted into pinning never reach this branch.
             $this->copyPathDependencies($workspace, $repositoryPath);
@@ -232,14 +246,45 @@ final class WorkspaceSourcePreparer
     {
         $result = $this->git->run($command, $cwd, $timeout, $onTick);
         if ($result['exitCode'] !== 0) {
-            $timedOut = ($result['timedOut'] ?? false) === true;
-            $details = "exit_code={$result['exitCode']}, timed_out=" . ($timedOut ? 'true' : 'false')
-                . ', stderr_category=' . DependencyRepositoryResolver::stderrCategory((string) ($result['output'] ?? ''), $timedOut);
-            if ($context !== []) {
-                $details = "mapping={$context['mapping']}, branch={$context['branch']}, repository_identity={$context['identity']}, transport={$context['transport']}, " . $details;
-            }
-            throw new LocalBuildFailedException('local_workspace_prepare_failed', "Primary repository materialization failed while {$operation} [{$details}].");
+            throw $this->materializationFailure($operation, $context, $result);
         }
+    }
+
+    /**
+     * Root-cause fix (Release #50/#53 primary-repository materialization
+     * failures): the ONE network-exposed step in this whole method — see
+     * RetryableGitFetch's own docblock for the full retry/logging
+     * contract. Every other git command here (init, remote add, cat-file,
+     * merge-base, checkout) stays exactly as single-attempt as before;
+     * only the actual branch fetch retries a classified-transient
+     * failure. The externally-compatible failure message on final
+     * failure is byte-identical to what runOrFail() has always produced —
+     * only the LAST attempt's result is ever surfaced there.
+     *
+     * @param array{mapping?: string, branch?: string, identity?: string, transport?: string} $context
+     */
+    private function fetchWithRetry(array $command, string $cwd, int $timeout, string $operation, ?callable $onTick, array $context = []): void
+    {
+        $result = $this->fetchRetrier->run($command, $cwd, $timeout, $onTick, $operation, $context, $this->fetchRunner);
+        if ($result['exitCode'] !== 0) {
+            throw $this->materializationFailure($operation, $context, $result);
+        }
+    }
+
+    /**
+     * @param array{mapping?: string, branch?: string, identity?: string, transport?: string} $context
+     * @param array{exitCode: int, output: string, timedOut: bool} $result
+     */
+    private function materializationFailure(string $operation, array $context, array $result): LocalBuildFailedException
+    {
+        $timedOut = ($result['timedOut'] ?? false) === true;
+        $details = "exit_code={$result['exitCode']}, timed_out=" . ($timedOut ? 'true' : 'false')
+            . ', stderr_category=' . DependencyRepositoryResolver::stderrCategory((string) ($result['output'] ?? ''), $timedOut);
+        if ($context !== []) {
+            $details = "mapping={$context['mapping']}, branch={$context['branch']}, repository_identity={$context['identity']}, transport={$context['transport']}, " . $details;
+        }
+
+        return new LocalBuildFailedException('local_workspace_prepare_failed', "Primary repository materialization failed while {$operation} [{$details}].");
     }
 
     private function archiveCommitToZip(string $repositoryPath, string $commitHash, ?callable $onTick): string

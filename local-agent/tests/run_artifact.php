@@ -27,6 +27,7 @@ declare(strict_types=1);
 
 require __DIR__ . '/../lib/Security.php';
 require __DIR__ . '/../lib/Logger.php';
+require __DIR__ . '/../lib/SecretRedactor.php';
 require __DIR__ . '/../lib/Client.php';
 require __DIR__ . '/../lib/GitManager.php';
 require __DIR__ . '/../lib/LocalBuildFailedException.php';
@@ -35,6 +36,8 @@ require __DIR__ . '/../lib/ArtifactSourceResolver.php';
 require __DIR__ . '/../lib/ApplicationRoot.php';
 require __DIR__ . '/../lib/LocalBuildRunner.php';
 require __DIR__ . '/../lib/RetryPolicy.php';
+require __DIR__ . '/../lib/GitTransportFailureClassifier.php';
+require __DIR__ . '/../lib/RetryableGitFetch.php';
 require __DIR__ . '/../lib/SafeFilesystem.php';
 require __DIR__ . '/../lib/BuildWorkspace.php';
 require __DIR__ . '/../lib/DependencyRepositoryResolver.php';

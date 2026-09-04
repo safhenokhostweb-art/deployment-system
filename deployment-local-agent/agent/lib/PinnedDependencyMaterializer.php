@@ -8,10 +8,24 @@ namespace LocalAgent;
 final class PinnedDependencyMaterializer
 {
     private readonly DependencyRepositoryResolver $repositories;
+    private readonly RetryableGitFetch $fetchRetrier;
+    /** @var \Closure(array<int,string>,string,int,?callable):array{exitCode:int,output:string,timedOut:bool}|null */
+    private readonly ?\Closure $fetchRunner;
 
-    public function __construct(private readonly GitManager $git, ?DependencyRepositoryResolver $repositories = null)
-    {
+    /**
+     * @param (callable(array<int,string>,string,int,?callable):array{exitCode:int,output:string,timedOut:bool})|null $fetchRunner
+     *     Test-only seam — see RetryableGitFetch::run()'s own docblock.
+     */
+    public function __construct(
+        private readonly GitManager $git,
+        ?DependencyRepositoryResolver $repositories = null,
+        ?RetryPolicy $retryPolicy = null,
+        ?Logger $logger = null,
+        ?callable $fetchRunner = null,
+    ) {
         $this->repositories = $repositories ?? new DependencyRepositoryResolver($git);
+        $this->fetchRetrier = new RetryableGitFetch($git, $retryPolicy ?? new RetryPolicy(), $logger);
+        $this->fetchRunner = $fetchRunner === null ? null : \Closure::fromCallable($fetchRunner);
     }
 
     /**
@@ -51,7 +65,7 @@ final class PinnedDependencyMaterializer
                 $context = ['mapping' => $normalized['repository_mapping'], 'branch' => $normalized['branch']];
                 $this->run(['git', 'init'], $checkout, 30, 'initializing dependency checkout', $onTick, $context);
                 $this->run(['git', 'remote', 'add', 'origin', $repositoryUrl], $checkout, 30, 'configuring dependency mapping', $onTick, $context);
-                $this->run(['git', 'fetch', '--no-tags', '--prune', 'origin', $normalized['branch']], $checkout, $this->git->timeoutFor('fetch'), 'fetching dependency branch', $onTick, $context);
+                $this->runFetchWithRetry(['git', 'fetch', '--no-tags', '--prune', 'origin', $normalized['branch']], $checkout, $this->git->timeoutFor('fetch'), 'fetching dependency branch', $onTick, $context);
                 $this->run(['git', 'cat-file', '-e', $normalized['commit_sha'] . '^{commit}'], $checkout, 30, 'validating dependency commit', $onTick, $context);
                 $this->run(['git', 'merge-base', '--is-ancestor', $normalized['commit_sha'], 'FETCH_HEAD'], $checkout, 30, 'validating dependency reachability', $onTick, $context);
                 $checkouts[$checkoutKey] = $checkout;
@@ -159,12 +173,44 @@ final class PinnedDependencyMaterializer
     {
         $result = $this->git->run($command, $cwd, $timeout, $onTick);
         if ($result['exitCode'] !== 0) {
-            $mapping = $context['mapping'] ?? 'unknown';
-            $branch = $context['branch'] ?? 'unknown';
-            $timedOut = ($result['timedOut'] ?? false) === true ? 'true' : 'false';
-            $category = DependencyRepositoryResolver::stderrCategory((string) ($result['output'] ?? ''), $timedOut === 'true');
-            throw $this->failure("Dependency materialization failed while {$operation} [mapping={$mapping}, branch={$branch}, exit_code={$result['exitCode']}, timed_out={$timedOut}, stderr_category={$category}].");
+            throw $this->materializationFailure($operation, $context, $result);
         }
+    }
+
+    /**
+     * Root-cause fix (Release #50/#53 primary-repository materialization
+     * failures): the ONE network-exposed step among this method's git
+     * commands — see RetryableGitFetch's own docblock for the full
+     * retry/logging contract, shared verbatim with
+     * WorkspaceSourcePreparer's primary repository fetch so the two paths
+     * can never diverge. init/remote-add/cat-file/merge-base stay exactly
+     * as single-attempt as before; only the branch fetch retries a
+     * classified-transient failure. The externally-compatible failure
+     * message on final failure is byte-identical to what this class has
+     * always produced — only the LAST attempt's result is ever surfaced.
+     *
+     * @param array{mapping?: string, branch?: string} $context
+     */
+    private function runFetchWithRetry(array $command, string $cwd, int $timeout, string $operation, ?callable $onTick, array $context = []): void
+    {
+        $result = $this->fetchRetrier->run($command, $cwd, $timeout, $onTick, $operation, $context, $this->fetchRunner);
+        if ($result['exitCode'] !== 0) {
+            throw $this->materializationFailure($operation, $context, $result);
+        }
+    }
+
+    /**
+     * @param array{mapping?: string, branch?: string} $context
+     * @param array{exitCode: int, output: string, timedOut: bool} $result
+     */
+    private function materializationFailure(string $operation, array $context, array $result): LocalBuildFailedException
+    {
+        $mapping = $context['mapping'] ?? 'unknown';
+        $branch = $context['branch'] ?? 'unknown';
+        $timedOut = ($result['timedOut'] ?? false) === true ? 'true' : 'false';
+        $category = DependencyRepositoryResolver::stderrCategory((string) ($result['output'] ?? ''), $timedOut === 'true');
+
+        return $this->failure("Dependency materialization failed while {$operation} [mapping={$mapping}, branch={$branch}, exit_code={$result['exitCode']}, timed_out={$timedOut}, stderr_category={$category}].");
     }
 
     private function safeRelativePath(string $path, bool $allowParentSegments = false): bool

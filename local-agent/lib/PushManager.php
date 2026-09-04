@@ -38,7 +38,7 @@ final class PushManager
                 : $this->git->run(['git', 'push', $remoteName, $branch], $repositoryPath, $this->git->timeoutFor('push'), $onTick);
             if ($result['exitCode'] === 0) return $result['output'];
             $message = trim($result['output']);
-            if (GitPushFailureClassifier::isRetryable($message)) {
+            if (GitTransportFailureClassifier::isRetryable($message)) {
                 throw new RetryableOperationException('transient git push transport failure');
             }
             $reason = $result['timedOut'] ? 'timed out' : 'failed';

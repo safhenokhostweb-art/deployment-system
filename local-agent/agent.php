@@ -32,12 +32,14 @@ declare(strict_types=1);
 
 require __DIR__ . '/lib/Security.php';
 require __DIR__ . '/lib/Logger.php';
+require __DIR__ . '/lib/SecretRedactor.php';
 require __DIR__ . '/lib/Client.php';
 require __DIR__ . '/lib/GitCommandException.php';
 require __DIR__ . '/lib/JobMaxRuntimeExceededException.php';
 require __DIR__ . '/lib/GitManager.php';
 require __DIR__ . '/lib/RetryPolicy.php';
-require __DIR__ . '/lib/GitPushFailureClassifier.php';
+require __DIR__ . '/lib/GitTransportFailureClassifier.php';
+require __DIR__ . '/lib/RetryableGitFetch.php';
 require __DIR__ . '/lib/CommitManager.php';
 require __DIR__ . '/lib/PushManager.php';
 require __DIR__ . '/lib/IgnoreRules.php';
@@ -203,7 +205,7 @@ $artifactUploader = new ArtifactUploader(
         logger: $logger,
         npmGracePeriodSeconds: $npmGracePeriodSeconds,
     ),
-    new WorkspaceSourcePreparer($git),
+    new WorkspaceSourcePreparer($git, logger: $logger),
     new ArtifactBuilder(),
     $client,
     $logger,

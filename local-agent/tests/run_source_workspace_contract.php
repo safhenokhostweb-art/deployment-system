@@ -9,6 +9,10 @@ require __DIR__ . '/../lib/SafeFilesystem.php';
 require __DIR__ . '/../lib/Logger.php';
 require __DIR__ . '/../lib/BuildWorkspace.php';
 require __DIR__ . '/../lib/SafetyChecker.php';
+require __DIR__ . '/../lib/RetryPolicy.php';
+require __DIR__ . '/../lib/GitTransportFailureClassifier.php';
+require __DIR__ . '/../lib/SecretRedactor.php';
+require __DIR__ . '/../lib/RetryableGitFetch.php';
 require __DIR__ . '/../lib/DependencyRepositoryResolver.php';
 require __DIR__ . '/../lib/WorkspaceSourcePreparer.php';
 

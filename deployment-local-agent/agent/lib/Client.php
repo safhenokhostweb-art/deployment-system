@@ -111,7 +111,7 @@ final class Client
                 try {
                     $decoded = json_decode($response, true, 512, JSON_THROW_ON_ERROR);
                 } catch (\JsonException) {
-                    $this->logger->error("Non-JSON response from {$path} (HTTP {$status}): " . self::redactForLog(substr($response, 0, 500)));
+                    $this->logger->error("Non-JSON response from {$path} (HTTP {$status}): " . SecretRedactor::redactForLog(substr($response, 0, 500)));
                     $decoded = [];
                 }
             }
@@ -206,7 +206,7 @@ final class Client
         } catch (\JsonException) {
             $this->logger->error(
                 "Non-JSON response from {$path} (HTTP {$status}): " .
-                self::redactForLog(substr($response, 0, 500))
+                SecretRedactor::redactForLog(substr($response, 0, 500))
             );
 
             $decoded = [];
@@ -219,21 +219,13 @@ final class Client
     ];
 }
 
-    /**
-     * Phase 5.5: this agent's own token/secret never reach a log line
-     * (they only ever go into curl headers, see request() above) — but an
-     * unrecognized Hub response body is logged raw on a JSON-decode
-     * failure, and that response is server-controlled text this agent
-     * doesn't otherwise inspect. Mirrors SecretRedactor's key=value/Bearer
-     * patterns (conceptually, not by reusing the class — local-agent/ has
-     * zero Composer dependencies by design) as a defensive last line, not
-     * because a leak is expected here.
-     */
-    private static function redactForLog(string $text): string
-    {
-        $text = preg_replace('/(api[_-]?key|secret|token|password|passwd|access[_-]?key|private[_-]?key)("?\s*[:=]\s*"?)[^\s"&,}]+/i', '$1$2[REDACTED]', $text) ?? $text;
-        $text = preg_replace('/(bearer\s+)[A-Za-z0-9._-]{16,}/i', '$1[REDACTED]', $text) ?? $text;
-
-        return $text;
-    }
+    // Phase 5.5: this agent's own token/secret never reach a log line
+    // (they only ever go into curl headers, see request() above) — but an
+    // unrecognized Hub response body is logged raw on a JSON-decode
+    // failure, and that response is server-controlled text this agent
+    // doesn't otherwise inspect. Redacted via the shared
+    // SecretRedactor::redactForLog() above (extracted from this class's
+    // own former private copy so RetryableGitFetch's fetch-diagnostic
+    // logging uses the identical, single redaction pass rather than a
+    // second drifting copy).
 }

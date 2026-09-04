@@ -6,11 +6,11 @@ declare(strict_types=1);
 require __DIR__ . '/../lib/GitCommandException.php';
 require __DIR__ . '/../lib/GitManager.php';
 require __DIR__ . '/../lib/RetryPolicy.php';
-require __DIR__ . '/../lib/GitPushFailureClassifier.php';
+require __DIR__ . '/../lib/GitTransportFailureClassifier.php';
 require __DIR__ . '/../lib/PushManager.php';
 
 use LocalAgent\GitManager;
-use LocalAgent\GitPushFailureClassifier;
+use LocalAgent\GitTransportFailureClassifier;
 use LocalAgent\PushManager;
 use LocalAgent\RetryPolicy;
 
@@ -45,8 +45,8 @@ pushCheck('transient exhaustion message is secret-safe', !str_contains($message,
 $nonRetryable = ['authentication failure' => 'fatal: Authentication failed', 'permission denied' => 'Permission denied (publickey).', 'repository not found' => 'remote: Repository not found.', 'non-fast-forward' => '! [rejected] main -> main (non-fast-forward)', 'protected branch' => 'remote: protected branch hook declined', 'policy rejection' => 'remote: push declined due to policy', 'invalid remote' => "fatal: 'bogus' does not appear to be a git repository"];
 foreach ($nonRetryable as $label => $output) { $attempt = 0; $policy = new RetryPolicy(static function (int $seconds): void { throw new RuntimeException("unexpected sleep {$seconds}"); }); $manager = new PushManager($git, $policy, static function () use (&$attempt, $output): array { $attempt++; return ['exitCode' => 128, 'output' => $output, 'timedOut' => false]; }); try { $manager->push($fixture['repo'], 'origin', 'main'); } catch (RuntimeException) {} pushCheck("{$label} is not retried", $attempt === 1); }
 
-foreach (['connection reset', 'Connection timed out', 'connection closed', 'temporary failure in name resolution', 'Could not resolve host: git.example', 'kex_exchange_identification: Connection closed', 'remote end hung up unexpectedly'] as $output) pushCheck("classifier accepts transient: {$output}", GitPushFailureClassifier::isRetryable($output));
-foreach ($nonRetryable as $label => $output) pushCheck("classifier rejects {$label}", !GitPushFailureClassifier::isRetryable($output));
+foreach (['connection reset', 'Connection timed out', 'connection closed', 'temporary failure in name resolution', 'Could not resolve host: git.example', 'kex_exchange_identification: Connection closed', 'remote end hung up unexpectedly'] as $output) pushCheck("classifier accepts transient: {$output}", GitTransportFailureClassifier::isRetryable($output));
+foreach ($nonRetryable as $label => $output) pushCheck("classifier rejects {$label}", !GitTransportFailureClassifier::isRetryable($output));
 $afterStatus = $git->run(['git', 'status', '--porcelain'], $fixture['repo'], 30)['output'];
 pushCheck('push retries leave the working tree unchanged', $beforeStatus === $afterStatus && $git->lastCommitHash($fixture['repo']) === $fixture['commit']);
 
