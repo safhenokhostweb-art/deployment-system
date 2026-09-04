@@ -117,7 +117,7 @@ class ProcessGitHubWebhookPushTest extends TestCase
      * to end: an authoritative production_build Agent still on 1.5.2 (the
      * exact version installed in production) is otherwise fully healthy
      * (approved, online, capable) but below
-     * min_local_agent_version_for_assigned_artifact (1.5.3) — so no
+     * min_local_agent_version_for_assigned_artifact (1.5.4) — so no
      * build_artifact PublishJob can be created for this push (Release #39
      * had none). Under the old design this was a bare silent catch: no
      * PublishJob, no failure_code, no audit trail, and no path back to
@@ -145,7 +145,7 @@ class ProcessGitHubWebhookPushTest extends TestCase
 
         // The Agent's own exact-commit upgrade authority: a ready Release
         // and succeeded Deployment for the deployment-system project,
-        // shipping canonical Agent 1.5.3 (the real, currently checked-out
+        // shipping canonical Agent 1.5.4 (the real, currently checked-out
         // agent.php — see LocalAgentVersionResolver::canonical()).
         $upgradeCommit = str_repeat('c', 40);
         $upgradeProject = Project::factory()->create(['project_key' => 'deployment-system', 'branch' => 'master']);
@@ -174,7 +174,7 @@ class ProcessGitHubWebhookPushTest extends TestCase
 
         $upgradeJob = LocalAgentControlJob::where('local_agent_id', $agent->id)->where('action', LocalAgentControlJob::ACTION_UPGRADE)->sole();
         $this->assertSame(LocalAgentControlJob::STATUS_QUEUED, $upgradeJob->status);
-        $this->assertSame('1.5.3', $upgradeJob->expected_version);
+        $this->assertSame('1.5.4', $upgradeJob->expected_version);
 
         $this->assertDatabaseHas('audit_log_entries', [
             'action' => 'release.artifact_build_blocked_by_authoritative_agent',

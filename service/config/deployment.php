@@ -298,7 +298,7 @@ return [
     // Current Local Agent release required for assigned artifact uploads.
     // This gate tracks the shipped Agent version; unassigned/manual artifact
     // uploads remain governed by the older release-manifest minimum above.
-    'min_local_agent_version_for_assigned_artifact' => (string) env('DEPLOYMENT_MIN_LOCAL_AGENT_VERSION_FOR_ASSIGNED_ARTIFACT', '1.5.3'),
+    'min_local_agent_version_for_assigned_artifact' => (string) env('DEPLOYMENT_MIN_LOCAL_AGENT_VERSION_FOR_ASSIGNED_ARTIFACT', '1.5.4'),
 
     // First Agent protocol that fetches and verifies an exact-commit Linux
     // upgrade package. Older capable Agents use the explicit bootstrap mode.

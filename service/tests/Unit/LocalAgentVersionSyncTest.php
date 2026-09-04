@@ -43,7 +43,7 @@ class LocalAgentVersionSyncTest extends TestCase
             $localAgentVersion,
             'deployment-local-agent/agent/agent.php and local-agent/agent.php must ship the exact same LOCAL_AGENT_VERSION — they are kept as mirrored copies.',
         );
-        $this->assertSame('1.5.3', $localAgentVersion, 'The primary Artifact transport fix must ship as official Local Agent 1.5.3.');
+        $this->assertSame('1.5.4', $localAgentVersion, 'The transient artifact-fetch retry fix must ship as official Local Agent 1.5.4.');
     }
 
     public function test_hub_default_latest_version_matches_the_shipped_agent_version(): void
@@ -64,7 +64,7 @@ class LocalAgentVersionSyncTest extends TestCase
 
         $this->assertSame($shippedVersion, config('deployment.min_local_agent_version_for_assigned_artifact'));
         $this->assertSame('1.5.2', config('deployment.min_local_agent_version_for_exact_commit_upgrade'));
-        $this->assertTrue(version_compare('1.5.2', $shippedVersion, '<'), 'Installed 1.5.2 must remain eligible for the normal exact-commit upgrade to 1.5.3.');
+        $this->assertTrue(version_compare('1.5.2', $shippedVersion, '<'), 'Installed 1.5.2 must remain eligible for the normal exact-commit upgrade to 1.5.4.');
         $this->assertStringContainsString("'assigned_artifact_publish_job_id' => true", $source);
     }
 
@@ -137,7 +137,7 @@ class LocalAgentVersionSyncTest extends TestCase
     public function test_stale_env_override_below_canonical_cannot_shadow_a_newer_release(): void
     {
         $canonical = LocalAgentVersionResolver::canonical();
-        $this->assertSame('1.5.3', $canonical);
+        $this->assertSame('1.5.4', $canonical);
 
         putenv('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION=1.5.2');
         try {
@@ -160,9 +160,9 @@ class LocalAgentVersionSyncTest extends TestCase
             putenv('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION');
         }
 
-        putenv('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION=1.5.3');
+        putenv('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION=1.5.4');
         try {
-            $this->assertSame('1.5.3', LocalAgentVersionResolver::effective());
+            $this->assertSame('1.5.4', LocalAgentVersionResolver::effective());
         } finally {
             putenv('DEPLOYMENT_LATEST_LOCAL_AGENT_VERSION');
         }

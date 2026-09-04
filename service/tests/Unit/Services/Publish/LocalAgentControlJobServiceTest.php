@@ -127,7 +127,7 @@ class LocalAgentControlJobServiceTest extends TestCase
         $service = app(LocalAgentControlJobService::class);
 
         $job = $service->queueUpgrade($agent, 'admin@example.test');
-        $this->assertSame('1.5.3', $job->expected_version);
+        $this->assertSame('1.5.4', $job->expected_version);
         $service->claimNext($agent);
         $job->refresh();
         $activated = $service->reportUpgradeStarted($job, 'validated', $target['commit'], str_repeat('b', 40), 'deployment-system');
@@ -135,9 +135,9 @@ class LocalAgentControlJobServiceTest extends TestCase
         $this->assertSame(LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT, $activated->status);
         $this->assertSame(0, $service->verifyUpgradeHeartbeat($agent, '1.5.2'));
         $this->assertSame(LocalAgentControlJob::STATUS_AWAITING_HEARTBEAT, $job->fresh()->status);
-        $this->assertSame(1, $service->verifyUpgradeHeartbeat($agent, '1.5.3'));
+        $this->assertSame(1, $service->verifyUpgradeHeartbeat($agent, '1.5.4'));
         $this->assertSame(LocalAgentControlJob::STATUS_SUCCEEDED, $job->fresh()->status);
-        $this->assertSame('1.5.3', $job->fresh()->reported_version);
+        $this->assertSame('1.5.4', $job->fresh()->reported_version);
         $this->assertNotNull($job->fresh()->upgrade_verified_at);
     }
 
@@ -173,7 +173,7 @@ class LocalAgentControlJobServiceTest extends TestCase
         $job = app(LocalAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
 
         $this->assertSame(LocalAgentControlJob::ACTION_UPGRADE, $job->action);
-        $this->assertSame('1.5.3', $job->expected_version, 'expected_version must come from the upgrade target itself, not the stale latest_local_agent_version override.');
+        $this->assertSame('1.5.4', $job->expected_version, 'expected_version must come from the upgrade target itself, not the stale latest_local_agent_version override.');
     }
 
     public function test_1_5_1_agent_requires_the_one_time_exact_commit_bootstrap(): void

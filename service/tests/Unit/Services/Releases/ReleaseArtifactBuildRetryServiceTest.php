@@ -43,7 +43,7 @@ class ReleaseArtifactBuildRetryServiceTest extends TestCase
         // simulated here directly as the Agent's new reported version,
         // since that verification is this test's precondition, not its
         // subject.
-        $agent->update(['agent_version' => '1.5.3']);
+        $agent->update(['agent_version' => '1.5.4']);
 
         $result = app(ReleaseArtifactBuildRetryService::class)->retry();
 
@@ -63,7 +63,7 @@ class ReleaseArtifactBuildRetryServiceTest extends TestCase
 
     public function test_a_release_with_an_already_active_build_is_never_reconsidered(): void
     {
-        [$release, $agent] = $this->strandedRelease('1.5.3');
+        [$release, $agent] = $this->strandedRelease('1.5.4');
 
         $result = app(ReleaseArtifactBuildRetryService::class)->retry();
         $this->assertSame(1, $result['queued']);
@@ -159,7 +159,7 @@ class ReleaseArtifactBuildRetryServiceTest extends TestCase
         $currentSha = hash('sha256', $projectKey . '-current');
         $currentSha = substr($currentSha, 0, 40);
         $project = Project::factory()->create(['project_key' => $projectKey, 'branch' => 'main', 'requires_complete_artifact' => true, 'is_active' => true]);
-        $agentVersion = $projectKey === 'project-a' ? '1.5.3' : '1.5.2';
+        $agentVersion = $projectKey === 'project-a' ? '1.5.4' : '1.5.2';
         $agent = LocalAgent::factory()->productionBuild()->create([
             'agent_version' => $agentVersion,
             'capabilities' => [
