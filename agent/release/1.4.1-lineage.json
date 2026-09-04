@@ -1,0 +1,37 @@
+{
+  "format": "deployment-server-agent-lineage",
+  "version": 1,
+  "candidate": "1.4.1",
+  "production_baseline": {
+    "version": "1.4.0",
+    "base_commit": "0ded41a",
+    "construction": "Server Agent 1.3.4-p1 runtime plus the official 1.4.0 overlay (agent.php, lib/ArtifactManager.php, lib/ReleaseValidator.php) — see 1.4.0-lineage.json. lib/PipelineExecutor.php was deliberately preserved unchanged by that overlay, so Production's active runtime still carries the pre-Deployment-#183/#184-fix implementation.",
+    "snapshot_sha256": {
+      "agent.php": "65cec6541cdd4144a2493e79c002d0244fdfe81df27e8e524a6cc1b223ecdbfa",
+      "lib/OperationRegistry.php": "6397de566e08429654144994d4b69f6229d75d2d571cdd11d8c0292f6efd53a8",
+      "/usr/local/sbin/deployment-service-reload": "23560656f95e29c9de6b7eda070774f7d356da44cbfbdd52502291bfd81b1969",
+      "lib/PipelineExecutor.php": "9f8f693b120cd29ba14bef40b5151fa41303cb981d2f4df80d697b31741dcf2a"
+    }
+  },
+  "candidate_snapshot_sha256": {
+    "agent.php": "c9c0a23a8995d4593ba137fa4c67741f03bbb163322ff5cc0f11c824bb8adc5f",
+    "lib/PipelineExecutor.php": "73985fc464f51145dbd329e1f7c8b56486fbd67a0fb0e0eaf1376582603361af"
+  },
+  "candidate_overlay": ["agent.php", "lib/PipelineExecutor.php", "lib/SelfUpgradeManager.php"],
+  "preserved_exactly_from_active_runtime": [
+    "config.php", "lib/OperationRegistry.php", "lib/ArtifactManager.php", "lib/ReleaseValidator.php", "all other runtime files",
+    "/usr/local/sbin/deployment-service-reload", "sudoers", "deployment-runtime-permissions"
+  ],
+  "notes": [
+    "This is the ONE exceptional bootstrap release for the Server Agent: 1.4.0 has no way to understand the new exact-commit self-upgrade control contract (server_agent_control_jobs / ServerAgentPackage), so it must be installed once via agent/install/upgrade-1.4.1.sh, the same manual-overlay pattern 1.4.0 itself used.",
+    "lib/PipelineExecutor.php is a CANDIDATE file in this release, not preserved — it carries the Deployment #183/#184 correctness fix (commit bcc7670f): unique prepare/before_activation/activation sequences, trailing-|| true stripping, and fail-closed activation.",
+    "lib/SelfUpgradeManager.php is new in this release and adds the exact-commit self-upgrade runtime support that every SUBSEQUENT Server Agent release is expected to use instead of a hand-run overlay script.",
+    "agent/install/deployment-server-agent-restart (+ .sudoers) is a new, narrowly-scoped privileged helper this release also installs — restart-only, zero arguments, never a general-purpose command."
+  ],
+  "excluded_lineage": ["Server Agent 1.3.5 persistence changes", "Server Agent 1.3.6 runtime/helper installer changes"],
+  "rollback": {
+    "version": "1.4.0",
+    "source": "the run_id-scoped, SHA-256-verified backup captured from the active server before activation",
+    "source_rebuild_forbidden": true
+  }
+}
