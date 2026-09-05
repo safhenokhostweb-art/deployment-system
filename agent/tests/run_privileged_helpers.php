@@ -116,6 +116,40 @@ check('PipelineExecutor resolves saas service reload only through the fixed help
 check('standalone config_cache normalizes permissions only through the fixed helper argv', str_contains($agent, "['sudo', '-n', '/usr/local/sbin/deployment-runtime-permissions', (string) \$projectKey]"), $failures, $passCount);
 check('standalone config_cache runs permission normalization only after command success', str_contains($agent, "\$result['exitCode'] === 0") && str_contains($agent, 'OperationRegistry::requiresRuntimePermissionsAfter($operationType)'), $failures, $passCount);
 
+// ------------------------------------------------------------------
+// Root-cause fix (1.4.1 -> 1.4.2, Control Job #1): the new privileged
+// activation helper and SelfUpgradeManager's exact dispatch contract
+// to both it and the pre-existing restart helper — never previously
+// checked in this file.
+// ------------------------------------------------------------------
+$restart = (string) file_get_contents(__DIR__ . '/../install/deployment-server-agent-restart');
+$restartSudoers = (string) file_get_contents(__DIR__ . '/../install/deployment-server-agent-restart.sudoers');
+$activate = (string) file_get_contents(__DIR__ . '/../install/deployment-server-agent-activate');
+$activateSudoers = (string) file_get_contents(__DIR__ . '/../install/deployment-server-agent-activate.sudoers');
+$selfUpgradeManager = (string) file_get_contents(__DIR__ . '/../lib/SelfUpgradeManager.php');
+
+check('the restart helper accepts zero arguments only', str_contains($restart, 'if [ "$#" -ne 0 ]') && str_contains($restart, 'exit 64'), $failures, $passCount);
+check('the restart helper restarts exactly one fixed systemd unit', str_contains($restart, 'systemctl restart deployment-server-agent.service'), $failures, $passCount);
+check('the restart sudoers grants NOPASSWD for exactly the argument-free restart invocation', trim($restartSudoers) === 'deployment-agent ALL=(root) NOPASSWD: /usr/local/sbin/deployment-server-agent-restart', $failures, $passCount);
+
+check('the activate helper accepts exactly one argument', str_contains($activate, 'if [ "$#" -ne 1 ]') && str_contains($activate, 'exit 64'), $failures, $passCount);
+check('the activate helper strictly validates the staging name against a hex-only pattern', str_contains($activate, '^staging-[0-9a-f]{8,32}$'), $failures, $passCount);
+check('the activate helper rejects a symlinked staging path', str_contains($activate, '[ ! -L "$staging_path" ]'), $failures, $passCount);
+check('the activate helper rejects a symlinked install directory', str_contains($activate, '[ ! -L "$INSTALL_DIR" ]'), $failures, $passCount);
+check('the activate helper confines the resolved staging path to a direct child of the staging root', str_contains($activate, 'escapes the staging root') && str_contains($activate, 'must be a direct child of the staging root'), $failures, $passCount);
+check('the activate helper re-validates the staged layout itself, never trusting the caller', str_contains($activate, "-f \"\$resolved_staging/agent.php\"") && str_contains($activate, "-d \"\$resolved_staging/lib\""), $failures, $passCount);
+check('the activate helper proves same-filesystem via device ids before any rename', str_contains($activate, 'stat -c %d') && str_contains($activate, 'different filesystems'), $failures, $passCount);
+check('the activate helper backs up the active runtime aside before swapping in the candidate', str_contains($activate, '.backup-') && str_contains($activate, 'mv -- "$INSTALL_DIR" "$backup_path"'), $failures, $passCount);
+check('the activate helper rolls back to the backup if the final swap fails', str_contains($activate, 'mv -- "$backup_path" "$INSTALL_DIR"') && str_contains($activate, 'exit 71'), $failures, $passCount);
+check('the activate helper never accepts a free-form command — argv is the staging basename only', !str_contains($activate, 'eval') && !str_contains($activate, '"$@"'), $failures, $passCount);
+check('the activate sudoers grants NOPASSWD only for the staging-prefixed argument shape', trim($activateSudoers) === 'deployment-agent ALL=(root) NOPASSWD: /usr/local/sbin/deployment-server-agent-activate staging-*', $failures, $passCount);
+
+check('SelfUpgradeManager invokes the restart helper only through the fixed, argument-free helper argv', str_contains($selfUpgradeManager, "['sudo', '-n', '/usr/local/sbin/deployment-server-agent-restart']"), $failures, $passCount);
+check('SelfUpgradeManager invokes the activation helper only through the fixed helper argv plus the staging basename', str_contains($selfUpgradeManager, "['sudo', '-n', '/usr/local/sbin/deployment-server-agent-activate', \$stagingName]"), $failures, $passCount);
+check('SelfUpgradeManager never assembles the activation helper argv from anything but the staging basename it generated itself', !str_contains($selfUpgradeManager, 'deployment-server-agent-activate\' . '), $failures, $passCount);
+check('SelfUpgradeManager stages inside the pre-provisioned staging root, never a new sibling directly under the install dir\'s own parent', str_contains($selfUpgradeManager, "dirname(\$installDir) . '/deployment-server-agent-staging'") && !str_contains($selfUpgradeManager, "\$installDir . '.staging-'"), $failures, $passCount);
+check('SelfUpgradeManager fails closed with an actionable message when the staging area was never provisioned', str_contains($selfUpgradeManager, 'has not been provisioned'), $failures, $passCount);
+
 echo "\n";
 foreach ($failures as $failure) {
     echo "FAIL: {$failure}\n";

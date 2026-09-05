@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Root-owned, narrowly-scoped helper. Performs ONLY the privileged
+# filesystem transition an official Server Agent self-upgrade needs:
+# backing up the currently-active runtime aside and atomically swapping
+# in an already-staged, already-validated candidate.
+#
+# Root-cause fix (Server Agent 1.4.1 -> 1.4.2, Control Job #1 — "Could
+# not create the Server Agent upgrade staging directory"): the
+# unprivileged deployment-agent service user cannot create a new
+# directory entry directly under root-owned /opt, so
+# SelfUpgradeManager.php no longer stages there or renames there
+# itself. Every unprivileged step (download, checksum, extraction,
+# required-file/version validation, PHP lint, config.php preservation)
+# still happens entirely in PHP, BEFORE this helper is ever invoked.
+# This helper trusts none of that work — it re-validates the staged
+# layout itself before touching anything live.
+#
+# Accepts exactly one argument: the staging directory's basename
+# (never a full path) under the pre-provisioned staging root. Never
+# accepts a caller-supplied path, so there is no path-injection
+# surface — INSTALL_DIR and STAGING_ROOT are fixed constants (with a
+# test-only environment override, mirroring upgrade-1.4.1.sh's own
+# SERVER_AGENT_INSTALL_DIR convention).
+set -Eeuo pipefail
+
+INSTALL_DIR="${SERVER_AGENT_INSTALL_DIR:-/opt/deployment-server-agent}"
+STAGING_ROOT="${SERVER_AGENT_STAGING_ROOT:-/opt/deployment-server-agent-staging}"
+
+if [ "$#" -ne 1 ]; then
+    echo 'Usage: deployment-server-agent-activate <staging-basename>' >&2
+    exit 64
+fi
+
+name="$1"
+if ! [[ "$name" =~ ^staging-[0-9a-f]{8,32}$ ]]; then
+    echo 'Rejected staging name: must be exactly "staging-" followed by 8-32 lowercase hex characters.' >&2
+    exit 65
+fi
+
+staging_path="$STAGING_ROOT/$name"
+
+[ ! -L "$staging_path" ] || { echo 'Staging path must not be a symlink.' >&2; exit 66; }
+resolved_root="$(realpath -e -- "$STAGING_ROOT")" || { echo 'Staging root does not exist.' >&2; exit 67; }
+resolved_staging="$(realpath -e -- "$staging_path")" || { echo 'Staging path does not exist.' >&2; exit 67; }
+
+# Reject traversal/symlink tricks: the resolved staging path must be a
+# direct child of the resolved staging root — never nested, never
+# escaping via a symlinked component anywhere in the chain.
+case "$resolved_staging" in
+    "$resolved_root"/*) ;;
+    *) echo 'Staging path escapes the staging root.' >&2; exit 66 ;;
+esac
+[ "$(dirname -- "$resolved_staging")" = "$resolved_root" ] || { echo 'Staging path must be a direct child of the staging root.' >&2; exit 66; }
+
+# Re-validate the expected activation layout ourselves — this helper
+# never trusts that the unprivileged validation actually ran.
+[ -f "$resolved_staging/agent.php" ] || { echo 'Staged runtime is missing agent.php.' >&2; exit 68; }
+[ -d "$resolved_staging/lib" ] || { echo 'Staged runtime is missing lib/.' >&2; exit 68; }
+
+[ ! -L "$INSTALL_DIR" ] || { echo 'Install directory must not be a symlink.' >&2; exit 66; }
+
+install_parent="$(dirname -- "$INSTALL_DIR")"
+resolved_install_parent="$(realpath -e -- "$install_parent")" || { echo 'Install parent directory does not exist.' >&2; exit 67; }
+
+# Same-filesystem proof, not an assumption: STAGING_ROOT and
+# INSTALL_DIR's parent are provisioned as siblings specifically so the
+# final rename() stays atomic (see upgrade-1.4.2.sh). Verify it rather
+# than trusting the constants above were configured correctly.
+staging_dev="$(stat -c %d -- "$resolved_root")"
+install_dev="$(stat -c %d -- "$resolved_install_parent")"
+[ "$staging_dev" = "$install_dev" ] || { echo 'Staging root and the install directory parent are on different filesystems.' >&2; exit 69; }
+
+backup_path="${INSTALL_DIR}.backup-$(date +%Y%m%d-%H%M%S)-$$"
+
+if [ -d "$INSTALL_DIR" ]; then
+    mv -- "$INSTALL_DIR" "$backup_path" || { echo 'Could not move the active runtime aside for activation.' >&2; exit 70; }
+fi
+
+if ! mv -- "$resolved_staging" "$INSTALL_DIR"; then
+    if [ -d "$backup_path" ]; then
+        if ! mv -- "$backup_path" "$INSTALL_DIR"; then
+            echo "ACTIVATION_AND_ROLLBACK_FAILED backup=$backup_path staging=$resolved_staging" >&2
+            exit 72
+        fi
+    fi
+    echo 'Could not activate the staged runtime; the previous runtime was restored.' >&2
+    exit 71
+fi
+
+echo "ACTIVATE_OK staging=$name backup=$backup_path"

@@ -14,6 +14,7 @@ use App\Models\ServerAgentPackageBuildJob;
 use App\Services\Publish\ServerAgentControlJobService;
 use App\Services\Publish\ServerAgentPackageService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 /**
@@ -120,7 +121,7 @@ class ServerAgentControlJobServiceTest extends TestCase
 
         $this->assertSame(ServerAgentControlJob::ACTION_UPGRADE, $job->action);
         $this->assertSame(ServerAgentControlJob::STATUS_QUEUED, $job->status);
-        $this->assertSame('1.4.1', $job->target_version);
+        $this->assertSame('1.4.2', $job->target_version);
         $this->assertSame($target['commit'], $job->target_commit_sha);
         $this->assertSame($target['package']->id, $job->server_agent_package_id);
         $this->assertSame($target['package']->checksum_sha256, $job->expected_package_hash);
@@ -135,7 +136,7 @@ class ServerAgentControlJobServiceTest extends TestCase
     public function test_queue_upgrade_rejects_an_agent_already_at_the_latest_version(): void
     {
         $this->createUpgradeAuthorityWithPackage();
-        $agent = Agent::factory()->approved()->create(['agent_version' => '1.4.1']);
+        $agent = Agent::factory()->approved()->create(['agent_version' => '1.4.2']);
 
         $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
         app(ServerAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
@@ -173,6 +174,153 @@ class ServerAgentControlJobServiceTest extends TestCase
         $agent = Agent::factory()->approved()->create();
 
         $this->assertNull(app(ServerAgentControlJobService::class)->claimNext($agent));
+    }
+
+    // ------------------------------------------------------------------
+    // Root-cause fix (Server Agent 1.4.1 bootstrap follow-up — Control
+    // Job #1 targeted 1.4.1 but was still QUEUED after the Agent was
+    // manually bootstrapped straight to 1.4.1): claimNext() must never
+    // hand out a queued job whose target is already satisfied.
+    // ------------------------------------------------------------------
+
+    public function test_claim_next_supersedes_a_queued_job_whose_target_the_agent_already_satisfies(): void
+    {
+        $agent = Agent::factory()->approved()->create(['agent_version' => '1.4.1']);
+        $job = ServerAgentControlJob::create([
+            'agent_id' => $agent->id,
+            'action' => ServerAgentControlJob::ACTION_UPGRADE,
+            'status' => ServerAgentControlJob::STATUS_QUEUED,
+            'target_version' => '1.4.1',
+            'target_commit_sha' => str_repeat('a', 40),
+            'repository_mapping' => 'deployment-system',
+        ]);
+
+        $claimed = app(ServerAgentControlJobService::class)->claimNext($agent);
+
+        $this->assertNull($claimed, 'A same-version queued job must never be returned to the Server Agent.');
+        $job->refresh();
+        $this->assertSame(ServerAgentControlJob::STATUS_SUPERSEDED, $job->status);
+        $this->assertStringContainsString('1.4.1', (string) $job->error_message);
+        $this->assertDatabaseHas('audit_log_entries', [
+            'action' => 'server_agent.upgrade_superseded',
+            'subject_type' => ServerAgentControlJob::class,
+            'subject_id' => $job->id,
+        ]);
+    }
+
+    public function test_claim_next_supersedes_a_queued_job_whose_target_is_below_the_agents_current_version(): void
+    {
+        $agent = Agent::factory()->approved()->create(['agent_version' => '1.5.0']);
+        $job = ServerAgentControlJob::create([
+            'agent_id' => $agent->id,
+            'action' => ServerAgentControlJob::ACTION_UPGRADE,
+            'status' => ServerAgentControlJob::STATUS_QUEUED,
+            'target_version' => '1.4.1',
+            'target_commit_sha' => str_repeat('a', 40),
+            'repository_mapping' => 'deployment-system',
+        ]);
+
+        $this->assertNull(app(ServerAgentControlJobService::class)->claimNext($agent));
+        $this->assertSame(ServerAgentControlJob::STATUS_SUPERSEDED, $job->fresh()->status);
+    }
+
+    public function test_claim_next_uses_real_semantic_version_comparison_not_lexical_comparison(): void
+    {
+        // A lexical/string comparison would put "1.4.9" ahead of "1.4.10"
+        // (since '9' > '1' as characters) and wrongly treat this job as
+        // already satisfied. version_compare() must be used instead.
+        $agent = Agent::factory()->approved()->create(['agent_version' => '1.4.9']);
+        $job = ServerAgentControlJob::create([
+            'agent_id' => $agent->id,
+            'action' => ServerAgentControlJob::ACTION_UPGRADE,
+            'status' => ServerAgentControlJob::STATUS_QUEUED,
+            'target_version' => '1.4.10',
+            'target_commit_sha' => str_repeat('a', 40),
+            'repository_mapping' => 'deployment-system',
+        ]);
+
+        $claimed = app(ServerAgentControlJobService::class)->claimNext($agent);
+
+        $this->assertNotNull($claimed, '1.4.9 does not satisfy target 1.4.10 under real semver comparison; the job must still be claimable.');
+        $this->assertSame($job->id, $claimed->id);
+        $this->assertSame(ServerAgentControlJob::STATUS_RUNNING, $claimed->status);
+    }
+
+    public function test_claim_next_still_claims_a_genuinely_newer_version_job_normally(): void
+    {
+        $agent = Agent::factory()->approved()->create(['agent_version' => '1.4.0']);
+        $job = ServerAgentControlJob::create([
+            'agent_id' => $agent->id,
+            'action' => ServerAgentControlJob::ACTION_UPGRADE,
+            'status' => ServerAgentControlJob::STATUS_QUEUED,
+            'target_version' => '1.4.1',
+            'target_commit_sha' => str_repeat('a', 40),
+            'repository_mapping' => 'deployment-system',
+        ]);
+
+        $claimed = app(ServerAgentControlJobService::class)->claimNext($agent);
+
+        $this->assertNotNull($claimed);
+        $this->assertSame($job->id, $claimed->id);
+        $this->assertSame(ServerAgentControlJob::STATUS_RUNNING, $claimed->status);
+    }
+
+    public function test_claim_next_skips_a_superseded_candidate_and_returns_the_next_eligible_queued_job(): void
+    {
+        $agent = Agent::factory()->approved()->create(['agent_version' => '1.4.1']);
+        $stale = ServerAgentControlJob::create([
+            'agent_id' => $agent->id,
+            'action' => ServerAgentControlJob::ACTION_UPGRADE,
+            'status' => ServerAgentControlJob::STATUS_QUEUED,
+            'target_version' => '1.4.1',
+            'target_commit_sha' => str_repeat('a', 40),
+            'repository_mapping' => 'deployment-system',
+            'created_at' => now()->subMinutes(5),
+        ]);
+        $eligible = ServerAgentControlJob::create([
+            'agent_id' => $agent->id,
+            'action' => ServerAgentControlJob::ACTION_UPGRADE,
+            'status' => ServerAgentControlJob::STATUS_QUEUED,
+            'target_version' => '1.4.2',
+            'target_commit_sha' => str_repeat('b', 40),
+            'repository_mapping' => 'deployment-system',
+            'created_at' => now(),
+        ]);
+
+        $claimed = app(ServerAgentControlJobService::class)->claimNext($agent);
+
+        $this->assertSame($eligible->id, $claimed->id);
+        $this->assertSame(ServerAgentControlJob::STATUS_RUNNING, $claimed->fresh()->status);
+        $this->assertSame(ServerAgentControlJob::STATUS_SUPERSEDED, $stale->fresh()->status);
+    }
+
+    #[DataProvider('provideNonQueuedStatuses')]
+    public function test_claim_next_never_touches_a_non_queued_job_of_any_status(string $status): void
+    {
+        $agent = Agent::factory()->approved()->create(['agent_version' => '1.4.1']);
+        $job = ServerAgentControlJob::create([
+            'agent_id' => $agent->id,
+            'action' => ServerAgentControlJob::ACTION_UPGRADE,
+            'status' => $status,
+            'target_version' => '1.4.1',
+            'target_commit_sha' => str_repeat('a', 40),
+            'repository_mapping' => 'deployment-system',
+        ]);
+
+        app(ServerAgentControlJobService::class)->claimNext($agent);
+
+        $this->assertSame($status, $job->fresh()->status, "claimNext() must never transition a job that was already {$status}.");
+    }
+
+    /** @return array<string, array{0: string}> */
+    public static function provideNonQueuedStatuses(): array
+    {
+        return [
+            'running' => [ServerAgentControlJob::STATUS_RUNNING],
+            'awaiting_heartbeat' => [ServerAgentControlJob::STATUS_AWAITING_HEARTBEAT],
+            'succeeded' => [ServerAgentControlJob::STATUS_SUCCEEDED],
+            'failed' => [ServerAgentControlJob::STATUS_FAILED],
+        ];
     }
 
     public function test_report_upgrade_started_rejects_a_wrong_commit(): void
@@ -214,9 +362,9 @@ class ServerAgentControlJobServiceTest extends TestCase
         $this->assertSame(0, $service->verifyUpgradeHeartbeat($agent, '1.4.0'));
         $this->assertSame(ServerAgentControlJob::STATUS_AWAITING_HEARTBEAT, $job->fresh()->status);
 
-        $this->assertSame(1, $service->verifyUpgradeHeartbeat($agent, '1.4.1'));
+        $this->assertSame(1, $service->verifyUpgradeHeartbeat($agent, '1.4.2'));
         $this->assertSame(ServerAgentControlJob::STATUS_SUCCEEDED, $job->fresh()->status);
-        $this->assertSame('1.4.1', $job->fresh()->reported_version);
+        $this->assertSame('1.4.2', $job->fresh()->reported_version);
         $this->assertNotNull($job->fresh()->upgrade_verified_at);
 
         $this->assertDatabaseHas('audit_log_entries', [

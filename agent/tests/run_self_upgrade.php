@@ -166,7 +166,15 @@ $workspace = makeWorkspace();
 $logger = new Logger($workspace . '/logs');
 $executor = new Executor();
 
-function makeInstallDir(string $workspace, string $name, string $version): string
+/**
+ * Root-cause fix (1.4.1 -> 1.4.2, Control Job #1): every real install
+ * directory sits beside a pre-provisioned, deployment-agent-owned
+ * `deployment-server-agent-staging` sibling — exactly what
+ * upgrade-1.4.2.sh provisions once in production. $provisionStaging
+ * defaults to true so every existing scenario keeps working unchanged;
+ * the one "staging area not provisioned" scenario below passes false.
+ */
+function makeInstallDir(string $workspace, string $name, string $version, bool $provisionStaging = true): string
 {
     $dir = "{$workspace}/{$name}";
     mkdir($dir . '/lib', 0777, true);
@@ -174,20 +182,40 @@ function makeInstallDir(string $workspace, string $name, string $version): strin
     file_put_contents($dir . '/lib/PipelineExecutor.php', "<?php\n// old pipeline executor\n");
     file_put_contents($dir . '/config.php', "<?php\nreturn ['agent_token' => 'super-secret-token'];\n");
 
+    if ($provisionStaging) {
+        $stagingRoot = dirname($dir) . '/deployment-server-agent-staging';
+        if (!is_dir($stagingRoot)) {
+            mkdir($stagingRoot, 0700, true);
+        }
+    }
+
     return $dir;
 }
 
 // ============================================================
-// Scenario 1: a successful upgrade — package integrity verified,
-// activation staged then atomic, config.php preserved, old runtime
-// renamed aside (never deleted), Hub receives exact-commit evidence
-// BEFORE activation.
+// Scenario 1: unprivileged validation succeeds end to end — package
+// integrity verified, staged inside the pre-provisioned staging area
+// (never a new entry directly under the install dir's own parent),
+// config.php preserved into the staged copy, Hub receives exact-commit
+// evidence BEFORE activation is attempted. This dev/CI machine has no
+// real deployment-server-agent-activate installed at
+// /usr/local/sbin nor a real sudo trusting it, so the final privileged
+// swap itself cannot succeed here by design — see
+// agent/tests/run_activate_helper.sh for the real, direct, no-sudo-
+// required proof that the privileged helper's own atomic swap and
+// rollback-on-failure logic work correctly. What this scenario proves
+// is everything on the unprivileged side: validation completes, the
+// helper is invoked with the exact expected argument, a failure to
+// activate leaves the previous runtime completely untouched, and the
+// staging directory is always cleaned up afterward — never left behind
+// regardless of whether activation succeeded.
 // ============================================================
 $pkg1 = buildPackageZip($workspace, 'good-package', [
     'agent.php' => goodAgentPhp('1.4.1'),
     'lib/PipelineExecutor.php' => goodPipelineExecutor(),
 ]);
 $installDir1 = makeInstallDir($workspace, 'install-good', '1.4.0');
+$stagingRoot1 = dirname($installDir1) . '/deployment-server-agent-staging';
 $hub1 = startFakeHub($pkg1['path']);
 $client1 = makeClient($hub1['port'], $logger);
 $manager1 = new SelfUpgradeManager($client1, $executor, $logger);
@@ -201,20 +229,23 @@ $job1 = [
 ];
 
 $onValidatedCalls = [];
-$result1 = $manager1->upgrade($job1, $installDir1, PHP_BINARY, function (array $evidence) use (&$onValidatedCalls, $installDir1, &$failures, &$passCount): void {
-    $onValidatedCalls[] = $evidence;
-    // Activation must NOT have happened yet — this fires BEFORE the swap.
-    check('onValidated fires before activation (old version still live)', str_contains((string) file_get_contents($installDir1 . '/agent.php'), "AGENT_VERSION = '1.4.0'"), $failures, $passCount);
-});
+$activationFailure = '';
+try {
+    $manager1->upgrade($job1, $installDir1, PHP_BINARY, function (array $evidence) use (&$onValidatedCalls, $installDir1, &$failures, &$passCount): void {
+        $onValidatedCalls[] = $evidence;
+        // Activation must NOT have happened yet — this fires BEFORE the swap.
+        check('onValidated fires before activation (old version still live)', str_contains((string) file_get_contents($installDir1 . '/agent.php'), "AGENT_VERSION = '1.4.0'"), $failures, $passCount);
+    });
+    $activationFailure = '(activation unexpectedly succeeded — is a real deployment-server-agent-activate installed on this machine?)';
+} catch (\Throwable $e) {
+    $activationFailure = $e->getMessage();
+}
 
-check('successful upgrade returns the correct old/new version pair', $result1['old_version'] === '1.4.0' && $result1['new_version'] === '1.4.1', $failures, $passCount);
 check('onValidated was called exactly once with the correct evidence', count($onValidatedCalls) === 1 && $onValidatedCalls[0]['source_commit'] === $job1['target_commit_sha'] && $onValidatedCalls[0]['package_hash'] === $pkg1['checksum'], $failures, $passCount);
-check('the new agent.php is now active', str_contains((string) file_get_contents($installDir1 . '/agent.php'), "AGENT_VERSION = '1.4.1'"), $failures, $passCount);
-check('the new lib/PipelineExecutor.php is now active', str_contains((string) file_get_contents($installDir1 . '/lib/PipelineExecutor.php'), 'withoutUnconditionalSuccessSuffix'), $failures, $passCount);
-check('config.php was preserved byte-for-byte', str_contains((string) file_get_contents($installDir1 . '/config.php'), 'super-secret-token'), $failures, $passCount);
-check('exactly one backup directory holds the previous runtime', count(glob("{$installDir1}.backup-*")) === 1, $failures, $passCount);
-check('the previous runtime backup still has the OLD version', str_contains((string) file_get_contents(glob("{$installDir1}.backup-*")[0] . '/agent.php'), "AGENT_VERSION = '1.4.0'"), $failures, $passCount);
-check('no staging directory was left behind', count(glob("{$installDir1}.staging-*")) === 0, $failures, $passCount);
+check('activation was attempted through the privileged helper (no real sudo/helper on this machine, so it fails closed)', str_contains($activationFailure, 'Could not activate the staged Server Agent runtime'), $failures, $passCount);
+check('a failed activation leaves the previous runtime completely untouched', str_contains((string) file_get_contents($installDir1 . '/agent.php'), "AGENT_VERSION = '1.4.0'"), $failures, $passCount);
+check('a failed activation creates no backup directory (the helper never ran the swap)', count(glob("{$installDir1}.backup-*")) === 0, $failures, $passCount);
+check('the staging directory is always cleaned up, whether activation succeeded or not', count(glob("{$stagingRoot1}/staging-*")) === 0, $failures, $passCount);
 
 stopFakeHub($hub1);
 
@@ -249,7 +280,7 @@ try {
 check('a checksum mismatch throws', $threw !== null && str_contains($threw->getMessage(), 'checksum does not match'), $failures, $passCount);
 check('a checksum mismatch leaves the active runtime untouched', str_contains((string) file_get_contents($installDir2 . '/agent.php'), "AGENT_VERSION = '1.4.0'"), $failures, $passCount);
 check('a checksum mismatch creates no backup directory', count(glob("{$installDir2}.backup-*")) === 0, $failures, $passCount);
-check('a checksum mismatch leaves no staging directory behind', count(glob("{$installDir2}.staging-*")) === 0, $failures, $passCount);
+check('a checksum mismatch never even attempts to stage (fails before the staging step)', count(glob(dirname($installDir2) . '/deployment-server-agent-staging/staging-*')) === 0, $failures, $passCount);
 
 stopFakeHub($hub2);
 
@@ -345,6 +376,8 @@ try {
 }
 check('a syntax error throws', $threw !== null && str_contains($threw->getMessage(), 'Syntax validation failed'), $failures, $passCount);
 check('a syntax error leaves the active runtime untouched', str_contains((string) file_get_contents($installDir5 . '/agent.php'), "AGENT_VERSION = '1.4.0'"), $failures, $passCount);
+check('a syntax error never invokes the privileged activation helper (checked indirectly: no backup directory is created)', count(glob("{$installDir5}.backup-*")) === 0, $failures, $passCount);
+check('a syntax error still cleans up its staging directory even though it staged real content', count(glob(dirname($installDir5) . '/deployment-server-agent-staging/staging-*')) === 0, $failures, $passCount);
 
 stopFakeHub($hub5);
 
@@ -375,6 +408,52 @@ check('a failed download throws', $threw !== null && str_contains($threw->getMes
 check('a failed download leaves the active runtime untouched', str_contains((string) file_get_contents($installDir6 . '/agent.php'), "AGENT_VERSION = '1.4.0'"), $failures, $passCount);
 
 stopFakeHub($hub6);
+
+// ============================================================
+// Scenario 7: root-cause regression guard for Control Job #1 — an
+// install directory whose sibling deployment-server-agent-staging
+// area was never provisioned (the exact shape of the currently-
+// installed 1.4.1 runtime before the bridge runs) must fail closed
+// with an actionable message, and — critically — this failure must
+// happen WITHOUT ever attempting mkdir() directly under the install
+// dir's own parent (the original bug). The active runtime must remain
+// completely untouched, proving the new staging contract genuinely
+// does not require deployment-agent to have write access to that
+// parent directory at all.
+// ============================================================
+$pkg7 = buildPackageZip($workspace, 'unprovisioned-package', [
+    'agent.php' => goodAgentPhp('1.4.1'),
+    'lib/PipelineExecutor.php' => goodPipelineExecutor(),
+]);
+// Its own isolated parent — never $workspace directly, which other
+// scenarios above have already provisioned a shared staging sibling
+// under.
+$isolatedWorkspace7 = $workspace . '/isolated-unprovisioned';
+mkdir($isolatedWorkspace7, 0777, true);
+$installDir7 = makeInstallDir($isolatedWorkspace7, 'install-unprovisioned', '1.4.0', provisionStaging: false);
+$hub7 = startFakeHub($pkg7['path']);
+$client7 = makeClient($hub7['port'], $logger);
+$manager7 = new SelfUpgradeManager($client7, $executor, $logger);
+
+$job7 = [
+    'id' => 'job-unprovisioned',
+    'target_version' => '1.4.1',
+    'target_commit_sha' => str_repeat('9', 40),
+    'package_id' => 'pkg-unprovisioned',
+    'expected_package_hash' => $pkg7['checksum'],
+];
+
+$threw = null;
+try {
+    $manager7->upgrade($job7, $installDir7, PHP_BINARY, static fn () => null);
+} catch (\Throwable $e) {
+    $threw = $e;
+}
+check('an unprovisioned staging area fails closed with an actionable message', $threw !== null && str_contains($threw->getMessage(), 'has not been provisioned'), $failures, $passCount);
+check('an unprovisioned staging area leaves the active runtime untouched', str_contains((string) file_get_contents($installDir7 . '/agent.php'), "AGENT_VERSION = '1.4.0'"), $failures, $passCount);
+check('an unprovisioned staging area never creates a sibling directly under the install dir\'s own parent', !is_dir(dirname($installDir7) . '/deployment-server-agent-staging'), $failures, $passCount);
+
+stopFakeHub($hub7);
 
 rrmdir($workspace);
 

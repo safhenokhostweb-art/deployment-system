@@ -1,0 +1,41 @@
+{
+  "format": "deployment-server-agent-lineage",
+  "version": 1,
+  "candidate": "1.4.2",
+  "production_baseline": {
+    "version": "1.4.1",
+    "base_commit": "757e1b5",
+    "construction": "Server Agent 1.4.0 runtime plus the official 1.4.1 overlay (agent.php, lib/PipelineExecutor.php, lib/SelfUpgradeManager.php) — see 1.4.1-lineage.json. lib/OperationRegistry.php and the deployment-service-reload helper were deliberately preserved unchanged by that overlay, so Production's active runtime still carries the 1.4.0-vintage implementation of both.",
+    "snapshot_sha256": {
+      "agent.php": "e8b106424a0ec4443da5b63cb8f2a34acc042ba2e8975654fac13d4b3c120b68",
+      "lib/OperationRegistry.php": "6397de566e08429654144994d4b69f6229d75d2d571cdd11d8c0292f6efd53a8",
+      "/usr/local/sbin/deployment-service-reload": "23560656f95e29c9de6b7eda070774f7d356da44cbfbdd52502291bfd81b1969",
+      "lib/PipelineExecutor.php": "73985fc464f51145dbd329e1f7c8b56486fbd67a0fb0e0eaf1376582603361af",
+      "lib/SelfUpgradeManager.php": "1a4f7ded2008d7191c98b73ebe7e4bde64a046c54f38fddf07b75fe764c56cdf"
+    }
+  },
+  "candidate_snapshot_sha256": {
+    "agent.php": "6e1c1818a20ff5cfb6ba7d7449da97f1414742fded428c6751d999b98d17c5a3",
+    "lib/SelfUpgradeManager.php": "4b22530cd4a3a56c1b0afdf01d7001989abfb1b2fa216b391f74eb0fe54e3424",
+    "install/deployment-server-agent-activate": "0de7ca08bd411f0b28b213dc06df72fe23d872906806aa43fc116408a3ec2dd4",
+    "install/deployment-server-agent-activate.sudoers": "8b1ad1265a9c5ada72f9127ad892bffac9ebe79616fd83c60718735fafaa17cf"
+  },
+  "candidate_overlay": ["agent.php", "lib/SelfUpgradeManager.php", "install/deployment-server-agent-activate", "install/deployment-server-agent-activate.sudoers"],
+  "preserved_exactly_from_active_runtime": [
+    "config.php", "lib/OperationRegistry.php", "lib/PipelineExecutor.php", "all other runtime files",
+    "/usr/local/sbin/deployment-service-reload", "/usr/local/sbin/deployment-server-agent-restart", "sudoers", "deployment-runtime-permissions"
+  ],
+  "notes": [
+    "Root-cause fix (Control Job #1, 'Could not create the Server Agent upgrade staging directory'): the unprivileged deployment-agent service user cannot create a new directory entry directly under root-owned /opt, so SelfUpgradeManager.php's old sibling-of-install-dir staging path could never succeed. This is the ONE additional exceptional bootstrap release this problem requires: 1.4.1's own SelfUpgradeManager cannot deliver 1.4.2 to itself, because it fails before it ever reaches staging — see upgrade-1.4.2.sh, which installs this release the same manual-overlay pattern 1.4.0 and 1.4.1 themselves used.",
+    "lib/SelfUpgradeManager.php is a CANDIDATE file in this release, not preserved: staging now lives inside a pre-provisioned, deployment-agent-owned deployment-server-agent-staging directory (a sibling of the install dir, so rename() stays atomic) instead of a brand-new sibling entry directly under /opt; the final atomic swap is delegated to the new deployment-server-agent-activate privileged helper instead of an in-process rename().",
+    "install/deployment-server-agent-activate (+ .sudoers) is a new, narrowly-scoped privileged helper this release installs — it performs ONLY the backup-aside + staged-in atomic swap, re-validates the staging layout itself, rejects any staging name outside a strict hex allowlist, rejects symlinked paths, and proves same-filesystem via device ids before ever renaming anything. /opt itself is never made group/world/deployment-agent-writable.",
+    "This release also provisions the permanent deployment-server-agent-staging directory (owned by deployment-agent, mode 0700, sibling of the install dir) that every FUTURE Hub-driven self-upgrade depends on — see upgrade-1.4.2.sh's own provisioning step.",
+    "lib/PipelineExecutor.php and lib/OperationRegistry.php are unchanged from 1.4.1 and are verified identical on both sides, not overlaid."
+  ],
+  "excluded_lineage": ["Server Agent 1.3.5 persistence changes", "Server Agent 1.3.6 runtime/helper installer changes"],
+  "rollback": {
+    "version": "1.4.1",
+    "source": "the run_id-scoped, SHA-256-verified backup captured from the active server before activation",
+    "source_rebuild_forbidden": true
+  }
+}

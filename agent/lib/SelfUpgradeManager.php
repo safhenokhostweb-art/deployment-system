@@ -11,11 +11,24 @@ namespace DeploymentAgent;
  * package (see service/app/Models/ServerAgentPackage), then restarts
  * through a tightly allowlisted privileged helper — never a raw shell
  * command (see agent/install/deployment-server-agent-restart.sudoers).
- * Mirrors ArtifactManager::activate()'s own atomic-swap contract
- * exactly (old runtime renamed aside, never deleted immediately; a
- * failure before the swap leaves the active runtime completely
- * untouched) applied to this process's own code instead of an
- * application release.
+ *
+ * Root-cause fix (1.4.1 -> 1.4.2, Control Job #1 — "Could not create
+ * the Server Agent upgrade staging directory"): staging used to be a
+ * new sibling directory created directly under INSTALL_DIR's own
+ * parent (e.g. /opt), which the unprivileged deployment-agent service
+ * user cannot do — only root can create a new entry directly under
+ * /opt. Staging now lives inside a pre-provisioned, deployment-agent-
+ * owned directory (STAGING_ROOT, a sibling of INSTALL_DIR so it stays
+ * on the same filesystem — see upgrade-1.4.2.sh, which provisions it
+ * once) where creating a NEW subdirectory needs no elevated
+ * permission at all. Download, checksum, extraction, required-file/
+ * version validation, PHP lint, and config.php preservation all still
+ * happen here, entirely unprivileged. Only the final atomic swap —
+ * the one filesystem mutation that genuinely requires root, because it
+ * replaces the /opt/deployment-server-agent directory entry itself —
+ * is delegated to deployment-server-agent-activate, a second, equally
+ * narrowly-scoped privileged helper (see its own sudoers file). /opt
+ * itself is never made writable by deployment-agent.
  */
 final class SelfUpgradeManager
 {
@@ -60,7 +73,15 @@ final class SelfUpgradeManager
             }
 
             $installDir = rtrim($installDir, '/');
-            $stagingPath = $installDir . '.staging-' . bin2hex(random_bytes(4));
+            $stagingRoot = dirname($installDir) . '/deployment-server-agent-staging';
+            if (!is_dir($stagingRoot)) {
+                throw new \RuntimeException(
+                    "The Server Agent self-upgrade staging area ({$stagingRoot}) has not been provisioned. "
+                        . 'Run the 1.4.1 -> 1.4.2 bridge (upgrade-1.4.2.sh) once before this Agent can self-upgrade.',
+                );
+            }
+            $stagingName = 'staging-' . bin2hex(random_bytes(4));
+            $stagingPath = $stagingRoot . '/' . $stagingName;
 
             try {
                 if (!mkdir($stagingPath, 0755, true)) {
@@ -127,7 +148,7 @@ final class SelfUpgradeManager
                 // activation begins.
                 $onValidated(['source_commit' => $expectedCommit, 'package_hash' => $expectedHash]);
 
-                $this->activate($installDir, $stagingPath);
+                $this->activate($installDir, $stagingName);
             } finally {
                 if (is_dir($stagingPath)) {
                     $this->recursiveDelete($stagingPath);
@@ -158,28 +179,25 @@ final class SelfUpgradeManager
     }
 
     /**
-     * Atomic two-rename swap — identical contract to
-     * ArtifactManager::atomicSwap(): the previously-active runtime is
-     * renamed aside (never deleted here), so a failure activating the
-     * staged runtime can restore it, and the active runtime is never
-     * observed in a partially-swapped state.
+     * Delegates the atomic backup-aside + staged-in swap to
+     * deployment-server-agent-activate — the one privileged helper that
+     * exists specifically because /opt is not deployment-agent-
+     * writable. This process itself never renames anything in or out
+     * of /opt; the helper re-validates the staging layout, performs
+     * the same two-rename swap ArtifactManager::atomicSwap() uses for
+     * application releases, and rolls back on its own if the second
+     * rename fails, so a failure here always leaves the runtime in
+     * either its old or new state — never partially swapped.
      */
-    private function activate(string $installDir, string $stagingPath): void
+    private function activate(string $installDir, string $stagingName): void
     {
-        $hadPrevious = is_dir($installDir);
-        $backupPath = $installDir . '.backup-' . date('Ymd-His') . '-' . bin2hex(random_bytes(3));
-
-        if ($hadPrevious) {
-            if (!@rename($installDir, $backupPath)) {
-                throw new \RuntimeException('Could not move the active Server Agent runtime aside for activation.');
-            }
-        }
-
-        if (!@rename($stagingPath, $installDir)) {
-            if ($hadPrevious && is_dir($backupPath)) {
-                @rename($backupPath, $installDir);
-            }
-            throw new \RuntimeException('Could not activate the staged Server Agent runtime; the previous runtime was restored.');
+        $result = $this->executor->runArgv(
+            ['sudo', '-n', '/usr/local/sbin/deployment-server-agent-activate', $stagingName],
+            dirname($installDir),
+            30,
+        );
+        if ($result['exitCode'] !== 0) {
+            throw new \RuntimeException('Could not activate the staged Server Agent runtime: ' . trim($result['output']));
         }
     }
 

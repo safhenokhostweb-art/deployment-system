@@ -1,0 +1,1 @@
+deployment-agent ALL=(root) NOPASSWD: /usr/local/sbin/deployment-server-agent-activate staging-*
