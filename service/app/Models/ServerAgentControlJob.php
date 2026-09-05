@@ -28,6 +28,7 @@ class ServerAgentControlJob extends Model
     public const STATUS_AWAITING_HEARTBEAT = 'awaiting_heartbeat';
     public const STATUS_SUCCEEDED = 'succeeded';
     public const STATUS_FAILED = 'failed';
+    public const STATUS_SUPERSEDED = 'superseded';
 
     protected $fillable = [
         'public_id',

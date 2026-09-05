@@ -6,6 +6,7 @@ use App\Models\Agent;
 use App\Models\AuditLogEntry;
 use App\Models\Project;
 use App\Models\ServerAgentControlJob;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Queue/claim/report/verify lifecycle for a Server Agent exact-commit
@@ -123,21 +124,83 @@ class ServerAgentControlJobService
         return $job;
     }
 
+    /**
+     * Root-cause fix (Server Agent 1.4.1 bootstrap follow-up — Control
+     * Job #1 targeted a version the Agent already reported once the
+     * manual bootstrap completed): a queued job is no longer handed out
+     * blindly by status alone. Any queued job whose target_version is
+     * already satisfied by the Agent's own reported agent_version (a
+     * real semantic-version comparison via version_compare(), never a
+     * lexical string compare — "1.4.10" must not sort before "1.4.9")
+     * is atomically superseded here, with the comparison recorded in
+     * error_message for auditability, and skipped in favor of the next
+     * genuinely-eligible queued job. Only queued -> running or queued ->
+     * superseded transitions happen here; running/awaiting_heartbeat/
+     * succeeded/failed rows are never touched (the query is scoped to
+     * STATUS_QUEUED only). lockForUpdate() inside the transaction
+     * prevents two concurrent poll requests from racing into two
+     * different outcomes for the same row.
+     */
     public function claimNext(Agent $agent): ?ServerAgentControlJob
     {
-        $job = ServerAgentControlJob::query()
-            ->where('agent_id', $agent->id)
-            ->where('status', ServerAgentControlJob::STATUS_QUEUED)
-            ->oldest('created_at')
-            ->first();
+        return DB::transaction(function () use ($agent): ?ServerAgentControlJob {
+            $candidates = ServerAgentControlJob::query()
+                ->where('agent_id', $agent->id)
+                ->where('status', ServerAgentControlJob::STATUS_QUEUED)
+                ->oldest('created_at')
+                ->lockForUpdate()
+                ->get();
 
-        if ($job === null) {
+            foreach ($candidates as $job) {
+                if ($this->isAlreadySatisfied($agent, $job)) {
+                    $this->supersede($agent, $job);
+
+                    continue;
+                }
+
+                $job->update(['status' => ServerAgentControlJob::STATUS_RUNNING]);
+
+                return $job;
+            }
+
             return null;
+        });
+    }
+
+    private function isAlreadySatisfied(Agent $agent, ServerAgentControlJob $job): bool
+    {
+        if (!is_string($agent->agent_version) || $agent->agent_version === '') {
+            return false;
+        }
+        if (!is_string($job->target_version) || $job->target_version === '') {
+            return false;
         }
 
-        $job->update(['status' => ServerAgentControlJob::STATUS_RUNNING]);
+        return version_compare($agent->agent_version, $job->target_version, '>=');
+    }
 
-        return $job;
+    private function supersede(Agent $agent, ServerAgentControlJob $job): void
+    {
+        $reason = "Superseded before claim: Agent is already at version {$agent->agent_version}, "
+            . "which satisfies target version {$job->target_version}.";
+
+        $job->update([
+            'status' => ServerAgentControlJob::STATUS_SUPERSEDED,
+            'error_message' => $reason,
+        ]);
+
+        AuditLogEntry::record(
+            actorType: AuditLogEntry::ACTOR_SYSTEM,
+            actorIdentifier: null,
+            action: 'server_agent.upgrade_superseded',
+            subjectType: ServerAgentControlJob::class,
+            subjectId: $job->id,
+            metadata: [
+                'agent_id' => $agent->id,
+                'agent_version' => $agent->agent_version,
+                'target_version' => $job->target_version,
+            ],
+        );
     }
 
     public function reportUpgradeStarted(
