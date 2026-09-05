@@ -59,10 +59,15 @@ try {
         throw new RuntimeException('Package source is missing.');
     }
     SafeFilesystem::copyRecursiveSafely($packageSource, $packageSource, $seed . '/agent');
-    // The hotfix-1.3.4-p1-* files are pre-existing, unrelated WIP in
-    // agent/install/ and agent/tests/ — never part of the shipped
-    // Server Agent runtime tree, and excluded here the same way a real
-    // package build would only ever archive agent.php + lib/.
+    // The hotfix-1.3.4-p1-* files are pre-existing, unrelated WIP sitting
+    // untracked in agent/install/ and agent/tests/ in this workspace —
+    // they were never committed, so a real package build (which archives
+    // the ENTIRE agent/ subtree as committed at the exact target commit,
+    // install/, tests/, release/ included — see
+    // GitExactCommitSubtreeMaterializer) could never pick them up either.
+    // They are removed here only so this test's own synthetic seed
+    // commit doesn't accidentally include workspace-only files that no
+    // real commit would ever contain.
     SafeFilesystem::recursiveDelete($seed . '/agent/install');
     SafeFilesystem::recursiveDelete($seed . '/agent/tests');
     SafeFilesystem::recursiveDelete($seed . '/agent/release');

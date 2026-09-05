@@ -14,7 +14,7 @@
     }
   },
   "candidate_snapshot_sha256": {
-    "agent.php": "c9c0a23a8995d4593ba137fa4c67741f03bbb163322ff5cc0f11c824bb8adc5f",
+    "agent.php": "e8b106424a0ec4443da5b63cb8f2a34acc042ba2e8975654fac13d4b3c120b68",
     "lib/PipelineExecutor.php": "73985fc464f51145dbd329e1f7c8b56486fbd67a0fb0e0eaf1376582603361af"
   },
   "candidate_overlay": ["agent.php", "lib/PipelineExecutor.php", "lib/SelfUpgradeManager.php"],

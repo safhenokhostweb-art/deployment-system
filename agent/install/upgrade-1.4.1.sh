@@ -56,8 +56,14 @@ B_AGENT=65cec6541cdd4144a2493e79c002d0244fdfe81df27e8e524a6cc1b223ecdbfa
 B_REGISTRY=6397de566e08429654144994d4b69f6229d75d2d571cdd11d8c0292f6efd53a8
 B_HELPER=23560656f95e29c9de6b7eda070774f7d356da44cbfbdd52502291bfd81b1969
 B_PIPELINE=9f8f693b120cd29ba14bef40b5151fa41303cb981d2f4df80d697b31741dcf2a
-# Candidate (1.4.1) hashes.
-C_AGENT=c9c0a23a8995d4593ba137fa4c67741f03bbb163322ff5cc0f11c824bb8adc5f
+# Candidate (1.4.1) hashes. C_AGENT is the canonical LF git blob hash
+# (git cat-file -p 757e1b5:agent/agent.php | sha256sum) — a prior value
+# here was computed against a CRLF-converted copy of the same content
+# and could never match a real Linux checkout or ServerAgentPackage
+# (both use core.autocrlf=false/core.eol=lf), so this check would
+# always fail. See ServerAgentBootstrapIntegrityTest for the regression
+# guard against this recurring.
+C_AGENT=e8b106424a0ec4443da5b63cb8f2a34acc042ba2e8975654fac13d4b3c120b68
 C_PIPELINE=73985fc464f51145dbd329e1f7c8b56486fbd67a0fb0e0eaf1376582603361af
 
 sha() { sha256sum "$1" | awk '{print $1}'; }
