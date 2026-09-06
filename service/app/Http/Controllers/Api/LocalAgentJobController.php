@@ -117,15 +117,14 @@ class LocalAgentJobController extends Controller
         // resolves or creates one) — its dependency contract is resolved
         // ONCE and frozen there, so a retry/re-poll of the SAME Release
         // always replays the exact same commit, never a newer upstream
-        // one. ACTION_PUBLISH has no Release to anchor a snapshot to, so it
-        // resolves live on every call (unchanged in spirit from the prior
-        // always-live config read, just now commit-resolved instead of a
-        // hand-maintained literal).
+        // one. ACTION_PUBLISH has no Release yet, but it does create a
+        // persistent Artifact, so its contract is frozen on the PublishJob
+        // and later carried onto the Release created for the pushed commit.
         $dependencyContract = null;
         if (in_array($job->action, [PublishJob::ACTION_BUILD_ARTIFACT, PublishJob::ACTION_PUBLISH], true)) {
             $dependencyContract = $job->release !== null
                 ? $this->dependencySnapshots->resolveForRelease($job->release)
-                : $this->dependencySnapshots->resolveWithoutFreezing($job->project->project_key);
+                : $this->dependencySnapshots->resolveForPublishJob($job);
         }
 
         return response()->json([

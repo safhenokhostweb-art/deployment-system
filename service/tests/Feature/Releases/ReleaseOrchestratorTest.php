@@ -3,10 +3,10 @@
 namespace Tests\Feature\Releases;
 
 use App\Models\Artifact;
-use App\Models\Deployment;
+use App\Models\LocalAgent;
 use App\Models\Project;
+use App\Models\PublishJob;
 use App\Models\Release;
-use App\Services\Deployment\DeploymentDispatcher;
 use App\Services\Releases\ReleaseOrchestrator;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -112,6 +112,41 @@ class ReleaseOrchestratorTest extends TestCase
 
         $this->assertSame(Release::STATUS_AWAITING_ARTIFACT, $release->status);
         $this->assertNull($artifact->fresh()->release_id);
+    }
+
+    public function test_it_carries_a_publish_job_dependency_snapshot_onto_the_eventual_release(): void
+    {
+        $project = Project::factory()->create();
+        $commitHash = str_repeat('9', 40);
+        $snapshot = [
+            'version' => 2,
+            'required' => true,
+            'dependencies' => [['commit_sha' => str_repeat('2', 40)]],
+        ];
+        $job = PublishJob::factory()->create([
+            'local_agent_id' => LocalAgent::factory(),
+            'project_id' => $project->id,
+            'action' => PublishJob::ACTION_PUBLISH,
+            'dependency_snapshot' => $snapshot,
+        ]);
+        Artifact::factory()->create([
+            'project_id' => $project->id,
+            'publish_job_id' => $job->id,
+            'commit_hash' => $commitHash,
+            'branch' => 'main',
+            'status' => Artifact::STATUS_AVAILABLE,
+            'release_id' => null,
+        ]);
+        $release = Release::factory()->create([
+            'project_id' => $project->id,
+            'commit_hash' => $commitHash,
+            'branch' => 'main',
+            'dependency_snapshot' => null,
+        ]);
+
+        $synced = app(ReleaseOrchestrator::class)->syncArtifactState($release);
+
+        $this->assertSame($snapshot, $synced->dependency_snapshot);
     }
 
     public function test_webhook_release_preparation_does_not_create_a_deployment(): void

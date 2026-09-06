@@ -2,6 +2,7 @@
 
 namespace Tests\Unit\Services\Publish;
 
+use App\Models\Artifact;
 use App\Models\Deployment;
 use App\Models\Project;
 use App\Models\Release;
@@ -34,6 +35,7 @@ class ArtifactDependencySnapshotServiceTest extends TestCase
     {
         $saas = Project::factory()->create(['project_key' => 'saas-platform', 'branch' => 'main']);
         $release = Release::factory()->ready()->create(['project_id' => $saas->id, 'commit_hash' => $commit, 'branch' => 'main']);
+        Artifact::factory()->create(['project_id' => $saas->id, 'release_id' => $release->id, 'commit_hash' => $commit, 'branch' => 'main']);
         Deployment::factory()->create([
             'project_id' => $saas->id,
             'server_id' => $saas->server_id,
@@ -76,18 +78,10 @@ class ArtifactDependencySnapshotServiceTest extends TestCase
         $firstContract = $service->resolveForRelease($release);
         $this->assertSame($firstCommit, $firstContract['dependencies'][0]['commit_sha']);
 
-        // saas-platform ships a NEWER ready Release/successful Deployment.
+        // saas-platform ships a NEWER ready Release, not yet deployed.
         $secondCommit = str_repeat('2', 40);
         $newerRelease = Release::factory()->ready()->create(['project_id' => $saas->id, 'commit_hash' => $secondCommit, 'branch' => 'main']);
-        Deployment::factory()->create([
-            'project_id' => $saas->id,
-            'server_id' => $saas->server_id,
-            'release_id' => $newerRelease->id,
-            'status' => Deployment::STATUS_SUCCEEDED,
-            'commit_hash' => $secondCommit,
-            'branch' => 'main',
-            'finished_at' => now()->addMinute(),
-        ]);
+        Artifact::factory()->create(['project_id' => $saas->id, 'release_id' => $newerRelease->id, 'commit_hash' => $secondCommit, 'branch' => 'main']);
 
         // Re-resolving (a retry) for the SAME Release must NOT advance.
         $retryContract = $service->resolveForRelease($release->fresh());
@@ -105,15 +99,7 @@ class ArtifactDependencySnapshotServiceTest extends TestCase
 
         $secondCommit = str_repeat('2', 40);
         $newerSaasRelease = Release::factory()->ready()->create(['project_id' => $saas->id, 'commit_hash' => $secondCommit, 'branch' => 'main']);
-        Deployment::factory()->create([
-            'project_id' => $saas->id,
-            'server_id' => $saas->server_id,
-            'release_id' => $newerSaasRelease->id,
-            'status' => Deployment::STATUS_SUCCEEDED,
-            'commit_hash' => $secondCommit,
-            'branch' => 'main',
-            'finished_at' => now()->addMinute(),
-        ]);
+        Artifact::factory()->create(['project_id' => $saas->id, 'release_id' => $newerSaasRelease->id, 'commit_hash' => $secondCommit, 'branch' => 'main']);
 
         $newerCustomerRelease = Release::factory()->create(['project_id' => $customer->id, 'commit_hash' => str_repeat('d', 40), 'branch' => 'main']);
         $contract = app(ArtifactDependencySnapshotService::class)->resolveForRelease($newerCustomerRelease);

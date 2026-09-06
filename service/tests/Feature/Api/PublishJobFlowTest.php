@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Api;
 
+use App\Models\Artifact;
 use App\Models\Deployment;
 use App\Models\LocalAgent;
 use App\Models\LocalProjectMapping;
@@ -11,6 +12,7 @@ use App\Models\Release;
 use App\Services\Publish\PublishJobService;
 use Database\Factories\LocalAgentFactory;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 use Tests\Support\SignsLocalAgentRequests;
 use Tests\TestCase;
 
@@ -158,6 +160,7 @@ class PublishJobFlowTest extends TestCase
         // resolves the Server Agent upgrade target.
         $saasCommit = str_repeat('9', 40);
         $saasRelease = Release::factory()->ready()->create(['project_id' => $dependencyProject->id, 'commit_hash' => $saasCommit, 'branch' => 'main']);
+        Artifact::factory()->create(['project_id' => $dependencyProject->id, 'release_id' => $saasRelease->id, 'commit_hash' => $saasCommit, 'branch' => 'main']);
         Deployment::factory()->create([
             'project_id' => $dependencyProject->id,
             'server_id' => $dependencyProject->server_id,
@@ -226,6 +229,7 @@ class PublishJobFlowTest extends TestCase
         LocalProjectMapping::factory()->create(['local_agent_id' => $agent->id, 'project_id' => $dependencyProject->id, 'local_path' => '/opt/workspaces/saas-platform', 'source_workspace_path' => '/opt/workspaces/saas-platform', 'git_branch' => 'main']);
         $firstSaasCommit = str_repeat('9', 40);
         $firstRelease = Release::factory()->ready()->create(['project_id' => $dependencyProject->id, 'commit_hash' => $firstSaasCommit, 'branch' => 'main']);
+        Artifact::factory()->create(['project_id' => $dependencyProject->id, 'release_id' => $firstRelease->id, 'commit_hash' => $firstSaasCommit, 'branch' => 'main']);
         Deployment::factory()->create([
             'project_id' => $dependencyProject->id,
             'server_id' => $dependencyProject->server_id,
@@ -245,6 +249,7 @@ class PublishJobFlowTest extends TestCase
         // job legitimately being re-polled/retried).
         $secondSaasCommit = str_repeat('8', 40);
         $secondRelease = Release::factory()->ready()->create(['project_id' => $dependencyProject->id, 'commit_hash' => $secondSaasCommit, 'branch' => 'main']);
+        Artifact::factory()->create(['project_id' => $dependencyProject->id, 'release_id' => $secondRelease->id, 'commit_hash' => $secondSaasCommit, 'branch' => 'main']);
         Deployment::factory()->create([
             'project_id' => $dependencyProject->id,
             'server_id' => $dependencyProject->server_id,
@@ -266,13 +271,41 @@ class PublishJobFlowTest extends TestCase
         $this->assertSame($firstPoll->json('job.dependency_contract'), $secondPoll->json('job.dependency_contract'));
     }
 
+    public function test_repolling_a_release_less_publish_job_replays_its_job_frozen_contract(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create(['agent_version' => config('deployment.latest_local_agent_version')]);
+        $customer = $this->mappedProject($agent);
+        $customer->update(['project_key' => 'customer-site']);
+        $saas = Project::factory()->create(['project_key' => 'saas-platform', 'branch' => 'main']);
+
+        $s2 = str_repeat('2', 40);
+        $s2Release = Release::factory()->ready()->create(['project_id' => $saas->id, 'commit_hash' => $s2, 'branch' => 'main']);
+        Artifact::factory()->create(['project_id' => $saas->id, 'release_id' => $s2Release->id, 'commit_hash' => $s2, 'branch' => 'main']);
+        $job = app(PublishJobService::class)->queueApprovedPublish($agent, $customer, 'Coordinated customer change', 'dev@example.test');
+
+        $headers = $this->headersFor($agent, 'GET', '/api/local-agent/publish-jobs/next');
+        $first = $this->get('/api/local-agent/publish-jobs/next', $headers)->assertOk();
+        $first->assertJsonPath('job.dependency_contract.dependencies.0.commit_sha', $s2);
+        $this->assertNull($job->release_id);
+        $this->assertSame($s2, $job->fresh()->dependency_snapshot['dependencies'][0]['commit_sha']);
+
+        $s3 = str_repeat('3', 40);
+        $s3Release = Release::factory()->ready()->create(['project_id' => $saas->id, 'commit_hash' => $s3, 'branch' => 'main']);
+        Artifact::factory()->create(['project_id' => $saas->id, 'release_id' => $s3Release->id, 'commit_hash' => $s3, 'branch' => 'main']);
+        $job->fresh()->update(['status' => PublishJob::STATUS_APPROVED]);
+
+        $second = $this->get('/api/local-agent/publish-jobs/next', $this->headersFor($agent, 'GET', '/api/local-agent/publish-jobs/next'))->assertOk();
+        $second->assertJsonPath('job.dependency_contract.dependencies.0.commit_sha', $s2);
+        $this->assertSame($first->json('job.dependency_contract'), $second->json('job.dependency_contract'));
+    }
+
     public function test_customer_site_assigned_artifact_contract_fails_closed_on_old_local_agent(): void
     {
         $agent = LocalAgent::factory()->approved()->create(['agent_version' => '1.4.7']);
         $project = $this->mappedProject($agent);
         $project->update(['project_key' => 'customer-site']);
 
-        $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
+        $this->expectException(HttpException::class);
         $this->expectExceptionMessage('upgrade required');
         app(PublishJobService::class)->queueArtifactBuild($agent, $project, str_repeat('e', 40), 'main', 'dev@example.test');
     }
@@ -287,7 +320,7 @@ class PublishJobFlowTest extends TestCase
         try {
             $service->queueArtifactBuild($agent, $project, str_repeat('e', 40), 'main', 'system:release-orchestrator');
             $this->fail('Agent 1.5.1 unexpectedly passed the assigned-artifact 1.5.2 gate.');
-        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $exception) {
+        } catch (HttpException $exception) {
             $this->assertSame(409, $exception->getStatusCode());
             $this->assertStringContainsString('Local Agent 1.5.2 or newer', $exception->getMessage());
         }
@@ -310,7 +343,7 @@ class PublishJobFlowTest extends TestCase
         $project = $this->mappedProject($agent);
         $project->update(['project_key' => 'customer-site']);
 
-        $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
+        $this->expectException(HttpException::class);
         $this->expectExceptionMessage('upgrade required');
         app(PublishJobService::class)->queueArtifactBuild($agent, $project, str_repeat('e', 40), 'main', 'dev@example.test');
     }

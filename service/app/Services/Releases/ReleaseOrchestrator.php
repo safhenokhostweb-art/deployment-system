@@ -199,6 +199,12 @@ class ReleaseOrchestrator
             if ($artifact !== null) {
                 $artifact->update(['release_id' => $release->id]);
 
+                if ($release->dependency_snapshot === null
+                    && is_array($artifact->publishJob?->dependency_snapshot)
+                    && $artifact->publishJob->dependency_snapshot !== []) {
+                    $release->forceFill(['dependency_snapshot' => $artifact->publishJob->dependency_snapshot])->save();
+                }
+
                 $metadata = is_array($release->metadata) ? $release->metadata : [];
                 $legacyFallback = $release->isLegacyFallbackEligible()
                     && ($metadata['release_ready'] ?? false) === true;

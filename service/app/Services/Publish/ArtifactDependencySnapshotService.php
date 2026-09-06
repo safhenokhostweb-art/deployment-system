@@ -2,6 +2,7 @@
 
 namespace App\Services\Publish;
 
+use App\Models\PublishJob;
 use App\Models\Release;
 use App\Support\Deployment\ArtifactDependencyPolicy;
 use Illuminate\Support\Facades\DB;
@@ -25,8 +26,7 @@ final class ArtifactDependencySnapshotService
 {
     public function __construct(
         private readonly SaasDependencyTargetResolver $targets,
-    ) {
-    }
+    ) {}
 
     /**
      * Resolves and freezes this Release's dependency snapshot on first
@@ -67,21 +67,36 @@ final class ArtifactDependencySnapshotService
     }
 
     /**
-     * Resolves the current dependency contract WITHOUT freezing it onto
-     * any Release — used only for job actions that have no Release to
-     * anchor a snapshot to (see LocalAgentJobController::next()'s
-     * ACTION_PUBLISH path). Deliberately re-resolves on every call.
+     * ACTION_PUBLISH builds a persistent Artifact before its pushed commit
+     * has a Release. Freeze on the PublishJob so a lost response/retry
+     * cannot rebuild that Artifact against a newer dependency target.
      *
      * @return array<string, mixed>
      */
-    public function resolveWithoutFreezing(string $projectKey): array
+    public function resolveForPublishJob(PublishJob $job): array
     {
+        $projectKey = $job->project->project_key;
         $template = ArtifactDependencyPolicy::template($projectKey);
         if ($template['required'] !== true) {
             return [];
         }
 
-        return $this->resolveContractFor($projectKey);
+        if (is_array($job->dependency_snapshot) && $job->dependency_snapshot !== []) {
+            return $job->dependency_snapshot;
+        }
+
+        return DB::transaction(function () use ($job, $projectKey): array {
+            /** @var PublishJob $locked */
+            $locked = PublishJob::query()->lockForUpdate()->findOrFail($job->id);
+            if (is_array($locked->dependency_snapshot) && $locked->dependency_snapshot !== []) {
+                return $locked->dependency_snapshot;
+            }
+
+            $contract = $this->resolveContractFor($projectKey);
+            $locked->forceFill(['dependency_snapshot' => $contract])->save();
+
+            return $contract;
+        });
     }
 
     private static function isFrozen(Release $release): bool
@@ -102,6 +117,9 @@ final class ArtifactDependencySnapshotService
 
         $target = $this->targets->resolve($mappings[0], $branches[0]);
 
-        return ArtifactDependencyPolicy::resolveContract($projectKey, $target['commit_sha']);
+        $contract = ArtifactDependencyPolicy::resolveContract($projectKey, $target['commit_sha']);
+        $contract['dependency_target'] = $target;
+
+        return $contract;
     }
 }

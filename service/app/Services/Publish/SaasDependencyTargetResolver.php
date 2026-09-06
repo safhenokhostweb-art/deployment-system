@@ -2,18 +2,18 @@
 
 namespace App\Services\Publish;
 
-use App\Models\Deployment;
+use App\Models\Artifact;
 use App\Models\Project;
 use App\Models\Release;
+use App\Services\Releases\ReleaseRecoveryEligibility;
 
 /**
  * Root-cause fix (Customer Release #74 / Publish Job #256): resolves the
  * authoritative upstream commit a pinned Composer path dependency should
- * point at — mirrors ServerAgentUpgradeTargetResolver's exact reasoning
- * (the project's last successful Deployment, backed by a matching ready
- * Release, is the one trusted "current production state" source) applied
- * to an arbitrary upstream project instead of deployment-system's own
- * Server Agent runtime.
+ * point at. The upstream project's current configured-branch Release is
+ * the target even before deployment. Any newer Release row supersedes an
+ * older one, and the current one must itself be ready with a matching
+ * available Artifact; resolution never skips backward to stale success.
  *
  * Deliberately never reads origin/main HEAD, a mutable persistent
  * workspace's checked-out HEAD, or any GitHub-specific API — this is a
@@ -23,7 +23,11 @@ use App\Models\Release;
  */
 final class SaasDependencyTargetResolver
 {
-    /** @return array{commit_sha: string, branch: string, repository_mapping: string} */
+    public function __construct(
+        private readonly ReleaseRecoveryEligibility $releaseEligibility,
+    ) {}
+
+    /** @return array{commit_sha: string, branch: string, repository_mapping: string, release_id: string, artifact_id: string, selection_rule: string} */
     public function resolve(string $repositoryMapping, string $branch): array
     {
         $project = Project::query()
@@ -32,25 +36,34 @@ final class SaasDependencyTargetResolver
             ->first();
         abort_unless($project instanceof Project, 409, "The '{$repositoryMapping}' project is unavailable as a dependency pin authority.");
 
-        $deployment = $project->latestSuccessfulDeployment();
-        abort_unless($deployment instanceof Deployment, 409, "No successful '{$repositoryMapping}' deployment is available to pin a dependency commit.");
-        abort_unless(preg_match('/^[0-9a-f]{40}$/', (string) $deployment->commit_hash) === 1, 409, "The authoritative '{$repositoryMapping}' deployment has an invalid commit.");
-        abort_unless(is_string($deployment->branch) && hash_equals($branch, $deployment->branch), 409, "The authoritative '{$repositoryMapping}' deployment is not on the expected branch ('{$branch}').");
+        abort_unless(hash_equals((string) $project->branch, $branch), 409, "The '{$repositoryMapping}' project does not currently track the expected branch ('{$branch}').");
 
-        $release = $deployment->release;
+        $release = $this->releaseEligibility->currentReleaseFor($project);
         abort_unless(
             $release instanceof Release
                 && $release->isReady()
-                && hash_equals((string) $deployment->commit_hash, (string) $release->commit_hash)
-                && hash_equals((string) $deployment->branch, (string) $release->branch),
+                && preg_match('/^[0-9a-f]{40}$/', (string) $release->commit_hash) === 1
+                && hash_equals($branch, (string) $release->branch),
             409,
-            "The authoritative '{$repositoryMapping}' deployment is not backed by a matching ready Release.",
+            "The current '{$repositoryMapping}' Release on '{$branch}' is not ready to be pinned.",
         );
 
+        $artifact = $release->artifacts()
+            ->where('project_id', $project->id)
+            ->where('commit_hash', $release->commit_hash)
+            ->where('branch', $release->branch)
+            ->where('status', Artifact::STATUS_AVAILABLE)
+            ->latest('id')
+            ->first();
+        abort_unless($artifact instanceof Artifact, 409, "The current ready '{$repositoryMapping}' Release has no matching available Artifact.");
+
         return [
-            'commit_sha' => (string) $deployment->commit_hash,
-            'branch' => (string) $deployment->branch,
+            'commit_sha' => (string) $release->commit_hash,
+            'branch' => (string) $release->branch,
             'repository_mapping' => $repositoryMapping,
+            'release_id' => (string) $release->public_id,
+            'artifact_id' => (string) $artifact->public_id,
+            'selection_rule' => 'current_project_branch_release_v1',
         ];
     }
 }
