@@ -39,6 +39,7 @@ class Release extends Model
         'failure_code',
         'failure_message',
         'metadata',
+        'dependency_snapshot',
     ];
 
     protected function casts(): array
@@ -50,6 +51,7 @@ class Release extends Model
             'ready_at' => 'datetime',
             'failed_at' => 'datetime',
             'metadata' => 'array',
+            'dependency_snapshot' => 'array',
         ];
     }
 

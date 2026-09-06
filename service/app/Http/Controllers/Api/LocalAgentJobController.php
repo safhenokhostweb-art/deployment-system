@@ -7,6 +7,7 @@ use App\Models\LocalAgent;
 use App\Models\LocalProjectMapping;
 use App\Models\PublishJob;
 use App\Services\Publish\PublishJobService;
+use App\Services\Publish\ArtifactDependencySnapshotService;
 use App\Services\Publish\LocalAgentControlJobService;
 use App\Services\Releases\ReleaseEvidenceService;
 use App\Support\Deployment\ArtifactDependencyPolicy;
@@ -27,6 +28,7 @@ class LocalAgentJobController extends Controller
         private readonly PublishJobService $publishJobs,
         private readonly LocalAgentControlJobService $controlJobs,
         private readonly ReleaseEvidenceService $releaseEvidence,
+        private readonly ArtifactDependencySnapshotService $dependencySnapshots,
     ) {
     }
 
@@ -110,6 +112,22 @@ class LocalAgentJobController extends Controller
             }
         }
 
+        // Root-cause fix (Customer Release #74 / Publish Job #256): an
+        // ACTION_BUILD_ARTIFACT job always has a Release (queueArtifactBuild()
+        // resolves or creates one) — its dependency contract is resolved
+        // ONCE and frozen there, so a retry/re-poll of the SAME Release
+        // always replays the exact same commit, never a newer upstream
+        // one. ACTION_PUBLISH has no Release to anchor a snapshot to, so it
+        // resolves live on every call (unchanged in spirit from the prior
+        // always-live config read, just now commit-resolved instead of a
+        // hand-maintained literal).
+        $dependencyContract = null;
+        if (in_array($job->action, [PublishJob::ACTION_BUILD_ARTIFACT, PublishJob::ACTION_PUBLISH], true)) {
+            $dependencyContract = $job->release !== null
+                ? $this->dependencySnapshots->resolveForRelease($job->release)
+                : $this->dependencySnapshots->resolveWithoutFreezing($job->project->project_key);
+        }
+
         return response()->json([
             'job' => [
                 'id' => $job->public_id,
@@ -125,7 +143,7 @@ class LocalAgentJobController extends Controller
                 'artifact_commit_hash' => $job->action === PublishJob::ACTION_BUILD_ARTIFACT ? $job->reviewed_head_sha : null,
                 'artifact_branch' => $job->action === PublishJob::ACTION_BUILD_ARTIFACT ? $job->reviewed_branch : null,
                 'build_contract_version' => in_array($job->action, [PublishJob::ACTION_BUILD_ARTIFACT, PublishJob::ACTION_PUBLISH], true) ? 2 : null,
-                'dependency_contract' => in_array($job->action, [PublishJob::ACTION_BUILD_ARTIFACT, PublishJob::ACTION_PUBLISH], true) ? ArtifactDependencyPolicy::contract($job->project->project_key) : null,
+                'dependency_contract' => $dependencyContract,
                 'evidence_contract' => $job->action === PublishJob::ACTION_BUILD_ARTIFACT ? $job->evidence_contract : null,
             ],
         ]);

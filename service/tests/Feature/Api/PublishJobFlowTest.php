@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Api;
 
+use App\Models\Deployment;
 use App\Models\LocalAgent;
 use App\Models\LocalProjectMapping;
 use App\Models\Project;
@@ -150,6 +151,22 @@ class PublishJobFlowTest extends TestCase
         $project->update(['project_key' => 'customer-site']);
         $dependencyProject = Project::factory()->create(['project_key' => 'saas-platform', 'repository' => 'owner/saas-platform']);
         LocalProjectMapping::factory()->create(['local_agent_id' => $agent->id, 'project_id' => $dependencyProject->id, 'local_path' => '/opt/workspaces/saas-platform', 'source_workspace_path' => '/opt/workspaces/saas-platform', 'git_branch' => 'main']);
+        // Root-cause fix (Customer Release #74 / Publish Job #256): the
+        // pinned commit is no longer a config literal — it is resolved
+        // from saas-platform's own authoritative (ready Release + succeeded
+        // Deployment) state, exactly like ServerAgentUpgradeTargetResolver
+        // resolves the Server Agent upgrade target.
+        $saasCommit = str_repeat('9', 40);
+        $saasRelease = Release::factory()->ready()->create(['project_id' => $dependencyProject->id, 'commit_hash' => $saasCommit, 'branch' => 'main']);
+        Deployment::factory()->create([
+            'project_id' => $dependencyProject->id,
+            'server_id' => $dependencyProject->server_id,
+            'release_id' => $saasRelease->id,
+            'status' => Deployment::STATUS_SUCCEEDED,
+            'commit_hash' => $saasCommit,
+            'branch' => 'main',
+            'finished_at' => now(),
+        ]);
         app(PublishJobService::class)->queueArtifactBuild($agent, $project, '1bf0d8913948f928e90c452d8896a71922ac0398', 'main', 'dev@example.test');
 
         $headers = $this->headersFor($agent, 'GET', '/api/local-agent/publish-jobs/next');
@@ -159,10 +176,9 @@ class PublishJobFlowTest extends TestCase
             ->assertJsonPath('job.dependency_contract.required', true)
             ->assertJsonCount(7, 'job.dependency_contract.dependencies')
             ->assertJsonPath('job.dependency_contract.dependencies.5.package_name', 'saas-platform/modules-theme-runtime')
-            ->assertJsonPath('job.dependency_contract.dependencies.5.commit_sha', '977b88f9009c4b7c881b14334884a0860f717f3a')
+            ->assertJsonPath('job.dependency_contract.dependencies.5.commit_sha', $saasCommit)
             ->assertJsonPath('job.dependency_contract.dependencies.6.package_name', 'saas-platform/modules-extension-sdk')
-            ->assertJsonPath('job.dependency_contract.dependencies.6.destination_path', '../saas-platform/packages/saas-platform/modules/extension-sdk')
-            ->assertJsonPath('job.dependency_contract.dependencies.6.commit_sha', '977b88f9009c4b7c881b14334884a0860f717f3a');
+            ->assertJsonPath('job.dependency_contract.dependencies.6.commit_sha', $saasCommit);
         $dependencies = $response->json('job.dependency_contract.dependencies');
         $themeRuntimePins = array_values(array_filter(
             $dependencies,
@@ -171,6 +187,16 @@ class PublishJobFlowTest extends TestCase
         $this->assertCount(1, $themeRuntimePins);
         $dependency = $themeRuntimePins[0];
         $this->assertArrayNotHasKey('repository_url', $dependency);
+        $extensionSdkPins = array_values(array_filter(
+            $dependencies,
+            static fn (array $dependency): bool => ($dependency['destination_path'] ?? null) === '../saas-platform/packages/saas-platform/modules/extension-sdk',
+        ));
+        $this->assertCount(1, $extensionSdkPins);
+
+        // Frozen on the Release, not merely echoed on this one response.
+        $job = PublishJob::query()->latest('id')->first();
+        $this->assertIsArray($job->release->fresh()->dependency_snapshot);
+        $this->assertSame($saasCommit, $job->release->fresh()->dependency_snapshot['dependencies'][5]['commit_sha']);
 
         $syncHeaders = $this->headersFor($agent, 'GET', '/api/local-agent/projects');
         $sync = $this->get('/api/local-agent/projects', $syncHeaders)->assertOk();
@@ -181,11 +207,63 @@ class PublishJobFlowTest extends TestCase
             $consumer['dependency_allowlist'],
             static fn (array $dependency): bool => ($dependency['destination_path'] ?? null) === '../saas-platform/packages/saas-platform/modules/theme-runtime',
         ));
-        $this->assertCount(1, array_filter(
-            $consumer['dependency_allowlist'],
-            static fn (array $dependency): bool => ($dependency['destination_path'] ?? null) === '../saas-platform/packages/saas-platform/modules/extension-sdk',
-        ));
         $this->assertArrayNotHasKey('commit_sha', $consumer['dependency_allowlist'][0]);
+    }
+
+    /**
+     * Root-cause fix (Customer Release #74 / Publish Job #256), items D/F/G
+     * together over the REAL HTTP polling endpoint: a re-poll of the SAME
+     * PublishJob (a retry) must replay byte-identical dependency_contract
+     * JSON, even after saas-platform ships a brand-new ready Release in
+     * between the two polls.
+     */
+    public function test_repolling_the_same_build_job_replays_the_frozen_contract_even_after_saas_advances(): void
+    {
+        $agent = LocalAgent::factory()->approved()->create(['agent_version' => config('deployment.latest_local_agent_version')]);
+        $project = $this->mappedProject($agent);
+        $project->update(['project_key' => 'customer-site']);
+        $dependencyProject = Project::factory()->create(['project_key' => 'saas-platform', 'repository' => 'owner/saas-platform']);
+        LocalProjectMapping::factory()->create(['local_agent_id' => $agent->id, 'project_id' => $dependencyProject->id, 'local_path' => '/opt/workspaces/saas-platform', 'source_workspace_path' => '/opt/workspaces/saas-platform', 'git_branch' => 'main']);
+        $firstSaasCommit = str_repeat('9', 40);
+        $firstRelease = Release::factory()->ready()->create(['project_id' => $dependencyProject->id, 'commit_hash' => $firstSaasCommit, 'branch' => 'main']);
+        Deployment::factory()->create([
+            'project_id' => $dependencyProject->id,
+            'server_id' => $dependencyProject->server_id,
+            'release_id' => $firstRelease->id,
+            'status' => Deployment::STATUS_SUCCEEDED,
+            'commit_hash' => $firstSaasCommit,
+            'branch' => 'main',
+            'finished_at' => now(),
+        ]);
+        app(PublishJobService::class)->queueArtifactBuild($agent, $project, '1bf0d8913948f928e90c452d8896a71922ac0398', 'main', 'dev@example.test');
+
+        $firstPoll = $this->get('/api/local-agent/publish-jobs/next', $this->headersFor($agent, 'GET', '/api/local-agent/publish-jobs/next'))->assertOk();
+        $firstPoll->assertJsonPath('job.dependency_contract.dependencies.0.commit_sha', $firstSaasCommit);
+
+        // saas-platform ships a NEWER ready Release/successful Deployment
+        // before the Local Agent polls again (e.g. a slow build, or the
+        // job legitimately being re-polled/retried).
+        $secondSaasCommit = str_repeat('8', 40);
+        $secondRelease = Release::factory()->ready()->create(['project_id' => $dependencyProject->id, 'commit_hash' => $secondSaasCommit, 'branch' => 'main']);
+        Deployment::factory()->create([
+            'project_id' => $dependencyProject->id,
+            'server_id' => $dependencyProject->server_id,
+            'release_id' => $secondRelease->id,
+            'status' => Deployment::STATUS_SUCCEEDED,
+            'commit_hash' => $secondSaasCommit,
+            'branch' => 'main',
+            'finished_at' => now()->addMinute(),
+        ]);
+
+        // Simulates the retry itself (e.g. a lease-expiry recovery
+        // requeuing the same job) — the point under test is what the
+        // dependency contract looks like on re-poll, not how a job
+        // returns to STATUS_QUEUED.
+        PublishJob::query()->latest('id')->first()->update(['status' => PublishJob::STATUS_QUEUED]);
+
+        $secondPoll = $this->get('/api/local-agent/publish-jobs/next', $this->headersFor($agent, 'GET', '/api/local-agent/publish-jobs/next'))->assertOk();
+        $secondPoll->assertJsonPath('job.dependency_contract.dependencies.0.commit_sha', $firstSaasCommit);
+        $this->assertSame($firstPoll->json('job.dependency_contract'), $secondPoll->json('job.dependency_contract'));
     }
 
     public function test_customer_site_assigned_artifact_contract_fails_closed_on_old_local_agent(): void

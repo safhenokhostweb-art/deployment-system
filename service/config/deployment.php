@@ -232,12 +232,14 @@ return [
     // Composer path repositories; this list only ever declared 6, missing
     // modules-extension-sdk. See docs/PINNED_PATH_DEPENDENCIES.md.
     //
-    // The shared commit_sha below is still a stopgap, hand-maintained
-    // literal at this point in the fix — see the follow-up commit that
-    // introduces App\Services\Publish\ArtifactDependencySnapshotService,
-    // which removes commit_sha from this config entirely and resolves it
-    // per-Release from Hub-owned saas-platform Deployment/Release state
-    // instead.
+    // Deliberately no commit_sha here: this policy is an AUTHORIZATION/
+    // SAFETY allowlist only (which packages, at which paths, on which
+    // branch) — never the exact upstream commit. The exact commit is
+    // resolved once per customer-site Release, from Hub-owned
+    // saas-platform Deployment/Release state, by
+    // App\Services\Publish\SaasDependencyTargetResolver, and frozen onto
+    // that Release by App\Services\Publish\ArtifactDependencySnapshotService.
+    // See docs/PINNED_PATH_DEPENDENCIES.md.
     'artifact_dependency_policies' => [
         'customer-site' => [
             // Rollout switch: remains off through mixed-version operation and
@@ -247,7 +249,6 @@ return [
                 'project_id' => 'saas-platform',
                 'repository_mapping' => 'saas-platform',
                 'branch' => 'main',
-                'commit_sha' => '977b88f9009c4b7c881b14334884a0860f717f3a',
                 'package_name' => $package[0],
                 'source_path' => $package[1],
                 'destination_path' => '../saas-platform/' . $package[1],
