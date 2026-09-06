@@ -128,7 +128,23 @@ final class WorkspaceSourcePreparer
             sort($composerPaths, SORT_STRING);
             sort($requestedPaths, SORT_STRING);
             if ($composerPaths !== $requestedPaths) {
-                throw new LocalBuildFailedException('local_workspace_prepare_failed', 'Dependency contract must pin every Composer path repository exactly once.');
+                // Root-cause fix (Customer Release #74 / Publish Job #256):
+                // the prior message never said WHICH paths differed, so a
+                // Hub policy that drifted from the consumer's real
+                // composer.json (added/removed/renamed path repository)
+                // looked identical to any other cause of this failure.
+                // These two lists are deliberately reported even though
+                // they overlap heavily — an operator diagnosing this needs
+                // the exact set difference, not a hint to go diff it
+                // themselves.
+                $missingInContract = array_values(array_diff($composerPaths, $requestedPaths));
+                $extraInContract = array_values(array_diff($requestedPaths, $composerPaths));
+                throw new LocalBuildFailedException(
+                    'local_workspace_prepare_failed',
+                    'Dependency contract must pin every Composer path repository exactly once. '
+                        . 'missing_in_contract=[' . implode(', ', $missingInContract) . '] '
+                        . 'extra_in_contract=[' . implode(', ', $extraInContract) . ']',
+                );
             }
             $dependencyLocks = (new PinnedDependencyMaterializer($this->git, null, $this->retryPolicy, $this->logger))->materialize($workspace, $dependencies, $dependencyAllowlist, $repositoryMappings, $onTick);
         } else {

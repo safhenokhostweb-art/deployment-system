@@ -180,7 +180,17 @@ try {
     $check('fetch failure reports safe mapping branch exit timeout and stderr category diagnostics',str_contains($message,'mapping=saas-platform')&&str_contains($message,'branch=missing-branch')&&str_contains($message,'exit_code=')&&str_contains($message,'timed_out=false')&&str_contains($message,'stderr_category=remote_ref_missing')&&!str_contains($message,$saasRemote));
 
     $missingPin=BuildWorkspace::create($root.'/builds','customer-site','missing-theme-runtime-pin'); $missingContract=$contractSix; array_pop($missingContract['dependencies']);
-    $check('missing dependency pin fails closed',$fails(fn()=>$preparer->prepareRemoteCommit($missingPin,$customerSource,$customerRemote,'origin','main',$customerSixSha,null,$missingContract,$allowSix,$saasMappings))); $missingPin->cleanup();
+    $missingPinMessage=$failureMessage(fn()=>$preparer->prepareRemoteCommit($missingPin,$customerSource,$customerRemote,'origin','main',$customerSixSha,null,$missingContract,$allowSix,$saasMappings)); $missingPin->cleanup();
+    $check('missing dependency pin fails closed',$missingPinMessage!=='');
+    // Root-cause fix (Customer Release #74 / Publish Job #256): the
+    // diagnostic must name the exact path the contract is missing, not
+    // just fail with a generic message.
+    $check('missing dependency pin diagnostic names the exact missing path',str_contains($missingPinMessage,'missing_in_contract=[../saas-platform/packages/saas-platform/modules/theme-runtime]')&&str_contains($missingPinMessage,'extra_in_contract=[]'));
+
+    $extraPin=BuildWorkspace::create($root.'/builds','customer-site','extra-theme-runtime-pin');
+    $extraPinMessage=$failureMessage(fn()=>$preparer->prepareRemoteCommit($extraPin,$customerSource,$customerRemote,'origin','main',$customerFiveSha,null,$contractSix,$allowSix,$saasMappings)); $extraPin->cleanup();
+    $check('contract pin unmatched by composer.json fails closed',$extraPinMessage!=='');
+    $check('extra dependency pin diagnostic names the exact unmatched contract path',str_contains($extraPinMessage,'extra_in_contract=[../saas-platform/packages/saas-platform/modules/theme-runtime]')&&str_contains($extraPinMessage,'missing_in_contract=[]'));
     $duplicatePin=BuildWorkspace::create($root.'/builds','customer-site','duplicate-theme-runtime-pin'); $duplicateContract=$contractSix; $duplicateContract['dependencies'][]=$duplicateContract['dependencies'][5];
     $check('duplicate dependency pin fails closed',$fails(fn()=>$preparer->prepareRemoteCommit($duplicatePin,$customerSource,$customerRemote,'origin','main',$customerSixSha,null,$duplicateContract,$allowSix,$saasMappings))); $duplicatePin->cleanup();
     $unresolved=BuildWorkspace::create($root.'/builds','customer-site','unresolved-theme-runtime'); $unresolvedContract=$contractSix; $unresolvedAllow=$allowSix;

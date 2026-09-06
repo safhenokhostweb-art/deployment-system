@@ -225,6 +225,19 @@ return [
 
     // Versioned, Hub-owned allowlist. Build-request callers cannot supply a
     // repository URL or package path; they can only receive this policy.
+    //
+    // Root-cause fix (Customer Release #74 / Publish Job #256—
+    // "Dependency contract must pin every Composer path repository
+    // exactly once"): customer-site's committed composer.json declares 7
+    // Composer path repositories; this list only ever declared 6, missing
+    // modules-extension-sdk. See docs/PINNED_PATH_DEPENDENCIES.md.
+    //
+    // The shared commit_sha below is still a stopgap, hand-maintained
+    // literal at this point in the fix — see the follow-up commit that
+    // introduces App\Services\Publish\ArtifactDependencySnapshotService,
+    // which removes commit_sha from this config entirely and resolves it
+    // per-Release from Hub-owned saas-platform Deployment/Release state
+    // instead.
     'artifact_dependency_policies' => [
         'customer-site' => [
             // Rollout switch: remains off through mixed-version operation and
@@ -245,6 +258,7 @@ return [
                 ['saas-platform/modules-seo-advanced', 'packages/saas-platform/modules/seo-advanced'],
                 ['saas-platform/core-utils', 'packages/saas-platform/core-utils'],
                 ['saas-platform/modules-theme-runtime', 'packages/saas-platform/modules/theme-runtime'],
+                ['saas-platform/modules-extension-sdk', 'packages/saas-platform/modules/extension-sdk'],
             ]),
         ],
     ],

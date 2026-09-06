@@ -157,9 +157,12 @@ class PublishJobFlowTest extends TestCase
         $response->assertJsonPath('job.build_contract_version', 2)
             ->assertJsonPath('job.dependency_contract.version', 2)
             ->assertJsonPath('job.dependency_contract.required', true)
-            ->assertJsonCount(6, 'job.dependency_contract.dependencies')
+            ->assertJsonCount(7, 'job.dependency_contract.dependencies')
             ->assertJsonPath('job.dependency_contract.dependencies.5.package_name', 'saas-platform/modules-theme-runtime')
-            ->assertJsonPath('job.dependency_contract.dependencies.5.commit_sha', '977b88f9009c4b7c881b14334884a0860f717f3a');
+            ->assertJsonPath('job.dependency_contract.dependencies.5.commit_sha', '977b88f9009c4b7c881b14334884a0860f717f3a')
+            ->assertJsonPath('job.dependency_contract.dependencies.6.package_name', 'saas-platform/modules-extension-sdk')
+            ->assertJsonPath('job.dependency_contract.dependencies.6.destination_path', '../saas-platform/packages/saas-platform/modules/extension-sdk')
+            ->assertJsonPath('job.dependency_contract.dependencies.6.commit_sha', '977b88f9009c4b7c881b14334884a0860f717f3a');
         $dependencies = $response->json('job.dependency_contract.dependencies');
         $themeRuntimePins = array_values(array_filter(
             $dependencies,
@@ -173,10 +176,14 @@ class PublishJobFlowTest extends TestCase
         $sync = $this->get('/api/local-agent/projects', $syncHeaders)->assertOk();
         $consumer = collect($sync->json('projects'))->firstWhere('project_key', 'customer-site');
         $this->assertTrue($consumer['dependency_pinning_required']);
-        $this->assertCount(6, $consumer['dependency_allowlist']);
+        $this->assertCount(7, $consumer['dependency_allowlist']);
         $this->assertCount(1, array_filter(
             $consumer['dependency_allowlist'],
             static fn (array $dependency): bool => ($dependency['destination_path'] ?? null) === '../saas-platform/packages/saas-platform/modules/theme-runtime',
+        ));
+        $this->assertCount(1, array_filter(
+            $consumer['dependency_allowlist'],
+            static fn (array $dependency): bool => ($dependency['destination_path'] ?? null) === '../saas-platform/packages/saas-platform/modules/extension-sdk',
         ));
         $this->assertArrayNotHasKey('commit_sha', $consumer['dependency_allowlist'][0]);
     }
