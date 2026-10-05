@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-foreach (['GitCommandException','GitManager','LocalBuildFailedException','SafeFilesystem','Logger','SecretRedactor','BuildWorkspace','SafetyChecker','RetryPolicy','GitTransportFailureClassifier','RetryableGitFetch','DependencyRepositoryResolver','PinnedDependencyMaterializer','WorkspaceSourcePreparer','ArtifactBuilder'] as $class) require __DIR__ . '/../lib/' . $class . '.php';
+foreach (['GitCommandException','GitManager','LocalBuildFailedException','SafeFilesystem','Logger','SecretRedactor','BuildWorkspace','SafetyChecker','RetryPolicy','GitTransportFailureClassifier','RetryableGitFetch','DependencyRepositoryResolver','ScopedSshConfig','PinnedDependencyMaterializer','WorkspaceSourcePreparer','ArtifactBuilder'] as $class) require __DIR__ . '/../lib/' . $class . '.php';
 
 use LocalAgent\ArtifactBuilder;
 use LocalAgent\BuildWorkspace;

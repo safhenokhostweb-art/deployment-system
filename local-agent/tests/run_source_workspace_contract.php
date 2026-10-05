@@ -14,6 +14,7 @@ require __DIR__ . '/../lib/GitTransportFailureClassifier.php';
 require __DIR__ . '/../lib/SecretRedactor.php';
 require __DIR__ . '/../lib/RetryableGitFetch.php';
 require __DIR__ . '/../lib/DependencyRepositoryResolver.php';
+require __DIR__ . '/../lib/ScopedSshConfig.php';
 require __DIR__ . '/../lib/WorkspaceSourcePreparer.php';
 
 use LocalAgent\BuildWorkspace;
@@ -345,6 +346,8 @@ try {
 
     $mirror = __DIR__ . '/../../deployment-local-agent/agent/lib/WorkspaceSourcePreparer.php';
     $check('shipped WorkspaceSourcePreparer mirrors source implementation', hash_file('sha256', __DIR__ . '/../lib/WorkspaceSourcePreparer.php') === hash_file('sha256', $mirror));
+    $mirrorScoped = __DIR__ . '/../../deployment-local-agent/agent/lib/ScopedSshConfig.php';
+    $check('shipped ScopedSshConfig mirrors source implementation', hash_file('sha256', __DIR__ . '/../lib/ScopedSshConfig.php') === hash_file('sha256', $mirrorScoped));
 } finally {
     if (is_dir($root)) {
         $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);

@@ -25,6 +25,7 @@ require __DIR__ . '/../lib/GitTransportFailureClassifier.php';
 require __DIR__ . '/../lib/SecretRedactor.php';
 require __DIR__ . '/../lib/RetryableGitFetch.php';
 require __DIR__ . '/../lib/DependencyRepositoryResolver.php';
+require __DIR__ . '/../lib/ScopedSshConfig.php';
 require __DIR__ . '/../lib/WorkspaceSourcePreparer.php';
 require __DIR__ . '/../lib/PinnedDependencyMaterializer.php';
 

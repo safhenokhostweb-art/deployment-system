@@ -68,6 +68,18 @@ final class GitManager
         'push' => 180,
         'pull' => 180,
         'fetch' => 180,
+        // Root-cause fix (large-repository exact-commit checkout): materializing
+        // tens of thousands of tracked files into a fresh workspace is a
+        // filesystem-bound operation whose duration scales with the repository
+        // and with whatever else the machine is doing at that moment. A single
+        // flat 60s ceiling (previously hard-coded at the one call site) killed a
+        // real `git checkout --detach --force` mid-materialization even though
+        // the very same checkout completes in seconds when unloaded — the
+        // timeout, not the checkout, was the failure. Sized well above any
+        // measured single-run cost while staying far below the fetch/composer
+        // budgets, and overridable per install via
+        // config.php's git_checkout_timeout_seconds.
+        'checkout' => 600,
     ];
 
     /** Hard cap on accumulated stdout+stderr per command, so an unexpectedly huge `git status` on a giant untracked tree can't exhaust memory. */
@@ -76,8 +88,8 @@ final class GitManager
     /**
      * @param array<string, int> $timeouts overrides merged over
      *     DEFAULT_TIMEOUTS, keyed the same way config.php's
-     *     git_<purpose>_timeout_seconds keys are (status/add/commit/push/pull) —
-     *     see agent.php's construction of this class.
+     *     git_<purpose>_timeout_seconds keys are (status/add/commit/push/
+     *     pull/fetch/checkout) — see agent.php's construction of this class.
      * @param int $jobHeartbeatIntervalSeconds how often run()'s optional
      *     $onTick callback (see run()) is actually invoked while waiting
      *     on a long command — throttled here, not by the caller, so every

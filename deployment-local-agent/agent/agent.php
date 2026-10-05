@@ -58,6 +58,7 @@ require __DIR__ . '/lib/SourceWorkspaceManager.php';
 require __DIR__ . '/lib/SafeFilesystem.php';
 require __DIR__ . '/lib/BuildWorkspace.php';
 require __DIR__ . '/lib/DependencyRepositoryResolver.php';
+require __DIR__ . '/lib/ScopedSshConfig.php';
 require __DIR__ . '/lib/WorkspaceSourcePreparer.php';
 require __DIR__ . '/lib/PinnedDependencyMaterializer.php';
 require __DIR__ . '/lib/ArtifactBuilder.php';
@@ -154,6 +155,7 @@ $git = new GitManager(
         'push' => (int) ($config['git_push_timeout_seconds'] ?? 180),
         'pull' => (int) ($config['git_pull_timeout_seconds'] ?? 180),
         'fetch' => (int) ($config['git_fetch_timeout_seconds'] ?? 180),
+        'checkout' => (int) ($config['git_checkout_timeout_seconds'] ?? 600),
     ],
     jobHeartbeatIntervalSeconds: (int) ($config['job_heartbeat_interval_seconds'] ?? 25),
 );

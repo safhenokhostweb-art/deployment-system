@@ -82,6 +82,33 @@ class SandoghRecipeFixtureTest extends TestCase
         $this->assertEqualsCanonicalizing(['sandogh-api.service', 'sandogh-web.service'], $verifiedServices);
     }
 
+    public function test_fixture_health_gates_run_after_restarts_and_include_direct_origin(): void
+    {
+        $decoded = json_decode(file_get_contents($this->fixturePath()), true);
+        $steps = app(RecipeValidator::class)->validate($decoded)['steps'];
+
+        $restartIndexes = [];
+        $verificationIndexes = [];
+        foreach ($steps as $index => $step) {
+            if ($step['type'] === 'restart_service') {
+                $restartIndexes[] = $index;
+            }
+            if (in_array($step['type'], ['verify_service_active', 'http_health_check'], true)) {
+                $verificationIndexes[] = $index;
+            }
+        }
+
+        $this->assertNotEmpty($restartIndexes);
+        $this->assertNotEmpty($verificationIndexes);
+        $this->assertGreaterThan(max($restartIndexes), min($verificationIndexes), 'Every health gate must run after both services restart and before the recipe can report success.');
+
+        $healthUrls = array_column(array_filter($steps, fn ($step) => $step['type'] === 'http_health_check'), 'url');
+        $this->assertContains('http://127.0.0.1:3000/health', $healthUrls);
+        $this->assertContains('http://127.0.0.1:3001/login', $healthUrls);
+        $this->assertContains('https://sandogh.safhenokhost.ir/api/health', $healthUrls);
+        $this->assertContains('https://sandogh.safhenokhost.ir/login', $healthUrls);
+    }
+
     public function test_fixture_builds_web_with_the_production_api_url_not_localhost(): void
     {
         $decoded = json_decode(file_get_contents($this->fixturePath()), true);

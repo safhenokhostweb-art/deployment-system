@@ -18,6 +18,8 @@ namespace LocalAgent;
  */
 final class Client
 {
+    private const UPLOAD_HEARTBEAT_INTERVAL_NS = 25_000_000_000;
+
     public function __construct(
         private readonly string $baseUrl,
         private readonly string $localAgentId,
@@ -153,6 +155,10 @@ final class Client
 
     $ch = curl_init($url);
 
+    // The independent worker renews the lease. This callback is only a
+    // fallback: synchronous HTTP on every curl progress event stalls upload.
+    $lastHeartbeatAt = hrtime(true);
+
     curl_setopt_array($ch, [
         CURLOPT_CUSTOMREQUEST => strtoupper($method),
         CURLOPT_HTTPHEADER => $headers,
@@ -171,9 +177,16 @@ final class Client
 
         CURLOPT_NOPROGRESS => false,
 
-        CURLOPT_PROGRESSFUNCTION => function () use ($onTick): int {
-            if ($onTick !== null) {
-                $onTick();
+        CURLOPT_PROGRESSFUNCTION => function () use ($onTick, &$lastHeartbeatAt): int {
+            if ($onTick !== null && hrtime(true) - $lastHeartbeatAt >= self::UPLOAD_HEARTBEAT_INTERVAL_NS) {
+                try {
+                    $onTick();
+                } catch (\Throwable) {
+                    $this->logger->warn('Upload heartbeat callback failed; continuing artifact transfer.');
+                } finally {
+                    // Also leave a full interval after a slow/failed heartbeat.
+                    $lastHeartbeatAt = hrtime(true);
+                }
             }
 
             return 0;

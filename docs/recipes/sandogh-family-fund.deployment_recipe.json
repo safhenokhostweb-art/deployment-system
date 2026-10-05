@@ -44,6 +44,17 @@
     { "type": "verify_service_active", "name": "API service is active", "service": "sandogh-api.service" },
     { "type": "verify_service_active", "name": "Web service is active", "service": "sandogh-web.service" },
     {
+      "type": "http_health_check", "name": "API direct-origin health endpoint",
+      "url": "http://127.0.0.1:3000/health",
+      "expected_status": 200, "retries": 5, "retry_delay_seconds": 3, "request_timeout_seconds": 10
+    },
+    {
+      "type": "http_health_check", "name": "Web direct-origin login page",
+      "url": "http://127.0.0.1:3001/login",
+      "expected_status": 200, "retries": 5, "retry_delay_seconds": 3, "request_timeout_seconds": 10,
+      "must_not_contain": "localhost:3000"
+    },
+    {
       "type": "http_health_check", "name": "API health endpoint",
       "url": "https://sandogh.safhenokhost.ir/api/health",
       "expected_status": 200, "retries": 5, "retry_delay_seconds": 3, "request_timeout_seconds": 10

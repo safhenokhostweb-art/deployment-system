@@ -108,11 +108,26 @@ final class WorkspaceSourcePreparer
             'identity' => $transport['identity'],
             'transport' => $transport['category'],
         ];
+        // Root-cause fix (SSH auth scoping): the canonical GitHub SSH-over-443
+        // transport (ssh://git@ssh.github.com:443/...) resolves against the
+        // host `ssh.github.com` in ~/.ssh/config, which on some machines has
+        // no authorized IdentityFile — only the `github-safhe` alias does.
+        // We activate a temporary, job-scoped SSH identity that routes
+        // `ssh.github.com` (and the fallback `github.com` SCP form) through
+        // the same key as `github-safhe`, WITHOUT modifying ~/.ssh/config.
+        // The ScopedSshConfig instance is a local variable that PHP destroys
+        // (via __destruct → deactivate()) when prepareRemoteCommit() returns
+        // — normally or via exception — ensuring cleanup in all paths.
+        $scopedSsh = ($transport['category'] === 'ssh' && !str_contains($transport['url'], 'github-safhe'))
+            ? new ScopedSshConfig($this->git, $this->logger)
+            : null;
+        $scopedSsh?->activate();
+
         $this->initializeWorkspaceRepository($workspace->projectDir(), $transport['url'], $onTick);
         $this->fetchWithRetry(['git', 'fetch', '--no-tags', '--prune', 'origin', $branch], $workspace->projectDir(), $this->git->timeoutFor('fetch'), 'fetching the authoritative branch', $onTick, $context);
         $this->runOrFail(['git', 'cat-file', '-e', "{$commitHash}^{commit}"], $workspace->projectDir(), 30, 'validating the requested commit', $onTick);
         $this->runOrFail(['git', 'merge-base', '--is-ancestor', $commitHash, 'FETCH_HEAD'], $workspace->projectDir(), 30, 'validating commit reachability', $onTick);
-        $this->runOrFail(['git', 'checkout', '--detach', '--force', $commitHash], $workspace->projectDir(), 60, 'checking out the exact commit', $onTick);
+        $this->runOrFail(['git', 'checkout', '--detach', '--force', $commitHash], $workspace->projectDir(), $this->git->timeoutFor('checkout'), 'checking out the exact commit', $onTick);
         $this->assertCheckedOutAtExactCommit($workspace->projectDir(), $commitHash);
         $sourcePaths = self::sourcePaths($workspace->projectDir());
 

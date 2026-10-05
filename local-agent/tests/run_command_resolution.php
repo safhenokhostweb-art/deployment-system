@@ -383,6 +383,7 @@ $mirrorPairs = [
     [__DIR__ . '/../agent.php', __DIR__ . '/../../deployment-local-agent/agent/agent.php'],
     [__DIR__ . '/../lib/LocalBuildRunner.php', __DIR__ . '/../../deployment-local-agent/agent/lib/LocalBuildRunner.php'],
     [__DIR__ . '/../lib/LocalBuildFailedException.php', __DIR__ . '/../../deployment-local-agent/agent/lib/LocalBuildFailedException.php'],
+    [__DIR__ . '/../lib/ScopedSshConfig.php', __DIR__ . '/../../deployment-local-agent/agent/lib/ScopedSshConfig.php'],
     [__DIR__ . '/../config.example.php', __DIR__ . '/../../deployment-local-agent/config/config.example.php'],
 ];
 foreach ($mirrorPairs as [$original, $mirror]) {
