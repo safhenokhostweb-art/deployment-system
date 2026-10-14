@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\LocalAgent;
 use App\Models\LocalProjectMapping;
 use App\Models\PublishJob;
+use App\Services\Sentinel\SentinelRuntimeEvidenceContract;
 use App\Services\Publish\PublishJobService;
 use App\Services\Publish\ArtifactDependencySnapshotService;
 use App\Services\Publish\LocalAgentControlJobService;
@@ -39,6 +40,7 @@ class LocalAgentJobController extends Controller
         abort_unless($agent instanceof LocalAgent, 403, 'Heartbeat requires an authenticated Local Agent.');
 
         $validated = $request->validate([
+            'runtime_snapshot' => 'nullable|array',
             'hostname' => 'nullable|string|max:255',
             'operating_system' => 'nullable|string|max:100',
             'capabilities' => 'nullable|array',
@@ -51,12 +53,45 @@ class LocalAgentJobController extends Controller
             'project_states.*.remote_tracking_sha' => 'nullable|string|regex:/^[0-9a-f]{40}$/',
         ]);
 
+        // Phase 3B: runtime_snapshot is optional. A heartbeat without it
+        // is accepted as a legacy heartbeat -- the agent binary predates
+        // this phase. A heartbeat WITH it validates the snapshot through
+        // sentinel.runtime.v1 before it is ever persisted, so no
+        // secret-shaped or path-escaping value can enter storage.
+        $runtimeSnapshot = $validated['runtime_snapshot'] ?? null;
+        $storedSnapshot = null;
+        $snapshotStatus = null;
+
+        if (is_array($runtimeSnapshot)) {
+            try {
+                $contract = SentinelRuntimeEvidenceContract::fromArray($runtimeSnapshot);
+            } catch (\InvalidArgumentException) {
+                // Invalid snapshot (secret-shaped, path escape, schema
+                // violation): accept the heartbeat as legacy, do NOT
+                // store anything, and never echo the payload back.
+                $contract = null;
+            }
+
+            if ($contract !== null) {
+                $storedSnapshot = $contract->toArray();
+                $snapshotStatus = $contract->get('snapshot_status');
+            }
+        }
+
         $agent->forceFill([
             'hostname' => $validated['hostname'] ?? $agent->hostname,
             'operating_system' => $validated['operating_system'] ?? $agent->operating_system,
             'capabilities' => $validated['capabilities'] ?? $agent->capabilities,
             'agent_version' => $validated['agent_version'] ?? $agent->agent_version,
         ])->save();
+
+        // Persist the latest valid runtime snapshot only when the agent
+        // actually sent one. Older heartbeats (no runtime_snapshot field)
+        // leave the column untouched -- they are legacy, not evidence of
+        // "no snapshot ever existed".
+       if ($storedSnapshot !== null) {
+            abort_unless($this->storeRuntimeSnapshot($agent, $storedSnapshot), 409, 'Runtime snapshot is stale, invalid or replayed.');
+       }
 
         // An upgrade is not complete when files are merely activated. The
         // first authenticated heartbeat from the restarted process is the
@@ -87,9 +122,41 @@ class LocalAgentJobController extends Controller
         // the agent side.
         return response()->json([
             'status' => 'ok',
+            'runtime_snapshot_status' => $snapshotStatus,
             'latest_version' => (string) config('deployment.latest_local_agent_version'),
             'project_config_version' => $agent->projectConfigVersion(),
         ]);
+    }
+
+    /** Store the validated snapshot and its watermark in one conditional update. */
+    private function storeRuntimeSnapshot(LocalAgent $agent, array $snapshot): bool
+    {
+        $sequence = $snapshot['sequence'] ?? null;
+        if (!is_int($sequence) || $sequence < 1 || !is_string($snapshot['timestamp'] ?? null)) {
+            return false;
+        }
+        try {
+            $contract = SentinelRuntimeEvidenceContract::fromArray($snapshot);
+            $timestamp = new \DateTimeImmutable($snapshot['timestamp']);
+        } catch (\Exception) {
+            return false;
+        }
+        $age = time() - $timestamp->getTimestamp();
+        if (!$contract->isSupportedVersion() || !$contract->isComplete()
+            || $contract->missingRequiredFields() !== [] || $age < 0
+            || $age > (int) config('deployment.runtime_snapshot_freshness_seconds', 300)) {
+            return false;
+        }
+        return $agent->getConnection()->transaction(function () use ($agent, $contract, $sequence): bool {
+            return $agent->newQuery()->whereKey($agent->getKey())
+                ->where(function ($query) use ($sequence): void {
+                    $query->whereNull('runtime_snapshot_sequence')
+                        ->orWhere('runtime_snapshot_sequence', '<', $sequence);
+                })->toBase()->update([
+                    'runtime_snapshot' => $contract->toJson(),
+                    'runtime_snapshot_sequence' => $sequence,
+                ]) === 1;
+        });
     }
 
     public function next(Request $request)

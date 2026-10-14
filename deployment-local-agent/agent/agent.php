@@ -73,6 +73,7 @@ require __DIR__ . '/lib/GitExactCommitSubtreeMaterializer.php';
 require __DIR__ . '/lib/LinuxUpgradePackageMaterializer.php';
 require __DIR__ . '/lib/LinuxUpgradeRunner.php';
 require __DIR__ . '/lib/ServerAgentPackageMaterializer.php';
+require __DIR__ . '/lib/RuntimeSnapshotCollector.php';
 
 use LocalAgent\ArtifactBuilder;
 use LocalAgent\ArtifactSourceResolver;
@@ -103,6 +104,7 @@ use LocalAgent\Security;
 use LocalAgent\WorkspaceInventoryReporter;
 use LocalAgent\WorkspaceInventoryScanner;
 use LocalAgent\WorkspaceSourcePreparer;
+use LocalAgent\RuntimeSnapshotCollector;
 
 /**
  * Reported on every heartbeat so the Hub can flag a developer machine
@@ -126,6 +128,19 @@ if (!is_file($configPath)) {
 }
 
 $config = require $configPath;
+
+if (in_array('--heartbeat-only', $argv, true)) {
+    try {
+        $result = sendHeartbeatOnly($config);
+        echo json_encode($result, JSON_THROW_ON_ERROR), PHP_EOL;
+        exit($result['http_status'] === 200 && $result['hmac_verified'] ? 0 : 1);
+    } catch (\Throwable) {
+        // Never print config, response payloads, transport errors or secrets.
+        echo json_encode(['mode' => 'heartbeat-only', 'result' => 'blocked', 'reason' => 'local_heartbeat_unavailable']), PHP_EOL;
+        exit(1);
+    }
+}
+
 
 if (($config['agent_token'] ?? '') === '' || str_starts_with((string) $config['agent_token'], 'CHANGE_ME')) {
     fwrite(STDERR, "config.php has no real agent_token yet — this agent is registered but not yet approved. Ask an Admin to approve it in the Hub's Local Agents page, then paste the shown agent_token/signing_secret into config.php.\n");
@@ -288,7 +303,7 @@ do {
     // Heartbeat first (not after sync, as before) so this cycle's
     // config_version is known before deciding whether to sync — see
     // ProjectConfigSyncScheduler::shouldSync().
-    $heartbeat = sendHeartbeat($client, $logger, $projectStateReporter->collect($git, $projects, $logger));
+    $heartbeat = sendHeartbeat($client, $logger, $projectStateReporter->collect($git, $projects, $logger), $config, $projects);
 
     if ($syncScheduler->shouldSync($lastSyncedAt, $knownConfigVersion, $heartbeat['project_config_version'], $reloadRequested, time())) {
         $syncResult = syncProjectConfig($client, $cache, $projectConfigResolver, $logger, $legacyProjects);
@@ -982,16 +997,125 @@ function syncProjectConfig(Client $client, ProjectConfigCache $cache, ProjectCon
 /**
  * @return array{project_config_version: string|null}
  */
-function sendHeartbeat(Client $client, Logger $logger, array $projectStates = []): array
+
+/**
+ * One local, signed heartbeat; no job services, synchronization or retries.
+ * The optional transport is used by isolated tests.
+ */
+function sendHeartbeatOnly(array $config, ?callable $transport = null): array
 {
+    $url = parse_url((string) ($config['hub_url'] ?? ''));
+    if (!is_array($url)) {
+        throw new \RuntimeException('local_hub_required');
+    }
+    $host = $url['host'] ?? '';
+    $port = $url['port'] ?? 80;
+    $basePath = $url['path'] ?? '';
+    $allowed = ($host === 'deployment-system.test' && $port === 80 && $basePath === '/service/public')
+        || (in_array($host, ['127.0.0.1', 'localhost', '[::1]'], true)
+            && $port === 8000 && in_array($basePath, ['', '/'], true));
+    if (($url['scheme'] ?? '') !== 'http' || !$allowed
+        || array_key_exists('user', $url) || array_key_exists('pass', $url)
+        || array_key_exists('query', $url) || array_key_exists('fragment', $url)) {
+        throw new \RuntimeException('local_hub_required');
+    }
+    $projects = is_array($config['projects'] ?? null) ? $config['projects'] : [];
+    $project = $projects === [] ? null : reset($projects);
+    $root = $config['release_root'] ?? $project['release_root'] ?? null;
+    $deployment = $project['deployment_id'] ?? $project['mapping_id'] ?? null;
+    $release = $project['release_id'] ?? $project['project_id'] ?? null;
+    if (!is_array($project) || !is_string($root) || $root === ''
+        || $deployment === null || $release === null || empty($config['local_agent_id'])
+        || empty($config['agent_token']) || empty($config['signing_secret'])) {
+        throw new \RuntimeException('runtime_metadata_unavailable');
+    }
+    $collector = new RuntimeSnapshotCollector($root, (string) $deployment,
+        (string) array_key_first($projects), (string) ($config['environment'] ?? 'local'),
+        (string) $release, (string) $config['local_agent_id'], LOCAL_AGENT_VERSION);
+    $snapshot = $collector->collect();
+    $payload = ['agent_version' => LOCAL_AGENT_VERSION, 'runtime_snapshot' => $snapshot];
+    $body = json_encode($payload, JSON_THROW_ON_ERROR);
+    $path = '/api/local-agent/heartbeat';
+    $timestamp = (string) time();
+    $nonce = Security::nonce();
+    $signature = Security::sign('POST', $path, $timestamp, $nonce, $body, $config['signing_secret']);
+    $headers = ['Authorization: Bearer ' . $config['agent_token'],
+        'X-Deployment-Local-Agent-Id: ' . $config['local_agent_id'],
+        'X-Deployment-Timestamp: ' . $timestamp, 'X-Deployment-Nonce: ' . $nonce,
+        'X-Deployment-Signature: ' . $signature, 'Content-Type: application/json', 'Accept: application/json'];
+    $endpoint = rtrim($config['hub_url'], '/') . $path;
+    if ($transport !== null) {
+        $response = $transport($endpoint, $headers, $body);
+    } else {
+        $handle = curl_init($endpoint);
+        curl_setopt_array($handle, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $body,
+            CURLOPT_HTTPHEADER => $headers, CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => false, CURLOPT_PROXY => '',
+            CURLOPT_RESOLVE => $host === 'deployment-system.test'
+                ? ['deployment-system.test:80:127.0.0.1'] : [],
+            CURLOPT_TIMEOUT => max(1, (int) ($config['request_timeout_seconds'] ?? 15)),
+            CURLOPT_CONNECTTIMEOUT => 5]);
+        $raw = curl_exec($handle);
+        $status = (int) curl_getinfo($handle, CURLINFO_HTTP_CODE);
+        curl_close($handle);
+        if ($raw === false) { throw new \RuntimeException('local_transport_failure'); }
+        $response = ['status' => $status, 'body' => json_decode($raw, true)];
+    }
+    $status = (int) ($response['status'] ?? 0);
+    $accepted = $status === 200 && ($response['body']['status'] ?? null) === 'ok';
+    return ['mode' => 'heartbeat-only', 'pid' => getmypid(), 'http_status' => $status,
+        'hmac_signed' => true, 'hmac_verified' => $accepted,
+        'runtime_snapshot_status' => $response['body']['runtime_snapshot_status'] ?? null];
+}
+
+function sendHeartbeat(Client $client, Logger $logger, array $projectStates = [], array $config = [], array $projects = []): array
+{
+    $runtimeSnapshot = null;
+
+    // Collect runtime snapshot from the first project that has a release_root configured
+    // Local Agent typically doesn't have release_root (that's a Server Agent concept),
+    // but we include the collector for contract consistency — it will return
+    // snapshot_status = incomplete when release_root is not available.
+    if ($config !== [] && $projects !== []) {
+        $firstProject = array_values($projects)[0] ?? null;
+        if ($firstProject !== null) {
+            $releaseRoot = $config['release_root'] ?? $firstProject['release_root'] ?? null;
+            $deploymentId = $firstProject['deployment_id'] ?? $firstProject['mapping_id'] ?? null;
+            $projectKey = array_keys($projects)[0] ?? null;
+            $environment = $config['environment'] ?? 'local';
+            $releaseId = $firstProject['release_id'] ?? $firstProject['project_id'] ?? null;
+            $agentId = $config['local_agent_id'] ?? null;
+            $agentVersion = LOCAL_AGENT_VERSION;
+
+            if ($releaseRoot !== null && $deploymentId !== null && $projectKey !== null && $releaseId !== null && $agentId !== null) {
+                $collector = new RuntimeSnapshotCollector(
+                    releaseRoot: $releaseRoot,
+                    deploymentId: (string) $deploymentId,
+                    projectKey: $projectKey,
+                    environment: $environment,
+                    releaseId: (string) $releaseId,
+                    agentId: (string) $agentId,
+                    agentVersion: $agentVersion,
+                );
+                $runtimeSnapshot = $collector->collect();
+            }
+        }
+    }
+
     try {
-        $response = $client->request('POST', '/api/local-agent/heartbeat', [
+        $payload = [
             'hostname' => gethostname() ?: null,
             'operating_system' => PHP_OS_FAMILY,
             'agent_version' => LOCAL_AGENT_VERSION,
             'capabilities' => ['git' => true, 'php' => PHP_VERSION, 'laravel_release_manifest' => true, 'assigned_artifact_publish_job_id' => true, 'linux_self_upgrade' => PHP_OS_FAMILY === 'Linux', 'server_agent_package_build' => true],
             'project_states' => $projectStates,
-        ]);
+        ];
+
+        if ($runtimeSnapshot !== null) {
+            $payload['runtime_snapshot'] = $runtimeSnapshot;
+        }
+
+        $response = $client->request('POST', '/api/local-agent/heartbeat', $payload);
 
         $latestVersion = $response['body']['latest_version'] ?? null;
         if ($latestVersion !== null && version_compare(LOCAL_AGENT_VERSION, (string) $latestVersion, '<')) {

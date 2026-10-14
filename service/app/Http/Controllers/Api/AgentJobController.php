@@ -10,6 +10,7 @@ use App\Models\Server;
 use App\Services\Deployment\AgentJobService;
 use App\Services\Deployment\AgentTaskService;
 use App\Services\Publish\ServerAgentControlJobService;
+use App\Services\Sentinel\SentinelRuntimeEvidenceContract;
 use Illuminate\Http\Request;
 
 /**
@@ -50,6 +51,7 @@ class AgentJobController extends Controller
 
         if ($agent instanceof Agent) {
             $validated = $request->validate([
+                'runtime_snapshot' => 'nullable|array',
                 'agent_version' => 'required|string|max:50',
                 'os' => 'nullable|string|max:100',
                 'architecture' => 'nullable|string|max:100',
@@ -63,9 +65,34 @@ class AgentJobController extends Controller
                 'disk_usage_percent' => 'nullable|numeric|min:0|max:100',
             ]);
 
-            $reportedHealth = array_key_exists('cpu_load_percent', $validated)
+$reportedHealth = array_key_exists('cpu_load_percent', $validated)
                 || array_key_exists('memory_usage_percent', $validated)
                 || array_key_exists('disk_usage_percent', $validated);
+
+            // Phase 3B: runtime_snapshot is optional. A heartbeat without it
+            // is accepted as a legacy heartbeat -- the agent binary predates
+            // this phase. A heartbeat WITH it validates the snapshot through
+            // sentinel.runtime.v1 before it is ever persisted, so no
+            // secret-shaped or path-escaping value can enter storage.
+            $runtimeSnapshot = $validated['runtime_snapshot'] ?? null;
+            $storedSnapshot = null;
+            $snapshotStatus = null;
+
+            if (is_array($runtimeSnapshot)) {
+                try {
+                    $contract = SentinelRuntimeEvidenceContract::fromArray($runtimeSnapshot);
+                } catch (\InvalidArgumentException) {
+                    // Invalid snapshot (secret-shaped, path escape, schema
+                    // violation): accept the heartbeat as legacy, do NOT
+                    // store anything, and never echo the payload back.
+                    $contract = null;
+                }
+
+                if ($contract !== null) {
+                    $storedSnapshot = $contract->toArray();
+                    $snapshotStatus = $contract->get('snapshot_status');
+                }
+            }
 
             $agent->forceFill([
                 'agent_version' => $validated['agent_version'],
@@ -79,15 +106,26 @@ class AgentJobController extends Controller
                 'health_reported_at' => $reportedHealth ? now() : $agent->health_reported_at,
             ])->save();
 
+            // Persist the latest valid runtime snapshot only when the agent
+            // actually sent one. Older heartbeats (no runtime_snapshot field)
+            // leave the column untouched -- they are legacy, not evidence of
+            // "no snapshot ever existed".
+           if ($storedSnapshot !== null) {
+                abort_unless($this->storeRuntimeSnapshot($agent, $storedSnapshot), 409, 'Runtime snapshot is stale, invalid or replayed.');
+           }
+
             // Root-cause fix (Deployment #184): this is the only signal
             // that an in-flight Server Agent self-upgrade actually took
-            // effect — mirrors LocalAgentControlJobService's own
+            // effect -- mirrors LocalAgentControlJobService's own
             // heartbeat-verification pattern exactly. A heartbeat that
             // doesn't match any awaiting_heartbeat job's target_version
             // is simply ignored here (0 verified), never an error.
             $this->serverAgentControlJobs->verifyUpgradeHeartbeat($agent, $validated['agent_version']);
 
-            return response()->json(['status' => 'ok']);
+            return response()->json([
+                'status' => 'ok',
+                'runtime_snapshot_status' => $snapshotStatus,
+            ]);
         }
 
         $server = $this->authenticatedServer($request);
@@ -99,6 +137,37 @@ class AgentJobController extends Controller
         $server->forceFill(['agent_version' => $validated['agent_version']])->save();
 
         return response()->json(['status' => 'ok']);
+    }
+
+    /** Store the validated snapshot and its watermark in one conditional update. */
+    private function storeRuntimeSnapshot(Agent $agent, array $snapshot): bool
+    {
+        $sequence = $snapshot['sequence'] ?? null;
+        if (!is_int($sequence) || $sequence < 1 || !is_string($snapshot['timestamp'] ?? null)) {
+            return false;
+        }
+        try {
+            $contract = SentinelRuntimeEvidenceContract::fromArray($snapshot);
+            $timestamp = new \DateTimeImmutable($snapshot['timestamp']);
+        } catch (\Exception) {
+            return false;
+        }
+        $age = time() - $timestamp->getTimestamp();
+        if (!$contract->isSupportedVersion() || !$contract->isComplete()
+            || $contract->missingRequiredFields() !== [] || $age < 0
+            || $age > (int) config('deployment.runtime_snapshot_freshness_seconds', 300)) {
+            return false;
+        }
+        return $agent->getConnection()->transaction(function () use ($agent, $contract, $sequence): bool {
+            return $agent->newQuery()->whereKey($agent->getKey())
+                ->where(function ($query) use ($sequence): void {
+                    $query->whereNull('runtime_snapshot_sequence')
+                        ->orWhere('runtime_snapshot_sequence', '<', $sequence);
+                })->toBase()->update([
+                    'runtime_snapshot' => $contract->toJson(),
+                    'runtime_snapshot_sequence' => $sequence,
+                ]) === 1;
+        });
     }
 
     public function next(Request $request)

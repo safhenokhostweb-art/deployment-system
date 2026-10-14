@@ -34,6 +34,7 @@ class Agent extends Model
         'capabilities',
         'agent_token_hash',
         'signing_secret',
+        'runtime_snapshot',
         'registration_token',
         'registration_token_expires_at',
         'last_seen_at',
@@ -43,6 +44,8 @@ class Agent extends Model
         'memory_usage_percent',
         'disk_usage_percent',
         'health_reported_at',
+        'runtime_snapshot',
+        'runtime_snapshot_sequence',
     ];
 
     protected $hidden = [
@@ -54,6 +57,8 @@ class Agent extends Model
     protected function casts(): array
     {
         return [
+            'runtime_snapshot' => 'array',
+            'runtime_snapshot_sequence' => 'integer',
             'capabilities' => 'array',
             'signing_secret' => 'encrypted',
             'registration_token' => 'encrypted',

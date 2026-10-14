@@ -26,6 +26,7 @@ require __DIR__ . '/lib/HealthCollector.php';
 require __DIR__ . '/lib/ShellPlaceholders.php';
 require __DIR__ . '/lib/ServiceAllowlist.php';
 require __DIR__ . '/lib/ReleaseManager.php';
+require __DIR__ . '/lib/ServerAgentRuntimeSnapshotCollector.php';
 require __DIR__ . '/lib/RecipeStepRunner.php';
 require __DIR__ . '/lib/HttpHealthCheckRunner.php';
 require __DIR__ . '/lib/ArtifactManager.php';
@@ -46,6 +47,7 @@ use DeploymentAgent\PipelineExecutor;
 use DeploymentAgent\ProductionPathGuard;
 use DeploymentAgent\RecipeStepRunner;
 use DeploymentAgent\ReleaseManager;
+use DeploymentAgent\ServerAgentRuntimeSnapshotCollector;
 use DeploymentAgent\ShellPlaceholders;
 use DeploymentAgent\WorkspaceScanner;
 
@@ -468,7 +470,7 @@ function sendHeartbeat(Client $client, Logger $logger): void
         // working.
         $health = (new HealthCollector())->collect();
 
-        $client->request('POST', '/api/agent/heartbeat', array_merge(
+        $payload = array_merge(
             ['agent_version' => AGENT_VERSION],
             // Phase: Laravel Release Completeness — the new fail-closed
             // pre-activation release gate (ReleaseValidator) is enforced by
@@ -476,8 +478,70 @@ function sendHeartbeat(Client $client, Logger $logger): void
             // for the Hub to gate artifact dispatch on.
             ['capabilities' => ['laravel_release_validation' => true]],
             $health,
-        ));
+        );
+
+        // Phase 3B: runtime snapshot. Collected from the first configured
+        // project that has a working_directory, mirroring the Local Agent's
+        // RuntimeSnapshotCollector contract (sentinel.runtime.v1). Best-effort:
+        // any failure degrades to snapshot_status=incomplete, never a fatal
+        // error, and never reads .env or any secret-shaped file.
+        $runtimeSnapshot = collectServerRuntimeSnapshot($config ?? []);
+        if ($runtimeSnapshot !== null) {
+            $payload['runtime_snapshot'] = $runtimeSnapshot;
+        }
+
+        $client->request('POST', '/api/agent/heartbeat', $payload);
     } catch (\Throwable $e) {
         $logger->warn('Heartbeat failed: ' . $e->getMessage());
     }
+}
+
+/**
+ * Collect a runtime snapshot for the Server Agent from the first
+ * configured project that has a working_directory. Returns null when
+ * no project is configured (legacy install) — the heartbeat is then
+ * sent without a runtime_snapshot field, which the Hub treats as a
+ * legacy heartbeat.
+ *
+ * @param array<string, mixed> $config
+ * @return array<string, mixed>|null
+ */
+function collectServerRuntimeSnapshot(array $config): ?array
+{
+    $projects = $config['projects'] ?? null;
+    if (! is_array($projects) || $projects === []) {
+        return null;
+    }
+
+    $releaseManager = new ReleaseManager();
+    $collector = new ServerAgentRuntimeSnapshotCollector($releaseManager);
+
+    foreach ($projects as $projectKey => $projectConfig) {
+        if (! is_array($projectConfig)) {
+            continue;
+        }
+
+        $workingDirectory = $projectConfig['working_directory'] ?? null;
+        if (! is_string($workingDirectory) || $workingDirectory === '' || ! is_dir($workingDirectory)) {
+            continue;
+        }
+
+        $deploymentId = (string) ($config['agent_id'] ?? $projectConfig['deployment_id'] ?? $projectKey);
+        $environment = (string) ($config['environment'] ?? $projectConfig['environment'] ?? 'production');
+        $releaseId = (string) ($projectConfig['release_id'] ?? $deploymentId);
+        $agentId = (string) ($config['agent_id'] ?? $deploymentId);
+        $agentVersion = AGENT_VERSION;
+
+        return $collector->collect(
+            $projectConfig,
+            $deploymentId,
+            (string) $projectKey,
+            $environment,
+            $releaseId,
+            $agentId,
+            $agentVersion,
+        );
+    }
+
+    return null;
 }

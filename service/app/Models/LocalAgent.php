@@ -44,11 +44,13 @@ class LocalAgent extends Model
         'agent_version',
         'agent_token_hash',
         'signing_secret',
+        'runtime_snapshot',
         'registration_token',
         'registration_token_expires_at',
         'last_seen_at',
         'approved_by',
         'approved_at',
+        'runtime_snapshot_sequence',
     ];
 
     protected $hidden = [
@@ -60,6 +62,8 @@ class LocalAgent extends Model
     protected function casts(): array
     {
         return [
+            'runtime_snapshot' => 'array',
+            'runtime_snapshot_sequence' => 'integer',
             'capabilities' => 'array',
             'signing_secret' => 'encrypted',
             'registration_token' => 'encrypted',
