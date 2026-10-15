@@ -3,6 +3,20 @@
 return [
 
     /*
+    | Sentinel outbound health probe
+    |
+    | Disabled with empty destination policy until an owner approves the
+    | production egress destinations, schemes, and ports. Do not populate
+    | an allowlist from project-controlled settings.
+    */
+    'sentinel_health_probe' => [
+        'enabled' => env('SENTINEL_HEALTH_PROBE_ENABLED', false),
+        'allowed_hosts' => [],
+        'allowed_schemes' => [],
+        'allowed_ports' => [],
+    ],
+
+    /*
     |--------------------------------------------------------------------------
     | Agent liveness
     |--------------------------------------------------------------------------
@@ -356,5 +370,56 @@ return [
     // A production artifact must be built from fresh workspace evidence
     // reported by the one authoritative Agent configured on the Project.
     'artifact_workspace_report_max_age_seconds' => (int) env('DEPLOYMENT_ARTIFACT_WORKSPACE_REPORT_MAX_AGE_SECONDS', 300),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Sentinel file-level verification
+    |--------------------------------------------------------------------------
+    |
+    | When enabled, the Sentinel verifier performs strict comparison of the
+    | artifact's file manifest (generated at build time and embedded in the
+    | artifact ZIP) against the Server Agent's observed file manifest
+    | (collected at runtime from the active release directory).
+    |
+    | DISABLED BY DEFAULT — requires explicit operator approval to enable.
+    | Do not enable in production until all participants have reviewed the
+    | security implications and comparison policy.
+    |
+    | When enabled:
+    | - The Local Agent must embed a deterministic file manifest in the artifact
+    | - The Server Agent must observe the file manifest from the active release
+    | - The Hub compares expected vs observed manifest hashes, entry counts,
+    |   total sizes, and can perform detailed file-by-file comparison
+    | - Any confirmed missing or hash-mismatched required file => FAIL
+    | - Invalid, incomplete, stale, or unreadable evidence => UNKNOWN
+    | - Wrong-target evidence must never pass; reports attribution failure
+    | - EXTRA files follow explicit reviewed policy
+    |
+    | Security controls:
+    | - Bounded traversal: only the exact authorized release root is scanned
+    | - Symlinks/junctions never followed outside the release root
+    | - File count, total bytes hashed, and execution time are bounded
+    | - Files changing during hashing are treated conservatively (mismatch)
+    | - No absolute filesystem paths or file contents exposed in UI
+    | - No secrets or credential material in manifests
+    | - Sensitive path details suppressed in UI display
+    |
+    | Comparison scope (feature-flagged):
+    | - 'full': compare all files in the manifest
+    | - 'source_only': compare only tracked source files (exclude vendor/, public/build/)
+    | - Future scopes can be added via configuration
+    */
+    'sentinel' => [
+        'file_verification_enabled' => (bool) env('SENTINEL_FILE_VERIFICATION_ENABLED', false),
+        'file_comparison_scope' => (string) env('SENTINEL_FILE_COMPARISON_SCOPE', 'full'),
+        
+        // Server Agent file observation limits (defense in depth)
+        'file_observation_max_files' => (int) env('SENTINEL_FILE_OBSERVATION_MAX_FILES', 10000),
+        'file_observation_max_total_bytes' => (int) env('SENTINEL_FILE_OBSERVATION_MAX_TOTAL_BYTES', 500 * 1024 * 1024),
+        'file_observation_max_execution_seconds' => (int) env('SENTINEL_FILE_OBSERVATION_MAX_EXECUTION_SECONDS', 30),
+        
+        // Runtime snapshot freshness (reused for file observation)
+        'runtime_snapshot_freshness_seconds' => (int) env('DEPLOYMENT_RUNTIME_SNAPSHOT_FRESHNESS_SECONDS', 300),
+    ],
 
 ];

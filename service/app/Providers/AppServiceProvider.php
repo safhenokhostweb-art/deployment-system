@@ -10,6 +10,22 @@ use App\Console\Commands\DatabaseSafety\GuardedWipeCommand;
 use App\Listeners\NotificationEventSubscriber;
 use App\Models\Project;
 use App\Models\User;
+use App\Services\Sentinel\AgentRuntimeReader;
+use App\Services\Sentinel\AgentRuntimeEvidenceReader;
+use App\Services\Sentinel\ArtifactChecksumReader;
+use App\Services\Sentinel\HubArtifactChecksumReader;
+use App\Services\Sentinel\HubReleaseExpectationProvider;
+use App\Services\Sentinel\IndependentHealthProbe;
+use App\Services\Sentinel\ConfiguredHttpHealthProbe;
+use App\Services\Sentinel\SentinelEvidenceCollector;
+use App\Services\Sentinel\CurlPinnedHealthProbeTransport;
+use App\Services\Sentinel\HealthProbeAddressResolver;
+use App\Services\Sentinel\PinnedHealthProbeTransport;
+use App\Services\Sentinel\ReleaseExpectationProvider;
+use App\Services\Sentinel\SystemHealthProbeAddressResolver;
+use App\Services\Sentinel\DatabaseSentinelVerificationRunStore;
+use App\Services\Sentinel\SentinelVerificationRunStore;
+use App\Services\Sentinel\SentinelEvidenceCollection;
 use App\Policies\ProjectPolicy;
 use App\Support\Authorization\PermissionMatrix;
 use Illuminate\Console\Application as Artisan;
@@ -25,7 +41,20 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        $this->app->bind(ReleaseExpectationProvider::class, HubReleaseExpectationProvider::class);
+        $this->app->bind(ArtifactChecksumReader::class, HubArtifactChecksumReader::class);
+        $this->app->bind(AgentRuntimeReader::class, AgentRuntimeEvidenceReader::class);
+        $this->app->bind(HealthProbeAddressResolver::class, SystemHealthProbeAddressResolver::class);
+        $this->app->bind(PinnedHealthProbeTransport::class, CurlPinnedHealthProbeTransport::class);
+        $this->app->bind(SentinelVerificationRunStore::class, DatabaseSentinelVerificationRunStore::class);
+        $this->app->bind(SentinelEvidenceCollection::class, SentinelEvidenceCollector::class);
+        $this->app->bind(IndependentHealthProbe::class, function ($app): ConfiguredHttpHealthProbe {
+            return new ConfiguredHttpHealthProbe(
+                $app->make(HealthProbeAddressResolver::class),
+                $app->make(PinnedHealthProbeTransport::class),
+                (array) config('deployment.sentinel_health_probe', []),
+            );
+        });
     }
 
     /**

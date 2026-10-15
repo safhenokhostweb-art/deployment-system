@@ -55,15 +55,25 @@ class ArtifactService
      * a normal signed JSON request. No file bytes exist yet — status
      * stays `uploading` until finalizeUpload() succeeds.
      */
-    public function createPending(Project $project, string $commitHash, string $branch, string $claimedChecksum, int $claimedSizeBytes, ?string $uploadedBy, array $requiredPaths = [], ?int $publishJobId = null): Artifact
+    public function createPending(Project $project, string $commitHash, string $branch, string $claimedChecksum, int $claimedSizeBytes, ?string $uploadedBy, array $requiredPaths = [], ?int $publishJobId = null, ?string $fileManifestHash = null, ?int $fileManifestEntryCount = null, ?int $fileManifestTotalSize = null): Artifact
     {
         abort_unless(preg_match('/^[0-9a-f]{40}$/', $commitHash) === 1, 422, 'commit_hash must be a 40-character hex SHA.');
         abort_unless(preg_match('/^[0-9a-f]{64}$/', $claimedChecksum) === 1, 422, 'checksum must be a 64-character hex SHA-256.');
         abort_if($claimedSizeBytes > $this->maxSizeBytes(), 422, 'Artifact exceeds the maximum allowed size of ' . (int) ($this->maxSizeBytes() / 1024 / 1024) . 'MB.');
 
+        if ($fileManifestHash !== null) {
+            abort_unless(preg_match('/^[0-9a-f]{64}$/', $fileManifestHash) === 1, 422, 'file_manifest_hash must be a 64-character hex SHA-256.');
+        }
+        if ($fileManifestEntryCount !== null) {
+            abort_unless(is_int($fileManifestEntryCount) && $fileManifestEntryCount >= 0, 422, 'file_manifest_entry_count must be a non-negative integer.');
+        }
+        if ($fileManifestTotalSize !== null) {
+            abort_unless(is_int($fileManifestTotalSize) && $fileManifestTotalSize >= 0, 422, 'file_manifest_total_size must be a non-negative integer.');
+        }
+
         $diskPath = "{$project->project_key}/{$commitHash}.zip";
 
-        return DB::transaction(function () use ($project, $commitHash, $branch, $claimedChecksum, $claimedSizeBytes, $uploadedBy, $requiredPaths, $diskPath, $publishJobId) {
+        return DB::transaction(function () use ($project, $commitHash, $branch, $claimedChecksum, $claimedSizeBytes, $uploadedBy, $requiredPaths, $diskPath, $publishJobId, $fileManifestHash, $fileManifestEntryCount, $fileManifestTotalSize) {
             $existing = Artifact::where('project_id', $project->id)->where('commit_hash', $commitHash)->lockForUpdate()->first();
             if ($existing !== null) {
                 if ($existing->status === Artifact::STATUS_FAILED && $publishJobId !== null) {
@@ -80,6 +90,9 @@ class ArtifactService
                         'uploaded_by' => $uploadedBy,
                         'failure_message' => null,
                         'expires_at' => now()->addDays((int) config('deployment.artifact_retention_days')),
+                        'file_manifest_hash' => $fileManifestHash,
+                        'file_manifest_entry_count' => $fileManifestEntryCount,
+                        'file_manifest_total_size' => $fileManifestTotalSize,
                     ]);
 
                     return $existing->refresh();
@@ -119,6 +132,9 @@ class ArtifactService
                 'status' => Artifact::STATUS_UPLOADING,
                 'uploaded_by' => $uploadedBy,
                 'expires_at' => now()->addDays((int) config('deployment.artifact_retention_days')),
+                'file_manifest_hash' => $fileManifestHash,
+                'file_manifest_entry_count' => $fileManifestEntryCount,
+                'file_manifest_total_size' => $fileManifestTotalSize,
             ]);
 
             AuditLogEntry::record(
@@ -481,7 +497,7 @@ class ArtifactService
      * which is Hub-internal storage detail, not something the Server
      * Agent needs or should see.
      *
-     * @return array{public_id: string, checksum_sha256: string, size_bytes: int, required_paths: array<int,string>}
+     * @return array{public_id: string, checksum_sha256: string, size_bytes: int, required_paths: array<int,string>, file_manifest_hash?: string, file_manifest_entry_count?: int, file_manifest_total_size?: int}
      */
     public function downloadDescriptor(Artifact $artifact): array
     {
@@ -491,6 +507,9 @@ class ArtifactService
             'size_bytes' => $artifact->size_bytes,
             'commit_hash' => $artifact->commit_hash,
             'required_paths' => $artifact->required_paths ?? [],
+            'file_manifest_hash' => $artifact->file_manifest_hash ?? null,
+            'file_manifest_entry_count' => $artifact->file_manifest_entry_count ?? null,
+            'file_manifest_total_size' => $artifact->file_manifest_total_size ?? null,
         ];
     }
 }

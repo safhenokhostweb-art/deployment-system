@@ -1,0 +1,23 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Sentinel\LocalProof\Mysql;
+
+/** Controlled categories only. Never construct a category from exception text or SQL. */
+enum MysqlFailureCategory: string
+{
+    case ENDPOINT_REJECTED = 'ENDPOINT_REJECTED';
+    case PATH_REJECTED = 'PATH_REJECTED';
+    case PROCESS_OWNER_REJECTED = 'PROCESS_OWNER_REJECTED';
+    case LISTENER_OWNER_REJECTED = 'LISTENER_OWNER_REJECTED';
+    case CONTAINMENT_UNAVAILABLE = 'CONTAINMENT_UNAVAILABLE';
+    case INITIALIZATION_FAILED = 'INITIALIZATION_FAILED';
+    case BOOTSTRAP_UNVERIFIED = 'BOOTSTRAP_UNVERIFIED';
+    case STARTUP_FAILED = 'STARTUP_FAILED';
+    case AUTHENTICATION_FAILED = 'AUTHENTICATION_FAILED';
+    case MIGRATION_FAILED = 'MIGRATION_FAILED';
+    case INTERRUPTED = 'INTERRUPTED';
+    case CLEANUP_FAILED = 'CLEANUP_FAILED';
+    case UNKNOWN = 'UNKNOWN';
+}

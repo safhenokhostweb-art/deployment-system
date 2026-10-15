@@ -7,6 +7,9 @@ use App\Models\Deployment;
 use App\Services\Deployment\DeploymentDispatcher;
 use App\Services\Deployment\RetryDeploymentService;
 use App\Services\Deployment\RollbackService;
+use App\Services\Sentinel\SentinelDeploymentVerificationService;
+use App\Services\Sentinel\SentinelVerificationContextException;
+use App\Services\Sentinel\SentinelVerificationPersistenceException;
 use App\Support\Deployment\FailureCodeGuidance;
 use App\Support\Deployment\PipelineStepPresenter;
 use App\Support\Deployment\RecipeStepPresenter;
@@ -22,6 +25,7 @@ class DeploymentController extends Controller
         private readonly RollbackService $rollbackService,
         private readonly PipelineStepPresenter $steps,
         private readonly RecipeStepPresenter $recipeSteps,
+        private readonly SentinelDeploymentVerificationService $sentinel,
     ) {
     }
 
@@ -57,8 +61,31 @@ class DeploymentController extends Controller
         // do — the exact same "from/to" RollbackService::rollbackTo()
         // itself computes, shown before the fact instead of only after.
         $currentLive = $deployment->project->latestSuccessfulDeployment();
+        $sentinelRun = $deployment->sentinelVerificationRuns()->first();
 
-        return view('deployments.show', compact('deployment', 'steps', 'currentStep', 'currentLive', 'usesRecipe'));
+        return view('deployments.show', compact('deployment', 'steps', 'currentStep', 'currentLive', 'usesRecipe', 'sentinelRun'));
+    }
+
+    public function verifySentinel(Request $request, Deployment $deployment): RedirectResponse
+    {
+        Gate::authorize('deployments.view');
+        Gate::authorize('view', $deployment->project);
+
+        try {
+            $run = $this->sentinel->collect($deployment, $request->user()?->id);
+        } catch (SentinelVerificationContextException) {
+            return redirect()->route('deployments.show', $deployment)
+                ->with('error', 'Sentinel could not resolve a matching deployment and release context. No verification result was recorded.');
+        } catch (SentinelVerificationPersistenceException) {
+            return redirect()->route('deployments.show', $deployment)
+                ->with('error', 'Sentinel could not record the verification result. No durable verification record is available.');
+        }
+
+        $message = $run->verdict === 'UNKNOWN'
+            ? 'Sentinel evidence collection is inconclusive. Review the recorded checks; this is not a successful verification.'
+            : 'Sentinel evidence collection result was recorded. Review its verdict and checks.';
+
+        return redirect()->route('deployments.show', $deployment)->with('status', $message);
     }
 
     public function approve(Request $request, Deployment $deployment): RedirectResponse

@@ -514,7 +514,16 @@ function collectServerRuntimeSnapshot(array $config): ?array
     }
 
     $releaseManager = new ReleaseManager();
-    $collector = new ServerAgentRuntimeSnapshotCollector($releaseManager);
+    
+    // File observation config (feature-flagged, disabled by default)
+    $fileObservationConfig = [
+        'enabled' => ($config['sentinel_file_observation'] ?? false) === true,
+        'max_files' => $config['sentinel_file_observation_max_files'] ?? 10000,
+        'max_total_bytes' => $config['sentinel_file_observation_max_total_bytes'] ?? 500 * 1024 * 1024,
+        'max_execution_seconds' => $config['sentinel_file_observation_max_execution_seconds'] ?? 30,
+    ];
+
+    $collector = new ServerAgentRuntimeSnapshotCollector($releaseManager, $fileObservationConfig);
 
     foreach ($projects as $projectKey => $projectConfig) {
         if (! is_array($projectConfig)) {

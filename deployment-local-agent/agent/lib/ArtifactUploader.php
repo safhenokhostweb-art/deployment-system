@@ -143,6 +143,9 @@ final class ArtifactUploader
                 'size_bytes' => $archive['size'],
                 'required_paths' => $archive['requiredPaths'],
                 'publish_job_id' => $jobId,
+                'file_manifest_hash' => $archive['file_manifest_hash'] ?? null,
+                'file_manifest_entry_count' => $archive['file_manifest_entry_count'] ?? null,
+                'file_manifest_total_size' => $archive['file_manifest_total_size'] ?? null,
             ]));
 
             if ($createResponse['status'] !== 201) {

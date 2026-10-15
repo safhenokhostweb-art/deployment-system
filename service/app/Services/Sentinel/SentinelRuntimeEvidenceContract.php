@@ -47,6 +47,11 @@ final class SentinelRuntimeEvidenceContract
         'sequence',
         'nonce',
         'snapshot_status',
+        // File-level observation (additive, feature-flagged)
+        'file_manifest_hash',
+        'file_manifest_entry_count',
+        'file_manifest_total_size',
+        'file_observation_status',
     ];
 
     /**
@@ -167,6 +172,46 @@ final class SentinelRuntimeEvidenceContract
                     if (! is_string($value) || ! in_array($value, self::SNAPSHOT_STATUS_VALUES, true)) {
                         throw new InvalidArgumentException("sentinel.runtime.v1 evidence field 'snapshot_status' must be complete or incomplete.");
                     }
+                    $evidence[$field] = $value;
+                    break;
+
+                case 'file_manifest_hash':
+                    if ($value === null) {
+                        $evidence[$field] = null;
+                        break;
+                    }
+                    if (! is_string($value) || ! preg_match('/^[0-9a-f]{64}$/i', $value)) {
+                        throw new InvalidArgumentException("sentinel.runtime.v1 evidence field 'file_manifest_hash' must be a 64-character hex SHA-256.");
+                    }
+                    $evidence[$field] = strtolower((string) $value);
+                    break;
+
+                case 'file_manifest_entry_count':
+                case 'file_manifest_total_size':
+                    if ($value === null) {
+                        $evidence[$field] = null;
+                        break;
+                    }
+                    if (! is_int($value) || $value < 0) {
+                        throw new InvalidArgumentException("sentinel.runtime.v1 evidence field '{$field}' must be a non-negative integer.");
+                    }
+                    $evidence[$field] = $value;
+                    break;
+
+                case 'file_observation_status':
+                    if ($value === null) {
+                        $evidence[$field] = null;
+                        break;
+                    }
+                    if (! is_string($value)) {
+                        throw new InvalidArgumentException("sentinel.runtime.v1 evidence field 'file_observation_status' must be a string.");
+                    }
+                    $value = trim($value);
+                    if ($value === '') {
+                        $evidence[$field] = null;
+                        break;
+                    }
+                    self::assertNoSecret($value, $field);
                     $evidence[$field] = $value;
                     break;
 

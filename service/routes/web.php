@@ -132,6 +132,7 @@ Route::middleware('auth')->group(function () {
     Route::delete('/deployment-targets/{deploymentTarget}', [DeploymentTargetController::class, 'destroy'])->name('deployment-targets.destroy');
 
     Route::get('/deployments/{deployment}', [DeploymentController::class, 'show'])->name('deployments.show');
+    Route::post('/deployments/{deployment}/sentinel-verifications', [DeploymentController::class, 'verifySentinel'])->middleware('throttle:6,1')->name('deployments.sentinel.verify');
     Route::post('/deployments/{deployment}/approve', [DeploymentController::class, 'approve'])->name('deployments.approve');
     Route::post('/deployments/{deployment}/cancel', [DeploymentController::class, 'cancel'])->name('deployments.cancel');
     Route::post('/deployments/{deployment}/retry', [DeploymentController::class, 'retry'])->name('deployments.retry');

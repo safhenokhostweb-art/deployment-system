@@ -3,6 +3,7 @@
 namespace Tests\Unit;
 
 use App\Support\Deployment\ServerAgentVersionResolver;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
 use Tests\TestCase;
 
@@ -164,7 +165,7 @@ class ServerAgentReleaseSyncTest extends TestCase
     public function test_agent_runtime_identity_has_not_drifted_from_the_pinned_1_4_2_release(): void
     {
         $repoRoot = base_path('..');
-        $tree = $this->runGit($repoRoot, ['git', 'write-tree']);
+        $tree = $this->writeTreeFromIsolatedIndex($repoRoot);
 
         $agentPhpBlob = $this->runGit($repoRoot, ['git', 'rev-parse', "{$tree}:agent/agent.php"]);
         $libTree = $this->runGit($repoRoot, ['git', 'rev-parse', "{$tree}:agent/lib"]);
@@ -248,5 +249,39 @@ class ServerAgentReleaseSyncTest extends TestCase
         );
 
         return $result->output();
+    }
+
+    /** Build the current index tree without writing inside the repository. */
+    private function writeTreeFromIsolatedIndex(string $repoRoot): string
+    {
+        $gitDir = $this->runGit($repoRoot, ['git', 'rev-parse', '--absolute-git-dir']);
+        $originalIndex = $gitDir . DIRECTORY_SEPARATOR . 'index';
+        $originalObjects = $gitDir . DIRECTORY_SEPARATOR . 'objects';
+        $tempRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'server-agent-write-tree-' . bin2hex(random_bytes(8));
+        $tempObjects = $tempRoot . DIRECTORY_SEPARATOR . 'objects';
+        $tempIndex = $tempRoot . DIRECTORY_SEPARATOR . 'index';
+
+        if (!mkdir($tempObjects . DIRECTORY_SEPARATOR . 'info', 0777, true) && !is_dir($tempObjects)) {
+            $this->fail('Could not create an isolated Git object directory.');
+        }
+        if (!copy($originalIndex, $tempIndex)) {
+            File::deleteDirectory($tempRoot);
+            $this->fail('Could not copy the current Git index into the isolated temporary directory.');
+        }
+
+        try {
+            $result = Process::path($repoRoot)->env([
+                'GIT_INDEX_FILE' => $tempIndex,
+                'GIT_OBJECT_DIRECTORY' => $tempObjects,
+                'GIT_ALTERNATE_OBJECT_DIRECTORIES' => $originalObjects,
+                'GIT_OPTIONAL_LOCKS' => '0',
+            ])->run(['git', 'write-tree']);
+
+            $this->assertTrue($result->successful(), 'Isolated git write-tree failed: ' . $result->errorOutput());
+
+            return trim($result->output());
+        } finally {
+            File::deleteDirectory($tempRoot);
+        }
     }
 }

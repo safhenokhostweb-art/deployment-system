@@ -64,6 +64,9 @@ class LocalAgentArtifactController extends Controller
             // ProjectController's application_root validation rule.
             'required_paths.*' => ['string', 'max:500', 'regex:/^(?!.*(?:^|\\/)\\.\\.(?:\\/|$))[A-Za-z0-9._\\/-]+$/'],
             'publish_job_id' => 'nullable|string|uuid',
+            'file_manifest_hash' => 'nullable|string|size:64|regex:/^[0-9a-f]{64}$/',
+            'file_manifest_entry_count' => 'nullable|integer|min:0',
+            'file_manifest_total_size' => 'nullable|integer|min:0',
         ]);
 
         $project = $this->resolveMappedProject($agent, $validated['project_key']);
@@ -97,6 +100,9 @@ class LocalAgentArtifactController extends Controller
             uploadedBy: $agent->public_id,
             requiredPaths: $validated['required_paths'] ?? [],
             publishJobId: $job?->id,
+            fileManifestHash: $validated['file_manifest_hash'] ?? null,
+            fileManifestEntryCount: $validated['file_manifest_entry_count'] ?? null,
+            fileManifestTotalSize: $validated['file_manifest_total_size'] ?? null,
         );
         if ($job !== null) {
             abort_if($artifact->release_id !== null && $artifact->release_id !== $job->release_id, 409, 'Artifact is already bound to a different Release.');

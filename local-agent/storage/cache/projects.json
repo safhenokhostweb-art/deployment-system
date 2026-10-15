@@ -1,0 +1,18 @@
+{
+    "version": 2,
+    "synced_at": "2026-10-15T12:03:53+00:00",
+    "projects": {
+        "deployment-system": {
+            "source_workspace_path": "C:\\Users\\Farshad-IT\\AppData\\Local\\Temp\\SentinelBuild\\deployment-system-596f5d858b977757c545d64737fbf7badd8c7b58-isolated",
+            "remote_name": "origin",
+            "branch": "master",
+            "application_root": "service",
+            "repository_url": "https:\/\/github.com\/safhenokhostweb-art\/deployment-system.git",
+            "requires_complete_artifact": true,
+            "dependency_pinning_required": false,
+            "dependency_allowlist": [],
+            "project_id": 1,
+            "mapping_id": 1
+        }
+    }
+}

@@ -1,0 +1,180 @@
+﻿{
+    "RUN_ID":  "0114172b-dc0d-4c96-b137-6bb9e599f997",
+    "RUN_ROOT":  "C:/Users/Farshad-IT/AppData/Local/Temp/SentinelProof/0114172b-dc0d-4c96-b137-6bb9e599f997",
+    "JUNCTION_FALLBACK":  "NO",
+    "COPY_FALLBACK":  "NO",
+    "MAIN_DATABASE_TOUCHED":  "NO",
+    "QUEUE_WORKER_TOUCHED":  "NO",
+    "SCHEDULER_STARTED":  "NO",
+    "PRODUCTION_CONTACTED":  "NO",
+    "BUILD_RESULT":  {
+                         "ran_npm_build":  false
+                     },
+    "COMPOSER_EXIT_CODE":  null,
+    "NPM_CI_EXIT_CODE":  null,
+    "BUILD_EXIT_CODE":  null,
+    "HEARTBEAT_SENT":  "NO",
+    "READER_RUN":  "NO",
+    "COLLECTOR_RUN":  "NO",
+    "VERIFIER_RUN":  "NO",
+    "REAL_LOCAL_RUNTIME_VERIFIED":  "NO",
+    "EXTERNAL_BUILD_HANDOFF":  "DISABLED",
+    "SOURCE_HEAD":  "13c845b0f0cd519e12722ac8f0e8a0b587078b68",
+    "SOURCE_BRANCH":  "fix/canvas-default-homepage",
+    "GIT_STATUS_BEFORE":  "?? docs/CANVAS_DEFAULT_HOMEPAGE_AUDIT_REPORT.md\n",
+    "DB_PATH":  "C:/Users/Farshad-IT/AppData/Local/Temp/SentinelProof/0114172b-dc0d-4c96-b137-6bb9e599f997/hub/database.sqlite",
+    "STORAGE_PATH":  "C:/Users/Farshad-IT/AppData/Local/Temp/SentinelProof/0114172b-dc0d-4c96-b137-6bb9e599f997/runtime/storage",
+    "FINAL_RESULT":  "FAILED_LOCAL_ONLY",
+    "FAILURE_STAGE":  "EXACT_COMMIT_EXPORT",
+    "FAILURE_DIAGNOSTICS":  {
+                                "failure_stage":  "EXACT_COMMIT_EXPORT",
+                                "exception_class":  "RuntimeException",
+                                "sanitized_exception_message":  "proof_source_blob_unavailable",
+                                "exception_origin":  "service/app/Services/Sentinel/LocalProof/SentinelExactCommitExporter.php:70",
+                                "exception_file":  "service/app/Services/Sentinel/LocalProof/SentinelExactCommitExporter.php",
+                                "exception_line":  70,
+                                "previous_exception_chain":  [
+
+                                                             ]
+                            },
+    "FAILURE_REASON":  "RuntimeException: proof_source_blob_unavailable",
+    "EVIDENCE_PRESERVED":  "YES",
+    "GIT_STATUS_AFTER":  "?? docs/CANVAS_DEFAULT_HOMEPAGE_AUDIT_REPORT.md\n",
+    "SOURCE_REPOSITORY_CHANGED":  "NO",
+    "DEPLOY_BAT_BYTE_MATCH":  null,
+    "JSON_FIXTURES_BYTE_MATCH":  null,
+    "SOURCE_BLOB_MATCH":  null,
+    "NPM_BUILD_POWERSHELL_EXIT":  null,
+    "NPM_BUILD_STARTED":  null,
+    "NPM_BUILD_NOT_STARTED":  null,
+    "NPM_BUILD_EXIT":  null,
+    "NPM_BUILD_WARNINGS":  null,
+    "NPM_BUILD_STDERR_SHA256":  null,
+    "ARTIFACT_PATH":  null,
+    "ARTIFACT_SHA256":  null,
+    "ARTIFACT_SIZE":  null,
+    "PREVIOUS_RUN_ID":  "2f606c65-a4c9-48af-8646-de4ae6f12d49",
+    "PREVIOUS_RUN_ROOT":  "C:/Users/Farshad-IT/AppData/Local/Temp/SentinelProof/2f606c65-a4c9-48af-8646-de4ae6f12d49",
+    "PREVIOUS_FAILURE_CAUSE_STATUS":  "NOT_PROVABLE_FROM_PRESERVED_EVIDENCE",
+    "PREVIOUS_FAILURE_ANALYSIS":  {
+                                      "exception_discarded_by":  [
+                                                                     "SentinelLocalProofOrchestrator::step -\u003e proof_step_failed",
+                                                                     "SentinelLocalProofOrchestrator::execute -\u003e proof_execution_failed"
+                                                                 ],
+                                      "isolated_database_counts":  {
+                                                                       "local_agents":  1,
+                                                                       "projects":  0,
+                                                                       "releases":  0,
+                                                                       "deployments":  0,
+                                                                       "heartbeat_nonces":  0,
+                                                                       "artifacts":  0
+                                                                   },
+                                      "bootstrap_or_migrations_reached":  false,
+                                      "project_save_without_bootstrap_component_test":  "PASS (in-memory diagnostic fixture; not runtime proof)",
+                                      "artifact_git_tree_byte_audit":  {
+                                                                           "read_only_artifact_audit":  "PASS",
+                                                                           "git_blob_count":  7678,
+                                                                           "artifact_sha256":  "524867a2f59abe57d0e8bad30be6d2c4e22bc4909c1801aa24b1e9c64e925221",
+                                                                           "original_exception_cause":  "NOT_PROVABLE_FROM_PRESERVED_EVIDENCE"
+                                                                       }
+                                  },
+    "PREVIOUS_RUN_PRESERVATION":  {
+                                      "file_inventory_count":  24438,
+                                      "before_inventory_sha256":  "83928e3435b3b3d824455a5e353a47a2b72f2e16aa286e973023a01e7ea58e07",
+                                      "after_inventory_sha256":  "83928e3435b3b3d824455a5e353a47a2b72f2e16aa286e973023a01e7ea58e07",
+                                      "identical_content_and_paths":  true,
+                                      "old_run_writes_performed":  false,
+                                      "independent_native_byte_verification":  {
+                                                                                   "expected_files":  24438,
+                                                                                   "actual_files":  24438,
+                                                                                   "matching_hashes":  24438,
+                                                                                   "mismatches":  0,
+                                                                                   "read_errors":  0,
+                                                                                   "unexpected_paths":  0,
+                                                                                   "reparse_points":  0,
+                                                                                   "identical_content_and_paths":  true
+                                                                               }
+                                  },
+    "NEW_FAILURE_CAUSE_STATUS":  "INNER_GIT_EXCEPTION_WAS_DISCARDED; PRECISE_NATIVE_CAUSE_NOT_PROVABLE",
+    "NEW_RUN_STOPPED_AT_FIRST_FAILURE":  "YES",
+    "DIAGNOSTIC_FIXES":  [
+                             "Preserve step/execute previous exceptions and attempted state/model-save stage.",
+                             "Safely report required exception fields; deny arbitrary text, SQL bindings, credentials and absolute paths.",
+                             "Sanitize runtime router errors and persist runtime initialization exit code.",
+                             "Preserve evidence document contract and expose actual verifier outcome for final reporting.",
+                             "After new-run failure only: preserve previous exception in ExactCommitExporter readEntries catch. This correction was not used by the stopped run."
+                         ],
+    "FUNCTIONAL_WORKAROUND_OR_FALLBACK":  "NONE",
+    "TEST_RESULTS":  [
+                         {
+                             "assertions":  829,
+                             "skipped":  1,
+                             "name":  "Sentinel suite before run",
+                             "tests":  76,
+                             "passed":  75
+                         },
+                         {
+                             "assertions":  325,
+                             "skipped":  1,
+                             "name":  "Final changed isolation/diagnostic tests (also repeated after exporter diagnostic correction)",
+                             "tests":  21,
+                             "passed":  20
+                         },
+                         {
+                             "assertions":  36,
+                             "skipped":  0,
+                             "name":  "Heartbeat/auth feature tests",
+                             "tests":  17,
+                             "passed":  17
+                         },
+                         {
+                             "rejection_checks_passed":  13,
+                             "name":  "Native Windows symlink helper",
+                             "native_links_verified":  2,
+                             "blocked":  0
+                         },
+                         {
+                             "result":  "PASS",
+                             "name":  "Changed PHP syntax checks and git diff whitespace check"
+                         }
+                     ],
+    "CHAIN_VERIFICATION":  {
+                               "exact_source_export":  "FAILED",
+                               "build":  "NOT_REACHED",
+                               "artifact":  "NOT_REACHED",
+                               "isolated_hub":  "NOT_REACHED",
+                               "release":  "NOT_REACHED",
+                               "deployment":  "NOT_REACHED",
+                               "runtime":  "NOT_REACHED",
+                               "health":  "NOT_REACHED",
+                               "local_agent":  "NOT_REACHED",
+                               "hmac_heartbeat":  "NOT_REACHED",
+                               "runtime_snapshot_persistence":  "NOT_REACHED",
+                               "AgentRuntimeEvidenceReader":  "NOT_REACHED",
+                               "SentinelEvidenceCollector":  "NOT_REACHED",
+                               "SentinelVerifier":  "NOT_REACHED"
+                           },
+    "HMAC_VERIFIED":  "NO",
+    "SNAPSHOT_PERSISTED":  "NO",
+    "RELEASE_PUBLIC_ID":  null,
+    "ARTIFACT_PUBLIC_ID":  null,
+    "DEPLOYMENT_PUBLIC_ID":  null,
+    "RUNTIME_ROOT":  null,
+    "CURRENT_TARGET":  null,
+    "CURRENT_IS_NATIVE_SYMLINK":  "NOT_REACHED",
+    "CURRENT_TARGET_MATCH":  "NOT_REACHED",
+    "MANIFEST_PATH":  null,
+    "RUNTIME_MARKER_PATH":  null,
+    "HEALTH_RELEASE_STATUS":  null,
+    "HEALTH_LIVE_STATUS":  null,
+    "SNAPSHOT_SEQUENCE":  null,
+    "SNAPSHOT_SEQUENCE_MONOTONIC":  "NOT_REACHED",
+    "READER_RESULT":  "NOT_REACHED",
+    "COLLECTOR_RESULT":  "NOT_REACHED",
+    "VERIFIER_RESULT":  "NOT_REACHED",
+    "SENTINEL_STATE":  "NOT_STARTED",
+    "SENTINEL_EVIDENCE":  null,
+    "SENTINEL_VERIFICATION":  null,
+    "ADDITIONAL_FRESH_RUN_EXECUTED":  "NO",
+    "REVIEW_DOCUMENT":  "tools/sentinel-proof/diagnostic-review.md"
+}

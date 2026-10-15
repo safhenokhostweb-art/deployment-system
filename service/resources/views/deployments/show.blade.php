@@ -155,6 +155,102 @@
     @endif
 </div>
 
+<x-ui.info-card
+    title="Sentinel deployment evidence checks"
+    description="A successful result means only that the checks actually performed passed; it does not prove all application code or behavior is correct, approve Model B Gate 1, or change deployment status."
+>
+    <p><strong>Deployment status:</strong> {{ strtoupper((string) $deployment->status) }}</p>
+    <p><strong>Evidence collection status:</strong>
+        @if ($sentinelRun)
+            RECORDED
+        @else
+            NOT COLLECTED
+        @endif
+    </p>
+    @if ($sentinelRun)
+        <p><strong>Overall verification verdict:</strong> {{ $sentinelRun->displayStatus() }} ({{ $sentinelRun->verdict }})</p>
+        <p><strong>Collected:</strong> {{ $sentinelRun->collected_at?->format('Y-m-d H:i:s T') ?? 'Unknown' }}</p>
+        <p><strong>Evidence SHA-256:</strong> <code class="ui-code-wrap">{{ $sentinelRun->evidence_hash ?? 'Unavailable' }}</code></p>
+        @php
+            $sentinelEvidence = $sentinelRun->evidence ?? [];
+            $sentinelChecks = $sentinelRun->checks ?? [];
+            $runtimeCheckKeys = ['agent_identity', 'runtime_marker_received', 'current_path_received', 'current_path_matches', 'deployed_release_matches', 'deployed_commit_matches', 'freshness', 'attribution'];
+            $runtimeStatuses = collect($runtimeCheckKeys)->map(fn ($key) => $sentinelChecks[$key]['status'] ?? 'unknown');
+            $runtimeConsistency = $runtimeStatuses->every(fn ($status) => $status === 'pass') ? 'PASS' : ($runtimeStatuses->contains('fail') ? 'FAIL' : 'INCONCLUSIVE');
+            
+            // File-level verification status
+            $fileVerificationEnabled = config('sentinel.file_verification_enabled', false);
+            $fileVerificationStatus = 'DISABLED';
+            $fileVerificationDetail = '';
+            if ($fileVerificationEnabled) {
+                $fileVerificationStatus = strtoupper($sentinelChecks['file_manifest_hash_match']['status'] ?? 'unknown');
+                $fileVerificationDetail = $sentinelChecks['file_manifest_hash_match']['detail'] ?? '';
+            }
+        @endphp
+        <p><strong>Observed runtime consistency:</strong> {{ $runtimeConsistency }}</p>
+        <p><strong>Independent health probe:</strong> {{ strtoupper($sentinelChecks['health_probe']['status'] ?? 'unknown') }}</p>
+        @if ($fileVerificationEnabled)
+            <p><strong>File-level verification:</strong> {{ $fileVerificationStatus }} — {{ $fileVerificationDetail }}</p>
+        @else
+            <p><strong>File-level verification:</strong> DISABLED (enable via sentinel.file_verification_enabled config)</p>
+        @endif
+        <dl class="ui-meta-grid">
+            <div><dt>Expected / observed commit</dt><dd><code>{{ $sentinelEvidence['expected_commit_sha'] ?? 'Unknown' }}</code> / <code>{{ $sentinelEvidence['observed_commit_sha'] ?? 'Unknown' }}</code></dd></div>
+            <div><dt>Artifact checksum: Hub record / bytes</dt><dd><code>{{ $sentinelEvidence['artifact_checksum_sha256'] ?? 'Unavailable' }}</code> / <code>{{ $sentinelEvidence['observed_artifact_checksum_sha256'] ?? 'Unavailable' }}</code></dd></div>
+            <div><dt>Release: expected / runtime report</dt><dd><code>{{ $sentinelEvidence['release_id'] ?? 'Unknown' }}</code> / <code>{{ $sentinelEvidence['observed_release_id'] ?? 'Unknown' }}</code></dd></div>
+            <div><dt>Runtime marker: expected / observed</dt><dd><code>{{ $sentinelEvidence['expected_runtime_marker'] ?? 'Unknown' }}</code> / <code>{{ $sentinelEvidence['runtime_marker'] ?? 'Unknown' }}</code></dd></div>
+            <div><dt>Health status: expected / independent probe</dt><dd>{{ $sentinelEvidence['expected_health_status'] ?? 'Not configured' }} / {{ $sentinelEvidence['health_status'] ?? 'Unavailable' }}</dd></div>
+            <div class="ui-meta-grid__full"><dt>Server Agent active release path</dt><dd class="ui-code-wrap">{{ $sentinelEvidence['runtime_release_path'] ?? 'Unavailable' }}</dd></div>
+            @if ($fileVerificationEnabled)
+                <div><dt>File manifest hash: expected / observed</dt><dd><code>{{ $sentinelEvidence['expected_file_manifest_hash'] ?? 'Unavailable' }}</code> / <code>{{ $sentinelEvidence['observed_file_manifest_hash'] ?? 'Unavailable' }}</code></dd></div>
+                <div><dt>File manifest entries: expected / observed</dt><dd>{{ $sentinelEvidence['expected_file_manifest_entry_count'] ?? 'Unavailable' }} / {{ $sentinelEvidence['observed_file_manifest_entry_count'] ?? 'Unavailable' }}</dd></div>
+                <div><dt>File manifest total size: expected / observed</dt><dd>{{ $sentinelEvidence['expected_file_manifest_total_size'] ?? 'Unavailable' }} / {{ $sentinelEvidence['observed_file_manifest_total_size'] ?? 'Unavailable' }} bytes</dd></div>
+                <div><dt>File comparison scope</dt><dd>{{ $sentinelEvidence['file_comparison_scope'] ?? 'full' }}</dd></div>
+            @endif
+        </dl>
+        
+        @if ($fileVerificationEnabled && isset($sentinelChecks['file_comparison']))
+            @php
+                $fileComparison = $sentinelChecks['file_comparison'];
+                $fileComparisonStatus = strtoupper($fileComparison['status'] ?? 'unknown');
+                $fileComparisonDetail = $fileComparison['detail'] ?? 'No detail recorded.';
+            @endphp
+            <div class="ui-meta-grid" style="margin-top: var(--ui-space-4);">
+                <div class="ui-meta-grid__full">
+                    <dt>File Comparison Detail</dt>
+                    <dd><strong>{{ $fileComparisonStatus }}</strong> — {{ $fileComparisonDetail }}</dd>
+                </div>
+            </div>
+        @endif
+        
+        <dl class="ui-meta-grid">
+            @foreach ($sentinelChecks as $check => $detail)
+                @if (!in_array($check, ['file_comparison', 'file_manifest_hash_match', 'file_manifest_entry_count_match', 'file_manifest_total_size_match']))
+                <div>
+                    <dt>{{ str($check)->replace('_', ' ')->title() }}</dt>
+                    <dd><strong>{{ strtoupper($detail['status'] ?? 'unknown') }}</strong> — {{ $detail['detail'] ?? 'No detail recorded.' }}</dd>
+                </div>
+                @endif
+            @endforeach
+        </dl>
+        @if (! empty($sentinelRun->reasons))
+            <ul>
+                @foreach ($sentinelRun->reasons as $reason)
+                    <li>{{ $reason }}</li>
+                @endforeach
+            </ul>
+        @endif
+    @endif
+    @if ($deployment->release)
+        <form method="POST" action="{{ route('deployments.sentinel.verify', $deployment) }}">
+            @csrf
+            <button type="submit" class="btn">Collect fresh read-only evidence</button>
+        </form>
+    @else
+        <p>Fresh collection is unavailable because this deployment has no linked Release record.</p>
+    @endif
+</x-ui.info-card>
+
 @if (in_array($deployment->status, ['failed', 'partial_success'], true))
 <x-ui.alert-panel level="danger" :title="__('deployment_ui.failure_title')" class="ui-ops-grid__full" style="margin-bottom:var(--ui-space-5);">
     <dl class="ui-meta-grid" style="margin-top:var(--ui-space-3);">

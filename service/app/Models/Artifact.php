@@ -42,6 +42,9 @@ class Artifact extends Model
         'uploaded_by',
         'failure_message',
         'expires_at',
+        'file_manifest_hash',
+        'file_manifest_entry_count',
+        'file_manifest_total_size',
     ];
 
     protected function casts(): array
@@ -51,6 +54,8 @@ class Artifact extends Model
             'size_bytes' => 'integer',
             'required_paths' => 'array',
             'semantic_verified_at' => 'datetime',
+            'file_manifest_entry_count' => 'integer',
+            'file_manifest_total_size' => 'integer',
         ];
     }
 

@@ -207,6 +207,11 @@ class Deployment extends Model
         return $this->belongsTo(Deployment::class, 'rollback_of_deployment_id');
     }
 
+    public function sentinelVerificationRuns(): HasMany
+    {
+        return $this->hasMany(SentinelVerificationRun::class)->orderByDesc('collected_at')->orderByDesc('id');
+    }
+
     public function logEntries(): HasMany
     {
         return $this->hasMany(DeploymentLogEntry::class)->orderBy('sequence');

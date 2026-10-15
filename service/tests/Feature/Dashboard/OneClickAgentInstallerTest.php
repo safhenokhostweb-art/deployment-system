@@ -9,6 +9,8 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\URL;
 use ReflectionClass;
 use ReflectionMethod;
+use Symfony\Component\Process\Exception\ProcessStartFailedException;
+use Symfony\Component\Process\Process as SymfonyProcess;
 use Tests\TestCase;
 
 /**
@@ -318,12 +320,23 @@ class OneClickAgentInstallerTest extends TestCase
         // #184 exact-commit self-upgrade runtime support) — this count is
         // a derived fact about the directory's contents, not a value
         // worth freezing in place.
-        $this->assertCount(20, $matches, 'Expected agent.php + 19 lib/*.php files to be embedded.');
+        $expectedPaths = ['agent.php'];
+        foreach (glob(base_path('../agent/lib/*.php')) ?: [] as $libPath) {
+            $expectedPaths[] = 'lib/' . basename($libPath);
+        }
+        $actualPaths = array_map(static fn (array $match): string => $match[1], $matches);
+        sort($expectedPaths);
+        sort($actualPaths);
+        $this->assertSame($expectedPaths, $actualPaths, 'Embedded source paths must match agent.php and every current lib/*.php file.');
 
         foreach ($matches as $match) {
             [, $relativePath, , $heredocBody, $expectedChecksum] = $match;
 
-            $actualChecksum = hash('sha256', $heredocBody . "\n");
+            $source = str_replace(["\r\n", "\r"], "\n", (string) file_get_contents(base_path('../agent/' . $relativePath)));
+            $source = rtrim($source, "\n") . "\n";
+            $reconstructed = $heredocBody . "\n";
+            $this->assertSame($source, $reconstructed, "Heredoc body for {$relativePath} must reproduce its source bytes exactly.");
+            $actualChecksum = hash('sha256', $reconstructed);
             $this->assertSame(
                 $expectedChecksum,
                 $actualChecksum,
@@ -340,10 +353,13 @@ class OneClickAgentInstallerTest extends TestCase
         $path = tempnam(sys_get_temp_dir(), 'install-agent-') . '.sh';
         file_put_contents($path, $script);
 
-        exec('bash -n ' . escapeshellarg($this->toBashPath($path)) . ' 2>&1', $output, $exitCode);
-        unlink($path);
+        try {
+            [$exitCode, $output] = $this->runBash(['-n', $this->toBashPath($path)]);
+        } finally {
+            @unlink($path);
+        }
 
-        $this->assertSame(0, $exitCode, "bash -n reported a syntax error:\n" . implode("\n", $output));
+        $this->assertSame(0, $exitCode, "bash -n reported a syntax error:\n" . $output);
     }
 
     /**
@@ -382,13 +398,31 @@ class OneClickAgentInstallerTest extends TestCase
         $drive = strtolower($matches[1]);
         $rest = $matches[2];
 
-        static $isWsl = null;
-        if ($isWsl === null) {
-            $version = strtolower((string) shell_exec('bash --version 2>&1'));
-            $isWsl = !str_contains($version, 'msys');
+        return $this->usesGitBash() ? "/{$drive}/{$rest}" : "/mnt/{$drive}/{$rest}";
+    }
+
+    private function usesGitBash(): bool
+    {
+        return DIRECTORY_SEPARATOR === '\\'
+            && str_contains(strtolower($this->bashExecutable()), '\\git\\bin\\bash.exe');
+    }
+
+    private function bashExecutable(): string
+    {
+        $configured = getenv('SENTINEL_TEST_BASH_BIN');
+        if (is_string($configured) && $configured !== '' && is_file($configured)) {
+            return $configured;
         }
 
-        return $isWsl ? "/mnt/{$drive}/{$rest}" : "/{$drive}/{$rest}";
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $programFiles = getenv('ProgramFiles') ?: 'C:\\Program Files';
+            $gitBash = rtrim($programFiles, '\\/') . '\\Git\\bin\\bash.exe';
+            if (is_file($gitBash)) {
+                return $gitBash;
+            }
+        }
+
+        return 'bash';
     }
 
     /**
@@ -477,10 +511,12 @@ BASH;
             $harnessTemplate
         );
 
-        [$oldExit, $oldOutput] = $this->runBash($oldHarness, $fastTmpDir);
-        [$newExit, $newOutput] = $this->runBash($newHarness, $fastTmpDir);
-
-        unlink($fakePhpPath);
+        try {
+            [$oldExit, $oldOutput] = $this->runBash([], $fastTmpDir, $oldHarness);
+            [$newExit, $newOutput] = $this->runBash([], $fastTmpDir, $newHarness);
+        } finally {
+            @unlink($fakePhpPath);
+        }
 
         $this->assertStringContainsString('NOT_FOUND', $oldOutput, 'Expected the OLD pattern to reproduce the false-negative bug under this harness — if it did not, the harness stopped proving anything.');
         $this->assertNotSame(0, $oldExit);
@@ -493,15 +529,32 @@ BASH;
     /**
      * @return array{0: int, 1: string}
      */
-    private function runBash(string $script, ?string $dir = null): array
+    private function runBash(array $arguments, ?string $dir = null, ?string $script = null): array
     {
-        $path = tempnam($dir ?? sys_get_temp_dir(), 'pipefail-harness-') . '.sh';
-        file_put_contents($path, $script);
+        $path = null;
+        if ($script !== null) {
+            $path = tempnam($dir ?? sys_get_temp_dir(), 'pipefail-harness-') . '.sh';
+            file_put_contents($path, $script);
+            $arguments[] = $this->toBashPath($path);
+        }
 
-        exec('bash ' . escapeshellarg($this->toBashPath($path)) . ' 2>&1', $output, $exitCode);
-        unlink($path);
+        $process = new SymfonyProcess(array_merge([$this->bashExecutable()], $arguments), $dir);
+        try {
+            $process->run();
+        } catch (ProcessStartFailedException $exception) {
+            $this->markTestSkipped('Bash cannot be started in this environment: ' . $exception->getMessage());
+        } finally {
+            if ($path !== null) {
+                @unlink($path);
+            }
+        }
 
-        return [$exitCode, implode("\n", $output)];
+        $output = $process->getOutput() . $process->getErrorOutput();
+        if (preg_match('/CreateFileMapping|E_ACCESSDENIED|access is denied|permission denied/i', $output) === 1) {
+            $this->markTestSkipped('The operating system denied Bash execution in this test environment.');
+        }
+
+        return [$process->getExitCode() ?? 1, $output];
     }
 
     public function test_installer_is_hidden_from_a_non_admin_even_if_the_session_flash_is_present(): void

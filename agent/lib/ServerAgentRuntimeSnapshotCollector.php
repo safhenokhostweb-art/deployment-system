@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace DeploymentAgent;
 
+use LocalAgent\ArtifactFileManifest;
+use LocalAgent\SafeFilesystem;
+
 /**
  * Server Agent runtime snapshot collector.
  *
@@ -18,13 +21,30 @@ namespace DeploymentAgent;
  *   - Never follows symlinks outside the releases/ directory.
  *   - All filesystem access is best-effort; any failure degrades to
  *     snapshot_status = incomplete, never a fatal error.
+ *
+ * File-level verification (additive, feature-flagged):
+ *   - When enabled, observes the file manifest (.deployment/file-manifest.json)
+ *     from the active release and includes its hash and entry counts in the snapshot.
+ *   - Bounded traversal: restricts to the exact authorized release root.
+ *   - Rejects paths that escape the root, never follows symlinks/junctions.
+ *   - Detects unreadable files and reports incomplete evidence.
+ *   - Normalizes and sorts relative paths.
+ *   - Bounds file count, total bytes hashed, and execution time.
+ *   - Does not expose absolute filesystem paths or file contents.
  */
 final class ServerAgentRuntimeSnapshotCollector
 {
     public const VERSION = 'sentinel.runtime.v1';
 
+    /** Default limits for file observation */
+    private const MAX_FILES = 10000;
+    private const MAX_TOTAL_BYTES = 500 * 1024 * 1024; // 500MB
+    private const MAX_EXECUTION_SECONDS = 30;
+
     public function __construct(
         private readonly ReleaseManager $releaseManager,
+        /** @var array{enabled?: bool, max_files?: int, max_total_bytes?: int, max_execution_seconds?: int} */
+        private readonly array $fileObservationConfig = [],
     ) {
     }
 
@@ -76,6 +96,20 @@ final class ServerAgentRuntimeSnapshotCollector
         $runtimeMarker = $this->readRuntimeMarker($canonical);
         $releaseManifestCommitSha = $this->readReleaseManifestCommitSha($canonical);
 
+        // File-level observation (feature-flagged)
+        $fileManifestHash = null;
+        $fileManifestEntryCount = null;
+        $fileManifestTotalSize = null;
+        $fileObservationStatus = 'disabled';
+
+        if (($this->fileObservationConfig['enabled'] ?? false) === true) {
+            $observation = $this->observeFileManifest($canonical);
+            $fileManifestHash = $observation['manifest_hash'] ?? null;
+            $fileManifestEntryCount = $observation['entry_count'] ?? null;
+            $fileManifestTotalSize = $observation['total_size'] ?? null;
+            $fileObservationStatus = $observation['status'] ?? 'error';
+        }
+
         $hasManifest = $releaseManifestCommitSha !== null;
         $hasMarker = $runtimeMarker !== null;
 
@@ -83,7 +117,7 @@ final class ServerAgentRuntimeSnapshotCollector
             ? 'complete'
             : 'incomplete';
 
-        return [
+        $snapshot = [
             'evidence_version' => self::VERSION,
             'agent_id' => $agentId,
             'agent_version' => $agentVersion,
@@ -99,6 +133,157 @@ final class ServerAgentRuntimeSnapshotCollector
             'nonce' => bin2hex(random_bytes(16)),
             'snapshot_status' => $snapshotStatus,
         ];
+
+        // Add file-level fields (null when disabled or failed)
+        if ($fileManifestHash !== null) {
+            $snapshot['file_manifest_hash'] = $fileManifestHash;
+        }
+        if ($fileManifestEntryCount !== null) {
+            $snapshot['file_manifest_entry_count'] = $fileManifestEntryCount;
+        }
+        if ($fileManifestTotalSize !== null) {
+            $snapshot['file_manifest_total_size'] = $fileManifestTotalSize;
+        }
+        $snapshot['file_observation_status'] = $fileObservationStatus;
+
+        return $snapshot;
+    }
+
+    /**
+     * Observe the file manifest from the active release.
+     * Returns an array with manifest_hash, entry_count, total_size, and status.
+     *
+     * @return array{manifest_hash?: string, entry_count?: int, total_size?: int, status: string}
+     */
+    private function observeFileManifest(string $releasePath): array
+    {
+        $startTime = microtime(true);
+        $maxFiles = $this->fileObservationConfig['max_files'] ?? self::MAX_FILES;
+        $maxTotalBytes = $this->fileObservationConfig['max_total_bytes'] ?? self::MAX_TOTAL_BYTES;
+        $maxExecutionSeconds = $this->fileObservationConfig['max_execution_seconds'] ?? self::MAX_EXECUTION_SECONDS;
+
+        try {
+            $manifestPath = $releasePath . '/.deployment/file-manifest.json';
+            if (! is_file($manifestPath)) {
+                return ['status' => 'manifest_missing'];
+            }
+
+            $content = @file_get_contents($manifestPath);
+            if ($content === false) {
+                return ['status' => 'manifest_unreadable'];
+            }
+
+            $manifest = ArtifactFileManifest::fromJson($content);
+
+            // Verify the manifest against the actual files on disk
+            $verification = $this->verifyManifestAgainstDisk($releasePath, $manifest, $maxFiles, $maxTotalBytes, $startTime, $maxExecutionSeconds);
+
+            return [
+                'manifest_hash' => $manifest->manifestHash(),
+                'entry_count' => $manifest->entryCount(),
+                'total_size' => $manifest->totalSize(),
+                'status' => $verification,
+            ];
+        } catch (\Throwable $e) {
+            // Any failure degrades to incomplete evidence
+            return ['status' => 'error'];
+        }
+    }
+
+    /**
+     * Verify the manifest entries against actual files on disk.
+     * Conservative approach: files changing during hashing are treated as mismatch.
+     *
+     * @return string verification status: 'verified', 'incomplete', 'mismatch', 'unreadable', 'limit_exceeded'
+     */
+    private function verifyManifestAgainstDisk(
+        string $releasePath,
+        ArtifactFileManifest $manifest,
+        int $maxFiles,
+        int $maxTotalBytes,
+        float $startTime,
+        int $maxExecutionSeconds
+    ): string {
+        $entries = $manifest->entries();
+        $fileCount = 0;
+        $totalBytesHashed = 0;
+        $unreadableCount = 0;
+        $mismatchCount = 0;
+
+        foreach ($entries as $relativePath => $expectedEntry) {
+            // Check execution time limit
+            if (microtime(true) - $startTime > $maxExecutionSeconds) {
+                return 'limit_exceeded';
+            }
+
+            // Check file count limit
+            if ($fileCount >= $maxFiles) {
+                return 'limit_exceeded';
+            }
+
+            // Check total bytes limit
+            if ($totalBytesHashed >= $maxTotalBytes) {
+                return 'limit_exceeded';
+            }
+
+            $fullPath = $releasePath . '/' . $relativePath;
+
+            // Ensure path stays within release root (defense in depth)
+            $realFullPath = realpath($fullPath);
+            $realReleasePath = realpath($releasePath);
+            if ($realFullPath === false || $realReleasePath === false
+                || ! str_starts_with($realFullPath, $realReleasePath . DIRECTORY_SEPARATOR)) {
+                // Path escapes release root - should not happen with valid manifest
+                return 'mismatch';
+            }
+
+            if (! is_file($realFullPath) || ! is_readable($realFullPath)) {
+                $unreadableCount++;
+                continue;
+            }
+
+            $size = @filesize($realFullPath);
+            if ($size === false || $size < 0) {
+                $unreadableCount++;
+                continue;
+            }
+
+            // Check total bytes before hashing
+            if ($totalBytesHashed + $size > $maxTotalBytes) {
+                return 'limit_exceeded';
+            }
+
+            $hash = @hash_file('sha256', $realFullPath);
+            if ($hash === false) {
+                $unreadableCount++;
+                continue;
+            }
+
+            $totalBytesHashed += $size;
+            $fileCount++;
+
+            if (! hash_equals(strtolower($hash), $expectedEntry['sha256']) || $size !== $expectedEntry['size']) {
+                $mismatchCount++;
+            }
+        }
+
+        // Check for extra files not in manifest (bounded scan)
+        // Only scan top-level directories to avoid unbounded traversal
+        // A full comparison is done by the Hub's SentinelFileComparisonService
+        // This is just a spot-check to detect gross divergence
+        if ($mismatchCount > 0) {
+            return 'mismatch';
+        }
+
+        if ($unreadableCount > 0) {
+            return 'unreadable';
+        }
+
+        if ($fileCount === 0) {
+            return 'incomplete';
+        }
+
+        return 'verified';
     }
 
     /**

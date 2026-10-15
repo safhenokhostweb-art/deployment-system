@@ -1,0 +1,40 @@
+{
+    "evidence_version": "sentinel.v1",
+    "project_key": "deployment-system",
+    "environment": "staging",
+    "expected_commit_sha": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+    "observed_commit_sha": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+    "artifact_id": "art-0001",
+    "artifact_checksum_sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "observed_artifact_checksum_sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "release_id": "rel-0001",
+    "observed_release_id": "rel-0001",
+    "agent_id": "agent-0001",
+    "agent_version": "1.5.0",
+    "runtime_release_path": "releases/dep-0001",
+    "expected_runtime_marker": "release:rel-0001|commit:a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+    "runtime_marker": "release:rel-0001|commit:a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+    "health_endpoint": "https://staging.example.com/health",
+    "expected_health_status": 200,
+    "health_status": 200,
+    "checks": {
+        "source_provenance": {
+            "status": "pass",
+            "detail": "local source commit matches the expected commit"
+        },
+        "artifact_checksum": {
+            "status": "pass",
+            "detail": "observed artifact bytes hash to the recorded checksum"
+        },
+        "runtime_activation": {
+            "status": "pass",
+            "detail": "active runtime marker matches the expected release marker"
+        },
+        "public_health": {
+            "status": "pass",
+            "detail": "public health endpoint returned the expected status"
+        }
+    },
+    "verified_at": "2026-10-06T10:00:00+00:00",
+    "result": null
+}
