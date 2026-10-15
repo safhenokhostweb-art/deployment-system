@@ -427,16 +427,30 @@ final class SentinelEvidenceCollector implements SentinelEvidenceCollection
             return $this->unknown('observed file manifest metadata incomplete.');
         }
 
-        // Compare manifest hashes first (quick check)
         $expectedManifestHash = $expectation->expectedFileManifestHash;
-        if (hash_equals(strtolower($expectedManifestHash), strtolower($observedManifestHash))) {
-            return $this->pass('file manifest hash matches — all files verified.');
-        }
+        $expectedEntryCount = $expectation->expectedFileManifestEntryCount;
+        $expectedTotalSize = $expectation->expectedFileManifestTotalSize;
+        $fileComparisonScope = $expectation->fileComparisonScope ?? 'full';
 
-        // Manifest hashes differ - detailed comparison would be needed
-        // For now, we report the mismatch. The Hub could extend this to
-        // fetch and compare the full manifests if needed.
-        return $this->fail("file manifest hash mismatch: expected {$expectedManifestHash}, observed {$observedManifestHash}.");
+        $comparison = new SentinelFileComparisonService(
+            [],
+            [],
+            $expectedManifestHash,
+            $observedManifestHash,
+            $expectedEntryCount,
+            $observedEntryCount,
+            $expectedTotalSize,
+            $observedTotalSize,
+            $fileComparisonScope
+        );
+
+        $verdict = $comparison->verdict();
+
+        return match ($verdict) {
+            'PASS' => $this->pass('file manifest hash matches — all files verified.'),
+            'FAIL' => $this->fail("file manifest hash mismatch: expected {$expectedManifestHash}, observed {$observedManifestHash}."),
+            default => $this->unknown("file comparison scope '{$fileComparisonScope}': {$verdict}."),
+        };
     }
 
     /**

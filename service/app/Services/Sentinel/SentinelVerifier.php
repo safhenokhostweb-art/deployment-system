@@ -515,15 +515,14 @@ final class SentinelVerifier
 
     /**
      * Check detailed file comparison via SentinelFileComparisonService.
-     * Returns UNKNOWN when feature is disabled, data is missing, or
-     * comparison is incomplete/stale.
+     * Returns UNKNOWN when data is missing, or comparison is incomplete/stale.
      * Returns FAIL when missing or mismatched required files are found.
+     * Returns PASS when all files match.
      */
     private function checkFileComparison(SentinelEvidenceContract $evidence, array $expectation): array
     {
         $fileComparisonScope = $evidence->get('file_comparison_scope') ?? 'full';
 
-        // Check if we have the required data for comparison
         $expectedManifestHash = $evidence->get('expected_file_manifest_hash');
         $observedManifestHash = $evidence->get('observed_file_manifest_hash');
         $expectedEntryCount = $evidence->get('expected_file_manifest_entry_count');
@@ -538,33 +537,25 @@ final class SentinelVerifier
             return $this->unknown('file comparison requires complete manifest metadata on both sides.');
         }
 
-        // If manifest hashes match, the detailed comparison is implied PASS
-        if (hash_equals(strtolower($expectedManifestHash), strtolower($observedManifestHash))) {
-            return $this->pass("file comparison scope '{$fileComparisonScope}': all files match (manifest hash verified).");
-        }
+        $comparison = new SentinelFileComparisonService(
+            [],
+            [],
+            $expectedManifestHash,
+            $observedManifestHash,
+            $expectedEntryCount,
+            $observedEntryCount,
+            $expectedTotalSize,
+            $observedTotalSize,
+            $fileComparisonScope
+        );
 
-        // Manifest hashes don't match - detailed comparison would be needed
-        // The actual file-by-file comparison is done at collection time by
-        // SentinelEvidenceCollector using SentinelFileComparisonService
-        // Here we just check the recorded comparison check from the collector
-        $checks = $evidence->get('checks') ?? [];
-        $comparisonCheck = $checks['file_comparison'] ?? null;
+        $verdict = $comparison->verdict();
 
-        if (is_array($comparisonCheck)) {
-            $status = $comparisonCheck['status'] ?? null;
-            $detail = $comparisonCheck['detail'] ?? 'file comparison check recorded';
-
-            if ($status === SentinelEvidenceContract::CHECK_STATUS_PASS) {
-                return $this->pass("file comparison scope '{$fileComparisonScope}': {$detail}");
-            } elseif ($status === SentinelEvidenceContract::CHECK_STATUS_FAIL) {
-                return $this->fail("file comparison scope '{$fileComparisonScope}': {$detail}");
-            } else {
-                return $this->unknown("file comparison scope '{$fileComparisonScope}': {$detail}");
-            }
-        }
-
-        // No detailed comparison check recorded - manifest hashes differ
-        return $this->fail("file comparison scope '{$fileComparisonScope}': manifest hash mismatch detected and no detailed comparison recorded.");
+        return match ($verdict) {
+            'PASS' => $this->pass("file comparison scope '{$fileComparisonScope}': all files match (manifest hash verified)."),
+            'FAIL' => $this->fail("file comparison scope '{$fileComparisonScope}': manifest hash mismatch detected."),
+            default => $this->unknown("file comparison scope '{$fileComparisonScope}': {$verdict}."),
+        };
     }
 
     private function isSha(mixed $value): bool
