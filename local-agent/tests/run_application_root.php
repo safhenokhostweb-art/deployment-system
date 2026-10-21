@@ -5,6 +5,7 @@ declare(strict_types=1);
 require __DIR__ . '/../lib/LocalBuildFailedException.php';
 require __DIR__ . '/../lib/ApplicationRoot.php';
 require __DIR__ . '/../lib/SafeFilesystem.php';
+require __DIR__ . '/../lib/ArtifactFileManifest.php';
 require __DIR__ . '/../lib/ArtifactBuilder.php';
 
 use LocalAgent\ApplicationRoot;
@@ -37,7 +38,7 @@ try {
     for ($i = 0; $i < $zip->numFiles; $i++) { $names[] = $zip->getNameIndex($i); }
     $zip->close();
     $check('subdirectory application root is packaged without service wrapper', in_array('artisan', $names, true) && in_array('vendor/autoload.php', $names, true) && !in_array('service/artisan', $names, true));
-    $check('Laravel runtime requirements are emitted', $archive['requiredPaths'] === ['composer.json', 'vendor/autoload.php', 'artisan', 'bootstrap/app.php', 'public/index.php', '.deployment/release-manifest.json']);
+    $check('Laravel runtime requirements are emitted', $archive['requiredPaths'] === ['composer.json', 'vendor/autoload.php', 'artisan', 'bootstrap/app.php', 'public/index.php', '.deployment/release-manifest.json', '.deployment/file-manifest.json']);
     @unlink($archive['path']);
 
     foreach (['../service', '/absolute', 'C:/absolute'] as $invalid) {

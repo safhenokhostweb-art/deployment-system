@@ -104,6 +104,134 @@ class ArtifactSemanticPersistenceTest extends TestCase
         }
     }
 
+    // ------------------------------------------------------------------
+    // file-manifest.json validation when artifact declares a file_manifest_hash
+    // ------------------------------------------------------------------
+
+    public function test_file_manifest_required_when_hash_declared_but_missing_from_zip(): void
+    {
+        $project = Project::factory()->create([]);
+        $sha = str_repeat('a', 40);
+        $diskPath = 'test/'.bin2hex(random_bytes(8)).'.zip';
+        $localPath = Storage::disk('artifacts')->path($diskPath);
+        if (! is_dir(dirname($localPath))) {
+            mkdir(dirname($localPath), 0777, true);
+        }
+        $zip = new \ZipArchive;
+        $zip->open($localPath, \ZipArchive::CREATE);
+        $zip->addFromString('index.php', '<?php return true;');
+        $zip->addFromString('.deployment/release-manifest.json', json_encode([
+            'format' => 'deployment-system-release-manifest',
+            'project_key' => $project->project_key,
+            'commit_sha' => $sha,
+            'branch' => 'main',
+            'status' => 'pass',
+        ], JSON_THROW_ON_ERROR));
+        $zip->close();
+
+        $artifact = Artifact::factory()->create([
+            'project_id' => $project->id,
+            'commit_hash' => $sha,
+            'branch' => 'main',
+            'disk_path' => $diskPath,
+            'required_paths' => ['.deployment/release-manifest.json'],
+            'checksum_sha256' => hash_file('sha256', $localPath),
+            'size_bytes' => filesize($localPath),
+            'file_manifest_hash' => hash('sha256', 'some-manifest'),
+        ]);
+
+        try {
+            app(ArtifactSemanticValidator::class)->validate($artifact);
+            $this->fail('Missing .deployment/file-manifest.json was accepted when file_manifest_hash is declared.');
+        } catch (ArtifactValidationException $e) {
+            $this->assertSame('missing_file_manifest', $e->reason);
+        }
+    }
+
+    public function test_file_manifest_malformed_is_rejected(): void
+    {
+        $project = Project::factory()->create([]);
+        $sha = str_repeat('a', 40);
+        $diskPath = 'test/'.bin2hex(random_bytes(8)).'.zip';
+        $localPath = Storage::disk('artifacts')->path($diskPath);
+        if (! is_dir(dirname($localPath))) {
+            mkdir(dirname($localPath), 0777, true);
+        }
+        $zip = new \ZipArchive;
+        $zip->open($localPath, \ZipArchive::CREATE);
+        $zip->addFromString('index.php', '<?php return true;');
+        $zip->addFromString('.deployment/release-manifest.json', json_encode([
+            'format' => 'deployment-system-release-manifest',
+            'project_key' => $project->project_key,
+            'commit_sha' => $sha,
+            'branch' => 'main',
+            'status' => 'pass',
+        ], JSON_THROW_ON_ERROR));
+        $zip->addFromString('.deployment/file-manifest.json', 'not-json-at-all');
+        $zip->close();
+
+        $artifact = Artifact::factory()->create([
+            'project_id' => $project->id,
+            'commit_hash' => $sha,
+            'branch' => 'main',
+            'disk_path' => $diskPath,
+            'required_paths' => ['.deployment/release-manifest.json'],
+            'checksum_sha256' => hash_file('sha256', $localPath),
+            'size_bytes' => filesize($localPath),
+            'file_manifest_hash' => hash('sha256', 'not-json-at-all'),
+        ]);
+
+        try {
+            app(ArtifactSemanticValidator::class)->validate($artifact);
+            $this->fail('Malformed .deployment/file-manifest.json was accepted.');
+        } catch (ArtifactValidationException $e) {
+            $this->assertSame('file_manifest_invalid', $e->reason);
+        }
+    }
+
+    public function test_file_manifest_with_valid_structure_is_accepted(): void
+    {
+        $project = Project::factory()->create([]);
+        $sha = str_repeat('a', 40);
+        $manifestContent = json_encode([
+            'format' => 'deployment-system-file-manifest',
+            'version' => 1,
+            'entries' => ['index.php' => ['size' => 20, 'sha256' => hash('sha256', '<?php return true;')]],
+        ]);
+        $manifestHash = hash('sha256', $manifestContent);
+        $diskPath = 'test/'.bin2hex(random_bytes(8)).'.zip';
+        $localPath = Storage::disk('artifacts')->path($diskPath);
+        if (! is_dir(dirname($localPath))) {
+            mkdir(dirname($localPath), 0777, true);
+        }
+        $zip = new \ZipArchive;
+        $zip->open($localPath, \ZipArchive::CREATE);
+        $zip->addFromString('index.php', '<?php return true;');
+        $zip->addFromString('.deployment/release-manifest.json', json_encode([
+            'format' => 'deployment-system-release-manifest',
+            'project_key' => $project->project_key,
+            'commit_sha' => $sha,
+            'branch' => 'main',
+            'status' => 'pass',
+        ], JSON_THROW_ON_ERROR));
+        $zip->addFromString('.deployment/file-manifest.json', $manifestContent);
+        $zip->close();
+
+        $artifact = Artifact::factory()->create([
+            'project_id' => $project->id,
+            'commit_hash' => $sha,
+            'branch' => 'main',
+            'disk_path' => $diskPath,
+            'required_paths' => ['.deployment/release-manifest.json'],
+            'checksum_sha256' => hash_file('sha256', $localPath),
+            'size_bytes' => filesize($localPath),
+            'file_manifest_hash' => $manifestHash,
+        ]);
+
+        app(ArtifactSemanticValidator::class)->validate($artifact);
+        $this->addToAssertionCount(1);
+    }
+
     private function artifact(Project $project, array $sourcePaths): Artifact
     {
         $sha = str_repeat('a', 40);

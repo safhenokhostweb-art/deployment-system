@@ -2,6 +2,7 @@
 
 namespace App\Services\Sentinel;
 
+use Illuminate\Container\Container;
 use InvalidArgumentException;
 
 /**
@@ -51,8 +52,14 @@ final class SentinelVerifier
     {
         $this->assertExpectationShape($expectation);
 
-        // File-level verification enabled check
-        $fileVerificationEnabled = config('sentinel.file_verification_enabled', false) === true;
+        // File-level verification enabled check. The class is framework-free by
+        // design (see docblock): under Laravel the flag is read from the config
+        // repository exactly as before; outside a booted application (standalone
+        // verifier runs, raw isolation tests) there is no repository and the
+        // documented opt-in default — disabled — applies. Never enabled implicitly.
+        $container = Container::getInstance();
+        $fileVerificationEnabled = $container->bound('config')
+            && $container->make('config')->get('sentinel.file_verification_enabled', false) === true;
 
         $checks = [
             'evidence_version' => $this->checkVersion($evidence),
@@ -521,6 +528,26 @@ final class SentinelVerifier
      */
     private function checkFileComparison(SentinelEvidenceContract $evidence, array $expectation): array
     {
+        // A recorded file_comparison check from the collector is authoritative for
+        // the detailed-comparison status: an explicitly recorded unknown ("file
+        // observation incomplete") must survive even when the manifest hash check
+        // independently fails — the hash mismatch still fails the overall verdict
+        // through file_manifest_hash_match. Only when nothing was recorded do we
+        // recompute the comparison from the manifest metadata.
+        $recorded = $evidence->get('checks');
+        if (is_array($recorded) && is_array($recorded['file_comparison'] ?? null)) {
+            $status = $recorded['file_comparison']['status'] ?? null;
+            $recordedDetail = $recorded['file_comparison']['detail'] ?? null;
+            $detail = is_string($recordedDetail) && $recordedDetail !== ''
+                ? $recordedDetail
+                : 'recorded file comparison check.';
+            return match ($status) {
+                SentinelEvidenceContract::CHECK_STATUS_PASS => $this->pass($detail),
+                SentinelEvidenceContract::CHECK_STATUS_FAIL => $this->fail($detail),
+                default => $this->unknown($detail),
+            };
+        }
+
         $fileComparisonScope = $evidence->get('file_comparison_scope') ?? 'full';
 
         $expectedManifestHash = $evidence->get('expected_file_manifest_hash');

@@ -43,10 +43,12 @@ require __DIR__ . '/../lib/BuildWorkspace.php';
 require __DIR__ . '/../lib/DependencyRepositoryResolver.php';
 require __DIR__ . '/../lib/ScopedSshConfig.php';
 require __DIR__ . '/../lib/WorkspaceSourcePreparer.php';
+require __DIR__ . '/../lib/ArtifactFileManifest.php';
 require __DIR__ . '/../lib/ArtifactBuilder.php';
 require __DIR__ . '/../lib/ArtifactUploader.php';
 
 use LocalAgent\ArtifactBuilder;
+use LocalAgent\ArtifactFileManifest;
 use LocalAgent\ArtifactSourceResolver;
 use LocalAgent\ArtifactUploader;
 use LocalAgent\BuildWorkspace;
@@ -106,6 +108,59 @@ function runGit(GitManager $git, array $argv, string $cwd): array
     return $git->run(array_merge(['git'], $argv), $cwd, 60);
 }
 
+/**
+ * Fixture setup step: generates package-lock.json via `npm install
+ * --package-lock-only` (what `npm ci` later requires) and FAILS LOUDLY if
+ * npm did not actually produce it. Previously both call sites discarded
+ * the result entirely, so an npm failure only surfaced much later as a
+ * downstream, misleading `npm ci` EUSAGE inside LocalBuildRunner. The
+ * failure message carries the exit code, timeout flag, lockfile
+ * existence and a bounded output tail — npm's stdout/stderr only; it
+ * never prints the environment or npm config, so no credentials can leak.
+ */
+function generatePackageLockOrFail(string $fixtureName, GitManager $git, string $repo): void
+{
+    $result = $git->run(['npm', 'install', '--package-lock-only'], $repo, 60);
+    $lockExists = is_file($repo . '/package-lock.json');
+
+    if ($result['exitCode'] !== 0 || $result['timedOut'] || !$lockExists) {
+        fwrite(STDERR, "FIXTURE SETUP FAILURE [{$fixtureName}]: npm install --package-lock-only in {$repo}\n"
+            . '  exitCode=' . $result['exitCode']
+            . ' timedOut=' . var_export($result['timedOut'], true)
+            . ' package-lock.json exists=' . var_export($lockExists, true) . "\n"
+            . "  npm output tail:\n"
+            . '  ' . str_replace("\n", "\n  ", substr((string) $result['output'], -2000)) . "\n");
+        exit(1);
+    }
+}
+
+/**
+ * Test-local Composer invocation, independent of the global PATH. Laragon
+ * only puts its php/composer directories on the PATH of shells it launches
+ * itself (see LocalBuildRunner's v1.4.1 docblock), so a bare ['composer']
+ * makes proc_open()'s CreateProcess fail with "The system cannot find the
+ * file specified" when this test is run from any other process (confirmed:
+ * `where.exe composer` finds nothing there, while the files exist). Uses
+ * the absolute [php.exe, composer.phar] pair when those exist on this dev
+ * machine, and falls back to ['composer'] everywhere else so the test
+ * stays portable. argv[0] is php.exe — NOT a .phar — so
+ * LocalBuildRunner::resolvedComposerCommand() will not prepend a second
+ * PHP interpreter on top of this pair.
+ *
+ * @return array<int, string>
+ */
+function fixtureComposerCommand(): array
+{
+    $laragonPhp = 'C:/laragon/bin/php/php-8.4.16-nts-Win32-vs17-x64/php.exe';
+    $laragonComposerPhar = 'C:/laragon/bin/composer/composer.phar';
+
+    if (is_file($laragonPhp) && is_file($laragonComposerPhar)) {
+        return [$laragonPhp, $laragonComposerPhar];
+    }
+
+    return ['composer'];
+}
+
 function zipEntryNames(string $zipPath): array
 {
     $zip = new ZipArchive();
@@ -159,7 +214,7 @@ function buildFixtureRepo(GitManager $git, string $workspace): array
     // package-lock.json by design — a real project always commits one;
     // this fixture generates and commits it the same way, offline and
     // instantly since there are zero real dependencies to resolve.
-    $git->run(['npm', 'install', '--package-lock-only'], $repo, 60);
+    generatePackageLockOrFail('buildFixtureRepo', $git, $repo);
 
     runGit($git, ['add', '-A'], $repo);
     runGit($git, ['commit', '--quiet', '-m', 'initial'], $repo);
@@ -279,7 +334,7 @@ $workspace = makeWorkspace();
 $git = new GitManager();
 $fixture = buildFixtureRepo($git, $workspace);
 
-$runner = new LocalBuildRunner($git);
+$runner = new LocalBuildRunner($git, composerCommand: fixtureComposerCommand());
 $result = $runner->run($fixture['path']);
 
 check('LocalBuildRunner: composer.json present -> ranComposer', $result['ranComposer'] === true, $failures, $passCount);
@@ -335,7 +390,7 @@ $brokenBuildWorkspace = makeWorkspace();
 $brokenBuildRepo = $brokenBuildWorkspace . '/repo';
 mkdir($brokenBuildRepo, 0777, true);
 file_put_contents("{$brokenBuildRepo}/package.json", json_encode(['name' => 'broken-build', 'scripts' => ['build' => 'node -e "process.exit(1)"']]));
-$git->run(['npm', 'install', '--package-lock-only'], $brokenBuildRepo, 60);
+generatePackageLockOrFail('broken-build fixture', $git, $brokenBuildRepo);
 check('LocalBuildRunner: an npm run build failure throws local_asset_build_failed', (function () use ($runner, $brokenBuildRepo) {
     try {
         $runner->run($brokenBuildRepo);
@@ -419,6 +474,53 @@ check('artifact contains public/build/manifest.json', in_array('public/build/man
 check('artifact does NOT contain any node_modules/ entry (excluded even though it now sits right next to vendor/)', !array_filter($names, static fn ($n) => str_starts_with($n, 'node_modules/')), $failures, $passCount);
 check('artifact does NOT contain any .git/ entry', !array_filter($names, static fn ($n) => str_starts_with($n, '.git/')), $failures, $passCount);
 
+// File-manifest contract: the manifest is sealed inside the ZIP, its
+// canonical hash matches the descriptor the Hub stores, and BOTH halves
+// of the required-path contract (the uploaded descriptor list AND the
+// in-artifact release manifest's required_paths) name it — the producer
+// and consumer gates must never disagree about it.
+check('artifact contains .deployment/file-manifest.json', in_array(ArtifactFileManifest::MANIFEST_FILENAME, $names, true), $failures, $passCount);
+check('requiredPaths (descriptor) lists .deployment/file-manifest.json', in_array(ArtifactFileManifest::MANIFEST_FILENAME, $archive['requiredPaths'], true), $failures, $passCount);
+check('sealed file manifest hash matches the build descriptor', (function () use ($archive): bool {
+    $zip = new ZipArchive();
+    if ($zip->open($archive['path']) !== true) {
+        return false;
+    }
+    try {
+        $manifestBytes = $zip->getFromName(ArtifactFileManifest::MANIFEST_FILENAME);
+        if ($manifestBytes === false) {
+            return false;
+        }
+        $manifest = ArtifactFileManifest::fromJson($manifestBytes);
+        if ($manifest->manifestHash() !== ($archive['file_manifest_hash'] ?? null)) {
+            return false;
+        }
+
+        return $manifest->entryCount() === ($archive['file_manifest_entry_count'] ?? null)
+            && $manifest->totalSize() === ($archive['file_manifest_total_size'] ?? null);
+    } catch (\Throwable) {
+        return false;
+    } finally {
+        $zip->close();
+    }
+})(), $failures, $passCount);
+check('in-artifact release manifest required_paths match the descriptor exactly', (function () use ($archive): bool {
+    $zip = new ZipArchive();
+    if ($zip->open($archive['path']) !== true) {
+        return false;
+    }
+    try {
+        $releaseManifest = json_decode((string) $zip->getFromName('.deployment/release-manifest.json'), true);
+        if (!is_array($releaseManifest) || !is_array($releaseManifest['required_paths'] ?? null)) {
+            return false;
+        }
+
+        return $releaseManifest['required_paths'] === $archive['requiredPaths'];
+    } finally {
+        $zip->close();
+    }
+})(), $failures, $passCount);
+
 // Deterministic: building the same prepared directory twice yields byte-identical checksums.
 $archive2 = $builder->build($fixture['path'], $workspace, $commitTimestamp, $buildResult);
 check('ArtifactBuilder: building the same prepared directory twice is deterministic (identical checksum)', $archive['checksum'] === $archive2['checksum'], $failures, $passCount);
@@ -471,7 +573,7 @@ $client = new Client(
     timeoutSeconds: 10,
     logger: $logger,
 );
-$uploader = new ArtifactUploader(new LocalBuildRunner($git), new WorkspaceSourcePreparer($git), new ArtifactBuilder(), $client, $logger, $uploaderWorkspaceBase);
+$uploader = new ArtifactUploader(new LocalBuildRunner($git, composerCommand: fixtureComposerCommand()), new WorkspaceSourcePreparer($git), new ArtifactBuilder(), $client, $logger, $uploaderWorkspaceBase);
 
 // A fresh repo for this section — the earlier $fixture['path'] already
 // has vendor/node_modules from the direct LocalBuildRunner test above,
@@ -501,6 +603,13 @@ if ($metaFiles !== [] && $metaFiles !== false) {
     $uploadedZip = new ZipArchive();
     $uploadedZip->open("{$hub['storageDir']}/{$artifactId}.bin");
     $uploadedManifest = json_decode((string) $uploadedZip->getFromName('.deployment/release-manifest.json'), true);
+    check(
+        'ArtifactUploader: uploaded artifact seals .deployment/file-manifest.json and the release manifest names it in required_paths',
+        $uploadedZip->locateName(ArtifactFileManifest::MANIFEST_FILENAME) !== false
+            && in_array(ArtifactFileManifest::MANIFEST_FILENAME, $uploadedManifest['required_paths'] ?? [], true),
+        $failures,
+        $passCount,
+    );
     $uploadedZip->close();
     check(
         'ArtifactUploader: sealed manifest inventories tracked source but not generated dependency/build output',
@@ -586,7 +695,7 @@ $deadClient = new Client(
     timeoutSeconds: 2,
     logger: $logger,
 );
-$deadUploader = new ArtifactUploader(new LocalBuildRunner($git), new WorkspaceSourcePreparer($git), new ArtifactBuilder(), $deadClient, $logger, $uploaderWorkspaceBase);
+$deadUploader = new ArtifactUploader(new LocalBuildRunner($git, composerCommand: fixtureComposerCommand()), new WorkspaceSourcePreparer($git), new ArtifactBuilder(), $deadClient, $logger, $uploaderWorkspaceBase);
 $deadResult = $deadUploader->buildAndUpload('fixture-project', $uploadFixture['path'], $uploadFixture['commitHash'], 'main', 'job-3');
 check('ArtifactUploader: reports failure (not a thrown exception) when the Hub is unreachable', $deadResult['succeeded'] === false, $failures, $passCount);
 

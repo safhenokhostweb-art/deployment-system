@@ -55,6 +55,24 @@ final class ArtifactSemanticValidator
 
             $this->validatePersistentSourceBoundary($artifact, $manifest);
 
+            // When the artifact declares a file_manifest_hash, the ZIP must
+            // contain a structurally valid .deployment/file-manifest.json.
+            // The hash itself is verified by ArtifactService::finalizeUpload();
+            // here we enforce that the manifest exists and is well-formed.
+            if ($artifact->file_manifest_hash !== null) {
+                $rawFileManifest = $zip->getFromName('.deployment/file-manifest.json');
+                if (! is_string($rawFileManifest)) {
+                    throw new ArtifactValidationException('missing_file_manifest', 'Artifact declares a file_manifest_hash but the ZIP contains no .deployment/file-manifest.json.');
+                }
+                $fileManifest = json_decode($rawFileManifest, true);
+                if (! is_array($fileManifest)
+                    || ! isset($fileManifest['format'])
+                    || ! isset($fileManifest['entries'])
+                    || ! is_array($fileManifest['entries'])) {
+                    throw new ArtifactValidationException('file_manifest_invalid', 'Artifact .deployment/file-manifest.json is malformed or missing required structure.');
+                }
+            }
+
             if (isset($entries['composer.json'])) {
                 foreach (['composer.lock', 'vendor/autoload.php', 'artisan', 'bootstrap/app.php', 'public/index.php'] as $required) {
                     if (! isset($entries[$required])) {

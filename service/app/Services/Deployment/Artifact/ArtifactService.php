@@ -251,6 +251,7 @@ class ArtifactService
         $hasAutoload = false;
         $hasBuildEntry = false;
         $hasManifest = false;
+        $fileManifestHashFromZip = null;
 
         for ($i = 0; $i < $zip->numFiles; $i++) {
             $name = $zip->getNameIndex($i);
@@ -269,6 +270,12 @@ class ArtifactService
                     $hasManifest = true;
                 }
             }
+            if ($name === '.deployment/file-manifest.json') {
+                $bytes = $zip->getFromIndex($i);
+                if ($bytes !== false) {
+                    $fileManifestHashFromZip = hash('sha256', $bytes);
+                }
+            }
         }
         $zip->close();
 
@@ -278,6 +285,20 @@ class ArtifactService
 
         if ($hasBuildEntry && !$hasManifest) {
             return ['reason' => 'missing_build', 'message' => 'The uploaded artifact has a public/build/ directory but no public/build/manifest.json.'];
+        }
+
+        // Validate the recorded file_manifest_hash against actual ZIP contents.
+        // The hash was authenticated in phase one (createPending); verifying it
+        // here defends against a Local Agent that skipped ArtifactBuilder's
+        // equivalent check, or a tampered ZIP whose bytes happen to match the
+        // outer checksum but whose internal provenance manifest was replaced.
+        if ($artifact->file_manifest_hash !== null) {
+            if ($fileManifestHashFromZip === null) {
+                return ['reason' => 'missing_file_manifest', 'message' => 'Artifact declares a file_manifest_hash but the ZIP contains no .deployment/file-manifest.json.'];
+            }
+            if (!hash_equals(strtolower((string) $artifact->file_manifest_hash), $fileManifestHashFromZip)) {
+                return ['reason' => 'file_manifest_hash_mismatch', 'message' => 'The .deployment/file-manifest.json inside the ZIP does not match the recorded file_manifest_hash.'];
+            }
         }
 
         return null;

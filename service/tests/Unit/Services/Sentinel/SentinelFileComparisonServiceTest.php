@@ -241,6 +241,69 @@ class SentinelFileComparisonServiceTest extends TestCase
     }
 
     // ------------------------------------------------------------------
+    // Empty arrays with non-zero declared counts (the caller only has
+    // hash-level aggregates, not per-file inventories) must not produce
+    // a false PASS.
+    // ------------------------------------------------------------------
+
+    public function test_empty_manifests_with_nonzero_counts_is_unknown(): void
+    {
+        $service = new SentinelFileComparisonService(
+            [],
+            [],
+            'a'.str_repeat('0', 63),
+            'a'.str_repeat('0', 63),
+            3,
+            3,
+            60,
+            60
+        );
+
+        $result = $service->compare();
+        $this->assertTrue($result['incomplete']);
+        $this->assertSame('UNKNOWN', $service->verdict());
+        $this->assertSame(0, $result['match_count']);
+    }
+
+    public function test_empty_expected_manifest_with_nonzero_count_is_unknown(): void
+    {
+        $service = new SentinelFileComparisonService(
+            [],
+            $this->observedManifest,
+            'a'.str_repeat('0', 63),
+            'a'.str_repeat('0', 63),
+            3,
+            3,
+            60,
+            60
+        );
+
+        $result = $service->compare();
+        $this->assertTrue($result['incomplete']);
+        $this->assertSame('UNKNOWN', $service->verdict());
+        $this->assertSame(0, $result['match_count']);
+    }
+
+    public function test_empty_observed_manifest_with_nonzero_count_is_unknown(): void
+    {
+        $service = new SentinelFileComparisonService(
+            $this->expectedManifest,
+            [],
+            'a'.str_repeat('0', 63),
+            'a'.str_repeat('0', 63),
+            3,
+            3,
+            60,
+            60
+        );
+
+        $result = $service->compare();
+        $this->assertTrue($result['incomplete']);
+        $this->assertSame('UNKNOWN', $service->verdict());
+        $this->assertSame(0, $result['match_count']);
+    }
+
+    // ------------------------------------------------------------------
     // Wrong target / stale / unreadable
     // ------------------------------------------------------------------
 

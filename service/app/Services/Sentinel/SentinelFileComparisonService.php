@@ -158,8 +158,14 @@ final class SentinelFileComparisonService
             }
         }
 
-        // Check for incomplete inventories
-        $incomplete = $this->expectedEntryCount === 0 || $this->observedEntryCount === 0;
+        // Check for incomplete inventories.
+        // Empty manifest arrays with non-zero declared counts mean no
+        // per-file comparison is actually possible (e.g. the caller only
+        // has hash-level aggregates, not entry inventories). Treat as
+        // incomplete so the verdict is UNKNOWN, never a false PASS.
+        $incomplete = $this->expectedEntryCount === 0 || $this->observedEntryCount === 0
+            || (empty($this->expectedManifest) && $this->expectedEntryCount > 0)
+            || (empty($this->observedManifest) && $this->observedEntryCount > 0);
 
         // Check for stale observation (would be checked at collector level)
         $stale = false; // Set by caller based on timestamp

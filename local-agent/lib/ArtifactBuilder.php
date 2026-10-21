@@ -41,8 +41,8 @@ final class ArtifactBuilder
 
     /**
      * @param array{ranComposer: bool, ranNpmBuild: bool} $buildResult what LocalBuildRunner reported — determines which validations below actually apply
-     * @param array{project_key?: string, commit_sha?: string, branch?: string, agent_version?: string, source_paths?: array<int, string>} $provenance release provenance written into the artifact's own manifest
-     * @return array{path: string, checksum: string, size: int, requiredPaths: array<int, string>}
+     * @param array{project_key?: string, commit_sha?: string, branch?: string, agent_version?: string, source_paths?: array<int, string>, dependency_pinning_required?: bool, dependency_locks?: array<int, array<string, mixed>>} $provenance release provenance written into the artifact's own manifest
+     * @return array{path: string, checksum: string, size: int, requiredPaths: array<int, string>, file_manifest_hash?: string, file_manifest_entry_count?: int, file_manifest_total_size?: int}
      * @throws LocalBuildFailedException
      */
     public function build(string $projectDir, string $workspaceRoot, int $commitTimestamp, array $buildResult, ?callable $onStage = null, array $provenance = []): array
@@ -59,6 +59,12 @@ final class ArtifactBuilder
         // working tree).
         $this->validateDependencyLocks($projectDir, $provenance['dependency_locks'] ?? [], false);
         $this->writeReleaseManifest($projectDir, $buildResult, $provenance, $commitTimestamp);
+
+        // Generate and embed the deterministic file manifest
+        $fileManifest = $this->generateAndWriteFileManifest($projectDir);
+        $fileManifestHash = $fileManifest->manifestHash();
+        $fileManifestEntryCount = $fileManifest->entryCount();
+        $fileManifestTotalSize = $fileManifest->totalSize();
 
         $finalZipPath = null;
         try {
@@ -80,7 +86,15 @@ final class ArtifactBuilder
 
             $onStage?->__invoke('checksum calculation completed');
 
-            return ['path' => $finalZipPath, 'checksum' => $checksum, 'size' => $size, 'requiredPaths' => $this->requiredPaths($projectDir, $buildResult)];
+            return [
+                'path' => $finalZipPath,
+                'checksum' => $checksum,
+                'size' => $size,
+                'requiredPaths' => $this->requiredPaths($projectDir, $buildResult),
+                'file_manifest_hash' => $fileManifestHash,
+                'file_manifest_entry_count' => $fileManifestEntryCount,
+                'file_manifest_total_size' => $fileManifestTotalSize,
+            ];
         } catch (\Throwable $e) {
             if ($finalZipPath !== null) {
                 @unlink($finalZipPath);
@@ -88,6 +102,30 @@ final class ArtifactBuilder
 
             throw $e;
         }
+    }
+
+    /**
+     * Generate the deterministic file manifest and write it into the
+     * project directory so it becomes part of the sealed artifact.
+     */
+    private function generateAndWriteFileManifest(string $projectDir): ArtifactFileManifest
+    {
+        $files = [];
+        SafeFilesystem::collectFilesSafely(realpath($projectDir) ?? $projectDir, $projectDir, '', $files);
+
+        $manifest = ArtifactFileManifest::buildFromFiles($files);
+
+        $manifestPath = "{$projectDir}/" . ArtifactFileManifest::MANIFEST_FILENAME;
+        $manifestDir = dirname($manifestPath);
+        if (!is_dir($manifestDir)) {
+            mkdir($manifestDir, 0755, true);
+        }
+
+        if (file_put_contents($manifestPath, $manifest->toJson()) === false) {
+            throw new LocalBuildFailedException('artifact_build_failed', 'Could not write file manifest to the assembled artifact.');
+        }
+
+        return $manifest;
     }
 
     /**
@@ -129,64 +167,74 @@ final class ArtifactBuilder
             $paths[] = 'public/build/manifest.json';
         }
         $paths[] = '.deployment/release-manifest.json';
+        // Contract alignment: writeReleaseManifest() already advertises
+        // this path in the in-artifact manifest's required_paths, but the
+        // descriptor list uploaded to the Hub (and stored as the artifact's
+        // required_paths) did not — so the Server Agent's
+        // firstMissingRequiredPath/ReleaseValidator gates never verified
+        // the file manifest's presence while the artifact's own provenance
+        // manifest declared it required. Both halves must say the same
+        // thing; the manifest is written unconditionally by
+        // generateAndWriteFileManifest(), so it is unconditionally required.
+        $paths[] = ArtifactFileManifest::MANIFEST_FILENAME;
         if (is_file($projectDir . '/' . self::DEPENDENCY_LOCK_MARKER)) {
             $paths[] = self::DEPENDENCY_LOCK_MARKER;
         }
         return $paths;
     }
 
-    /**
-     * Writes `.deployment/release-manifest.json` into the build workspace so
-     * it becomes part of the sealed artifact. Describes the artifact that is
-     * actually uploaded (not the developer working tree): the pinned commit,
-     * the composer.lock digest, the required runtime paths, and the build
-     * result. The Server Agent verifies this manifest during its
-     * pre-activation release gate.
-     *
-     * @param array{project_key?: string, commit_sha?: string, branch?: string, agent_version?: string, source_paths?: array<int, string>} $provenance
-     */
-    private function writeReleaseManifest(string $projectDir, array $buildResult, array $provenance, int $commitTimestamp): void
-    {
-        $manifestDir = "{$projectDir}/.deployment";
-        if (!is_dir($manifestDir)) {
-            mkdir($manifestDir, 0755, true);
-        }
-        if (($provenance['dependency_pinning_required'] ?? false) === true) {
-            // Stored in Artifact.required_paths as a durable protocol marker.
-            // This lets a rolled-back Hub distinguish v2 artifacts even after
-            // the project policy is disabled, without a database migration.
-            file_put_contents($projectDir . '/' . self::DEPENDENCY_LOCK_MARKER, "dependency-lock-manifest-v2\n");
-        }
-        $paths = array_values(array_unique(array_merge($this->requiredPaths($projectDir, $buildResult), ['.deployment/release-manifest.json'])));
+/**
+         * Writes `.deployment/release-manifest.json` into the build workspace so
+         * it becomes part of the sealed artifact. Describes the artifact that is
+         * actually uploaded (not the developer working tree): the pinned commit,
+         * the composer.lock digest, the required runtime paths, and the build
+         * result. The Server Agent verifies this manifest during its
+         * pre-activation release gate.
+         *
+         * @param array{project_key?: string, commit_sha?: string, branch?: string, agent_version?: string, source_paths?: array<int, string>, dependency_pinning_required?: bool, dependency_locks?: array<int, array<string, mixed>>} $provenance
+         */
+        private function writeReleaseManifest(string $projectDir, array $buildResult, array $provenance, int $commitTimestamp): void
+        {
+            $manifestDir = "{$projectDir}/.deployment";
+            if (!is_dir($manifestDir)) {
+                mkdir($manifestDir, 0755, true);
+            }
+            if (($provenance['dependency_pinning_required'] ?? false) === true) {
+                // Durable protocol marker used by Hub dispatch after policy rollback.
+                file_put_contents($projectDir . '/' . self::DEPENDENCY_LOCK_MARKER, "dependency-lock-manifest-v2\n");
+            }
+            $paths = array_values(array_unique(array_merge($this->requiredPaths($projectDir, $buildResult), ['.deployment/release-manifest.json', '.deployment/file-manifest.json'])));
 
-        $manifest = [
-            'format' => 'deployment-system-release-manifest',
-            'version' => ($provenance['dependency_pinning_required'] ?? false) ? 2 : 1,
-            'project_key' => $provenance['project_key'] ?? null,
-            'commit_sha' => $provenance['commit_sha'] ?? null,
-            'branch' => $provenance['branch'] ?? null,
-            'composer_lock_sha256' => is_file("{$projectDir}/composer.lock") ? hash_file('sha256', "{$projectDir}/composer.lock") : '',
-            'required_paths' => $paths,
-            // Exact tracked-source inventory captured before composer/npm add
-            // generated content. Persistence validation uses this immutable
-            // list to distinguish application source from runtime data.
-            'source_paths' => array_values($provenance['source_paths'] ?? []),
-            'build_manifest_present' => is_file("{$projectDir}/public/build/manifest.json"),
-            'build_result' => [
-                'ran_composer' => (bool) ($buildResult['ranComposer'] ?? false),
-                'ran_npm_build' => (bool) ($buildResult['ranNpmBuild'] ?? false),
-            ],
-            'agent_version' => $provenance['agent_version'] ?? 'unknown',
-            'generated_at' => gmdate('c', $commitTimestamp),
-            'status' => 'pass',
-        ];
-        if (($provenance['dependency_pinning_required'] ?? false) === true) {
-            $manifest['dependency_lock_required'] = true;
-            $manifest['dependency_locks'] = array_values($provenance['dependency_locks'] ?? []);
-        }
+            $manifest = [
+                'format' => 'deployment-system-release-manifest',
+                'version' => ($provenance['dependency_pinning_required'] ?? false) ? 2 : 1,
+                'project_key' => $provenance['project_key'] ?? null,
+                'commit_sha' => $provenance['commit_sha'] ?? null,
+                'branch' => $provenance['branch'] ?? null,
+                'composer_lock_sha256' => is_file("{$projectDir}/composer.lock") ? hash_file('sha256', "{$projectDir}/composer.lock") : '',
+                'required_paths' => $paths,
+                // Exact tracked-source inventory captured before composer/npm add
+                // generated content. Persistence validation uses this immutable
+                // list to distinguish application source from runtime data.
+                'source_paths' => array_values($provenance['source_paths'] ?? []),
+                'build_manifest_present' => is_file("{$projectDir}/public/build/manifest.json"),
+                'build_result' => [
+                    'ran_composer' => (bool) ($buildResult['ranComposer'] ?? false),
+                    'ran_npm_build' => (bool) ($buildResult['ranNpmBuild'] ?? false),
+                ],
+                'agent_version' => $provenance['agent_version'] ?? 'unknown',
+                'generated_at' => gmdate('c', $commitTimestamp),
+                'status' => 'pass',
+            ];
+            if (($provenance['dependency_pinning_required'] ?? false) === true) {
+                $manifest['dependency_lock_required'] = true;
+                $manifest['dependency_locks'] = array_values($provenance['dependency_locks'] ?? []);
+            }
 
-        file_put_contents("{$manifestDir}/release-manifest.json", json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-    }
+            if (file_put_contents("{$manifestDir}/release-manifest.json", json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)) === false) {
+                throw new LocalBuildFailedException('artifact_build_failed', 'Could not write release manifest to the assembled artifact.');
+            }
+        }
 
     private function validateDependencyLocks(string $projectDir, array $locks, bool $sealed): void
     {

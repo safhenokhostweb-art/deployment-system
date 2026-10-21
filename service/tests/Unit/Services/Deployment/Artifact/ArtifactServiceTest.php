@@ -208,6 +208,113 @@ class ArtifactServiceTest extends TestCase
         $this->assertSame($artifact->id, $validated->id);
     }
 
+    // ------------------------------------------------------------------
+    // file_manifest_hash validation against actual ZIP contents
+    // ------------------------------------------------------------------
+
+    public function test_finalize_upload_rejects_when_file_manifest_hash_declared_but_manifest_missing(): void
+    {
+        $zipPath = $this->buildZip(['index.php' => '<?php']);
+        $bytes = file_get_contents($zipPath);
+        $project = Project::factory()->create();
+        $artifact = app(ArtifactService::class)->createPending(
+            project: $project,
+            commitHash: str_repeat('a', 40),
+            branch: 'main',
+            claimedChecksum: hash('sha256', $bytes),
+            claimedSizeBytes: strlen($bytes),
+            uploadedBy: 'test-agent',
+            fileManifestHash: hash('sha256', 'some-manifest-content'),
+            fileManifestEntryCount: 1,
+            fileManifestTotalSize: 20,
+        );
+
+        try {
+            app(ArtifactService::class)->finalizeUpload($artifact, $bytes, 3);
+            $this->fail('Expected an ArtifactValidationException.');
+        } catch (ArtifactValidationException $e) {
+            $this->assertSame('missing_file_manifest', $e->reason);
+        } finally {
+            @unlink($zipPath);
+        }
+
+        $this->assertSame(Artifact::STATUS_FAILED, $artifact->fresh()->status);
+    }
+
+    public function test_finalize_upload_rejects_when_file_manifest_hash_mismatch(): void
+    {
+        $manifestContent = json_encode([
+            'format' => 'deployment-system-file-manifest',
+            'version' => 1,
+            'entries' => ['index.php' => ['size' => 5, 'sha256' => hash('sha256', '<?php')]],
+        ]);
+        $manifestHash = hash('sha256', $manifestContent);
+        $wrongHash = str_repeat('f', 64); // deliberately different
+
+        $zipPath = $this->buildZip([
+            'index.php' => '<?php',
+            '.deployment/file-manifest.json' => $manifestContent,
+        ]);
+        $bytes = file_get_contents($zipPath);
+        $project = Project::factory()->create();
+        $artifact = app(ArtifactService::class)->createPending(
+            project: $project,
+            commitHash: str_repeat('a', 40),
+            branch: 'main',
+            claimedChecksum: hash('sha256', $bytes),
+            claimedSizeBytes: strlen($bytes),
+            uploadedBy: 'test-agent',
+            fileManifestHash: $wrongHash,
+            fileManifestEntryCount: 1,
+            fileManifestTotalSize: strlen($manifestContent),
+        );
+
+        try {
+            app(ArtifactService::class)->finalizeUpload($artifact, $bytes, 3);
+            $this->fail('Expected an ArtifactValidationException.');
+        } catch (ArtifactValidationException $e) {
+            $this->assertSame('file_manifest_hash_mismatch', $e->reason);
+        } finally {
+            @unlink($zipPath);
+        }
+
+        $this->assertSame(Artifact::STATUS_FAILED, $artifact->fresh()->status);
+    }
+
+    public function test_finalize_upload_accepts_when_file_manifest_hash_matches(): void
+    {
+        $manifestContent = json_encode([
+            'format' => 'deployment-system-file-manifest',
+            'version' => 1,
+            'entries' => ['index.php' => ['size' => 5, 'sha256' => hash('sha256', '<?php')]],
+        ]);
+        $manifestHash = hash('sha256', $manifestContent);
+
+        $zipPath = $this->buildZip([
+            'index.php' => '<?php',
+            '.deployment/file-manifest.json' => $manifestContent,
+        ]);
+        $bytes = file_get_contents($zipPath);
+        $project = Project::factory()->create();
+        $artifact = app(ArtifactService::class)->createPending(
+            project: $project,
+            commitHash: str_repeat('a', 40),
+            branch: 'main',
+            claimedChecksum: hash('sha256', $bytes),
+            claimedSizeBytes: strlen($bytes),
+            uploadedBy: 'test-agent',
+            fileManifestHash: $manifestHash,
+            fileManifestEntryCount: 1,
+            fileManifestTotalSize: strlen($manifestContent),
+        );
+
+        $finalized = app(ArtifactService::class)->finalizeUpload($artifact, $bytes, 3);
+
+        $this->assertSame(Artifact::STATUS_AVAILABLE, $finalized->status);
+        Storage::disk('artifacts')->assertExists($artifact->disk_path);
+        @unlink($zipPath);
+    }
+
     public function test_missing_physical_file_fails_preflight(): void
     {
         $artifact = Artifact::factory()->create();

@@ -4,8 +4,6 @@ namespace App\Services\Sentinel;
 
 use DateTimeImmutable;
 use InvalidArgumentException;
-use LocalAgent\ArtifactFileManifest;
-use LocalAgent\SafeFilesystem;
 
 /**
  * SentinelEvidenceCollector — the read-only orchestrator of one

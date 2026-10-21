@@ -441,6 +441,61 @@ class SentinelEvidenceCollectorTest extends TestCase
     }
 
     // ------------------------------------------------------------------
+    // File-level comparison (feature-flagged)
+    // ------------------------------------------------------------------
+
+    public function test_file_comparison_without_per_file_entries_is_unknown(): void
+    {
+        config(['sentinel.file_verification_enabled' => true]);
+
+        $manifestHash = 'a'.str_repeat('0', 63);
+
+        $expectation = new SentinelReleaseExpectation(
+            projectKey: $this->fixture['project_key'],
+            environment: $this->fixture['environment'],
+            releaseId: $this->fixture['release_id'],
+            commitSha: $this->fixture['expected_commit_sha'],
+            artifactId: $this->fixture['artifact_id'],
+            artifactChecksumSha256: $this->fixture['artifact_checksum_sha256'],
+            expectedRuntimeMarker: $this->fixture['expected_runtime_marker'],
+            deploymentPublicId: 'dep-0001',
+            healthEndpoint: $this->fixture['health_endpoint'],
+            expectedHealthStatus: $this->fixture['expected_health_status'],
+            expectedFileManifestHash: $manifestHash,
+            expectedFileManifestEntryCount: 3,
+            expectedFileManifestTotalSize: 60,
+        );
+
+        $snapshot = new SentinelRuntimeSnapshot(
+            agentId: $this->fixture['agent_id'],
+            agentVersion: $this->fixture['agent_version'],
+            observedReleaseId: $this->fixture['observed_release_id'],
+            observedCommitSha: $this->fixture['observed_commit_sha'],
+            currentReleasePath: $this->fixture['runtime_release_path'],
+            runtimeMarker: $this->fixture['runtime_marker'],
+            observedAt: self::COLLECTED_AT,
+            fileManifestHash: $manifestHash,
+            fileManifestEntryCount: 3,
+            fileManifestTotalSize: 60,
+            fileObservationStatus: 'verified',
+        );
+
+        $artifact = new SentinelArtifactObservation($this->fixture['observed_artifact_checksum_sha256'], self::COLLECTED_AT);
+
+        $expectations = new FakeReleaseExpectationProvider($expectation);
+        $runtime = new FakeAgentRuntimeReader($snapshot);
+        $artifacts = new FakeArtifactChecksumReader($artifact);
+        $probe = new FakeIndependentHealthProbe(new SentinelHealthObservation($this->fixture['health_status'], self::COLLECTED_AT));
+
+        $collector = new SentinelEvidenceCollector($expectations, $runtime, $artifacts, $probe);
+
+        $outcome = $collector->collect($this->target());
+
+        $this->assertSame(SentinelCollectionOutcome::UNKNOWN, $outcome->verdict());
+        $this->assertSame('unknown', $outcome->evidence()->toArray()['checks']['file_comparison']['status']);
+    }
+
+    // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
 
