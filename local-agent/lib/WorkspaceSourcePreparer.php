@@ -64,7 +64,7 @@ final class WorkspaceSourcePreparer
     /**
      * @return array{commitTimestamp: int, sourcePaths: array<int, string>}
      */
-    public function prepare(BuildWorkspace $workspace, string $repositoryPath, string $commitHash, ?callable $onTick = null): array
+    public function prepare(BuildWorkspace $workspace, string $repositoryPath, string $commitHash, ?callable $onTick = null, string $applicationRoot = '.'): array
     {
         $actualHead = $this->git->lastCommitHash($repositoryPath);
         if (!hash_equals($commitHash, $actualHead)) {
@@ -79,7 +79,7 @@ final class WorkspaceSourcePreparer
         }
 
         $sourcePaths = self::sourcePaths($workspace->projectDir());
-        $this->copyPathDependencies($workspace, $repositoryPath);
+        $this->copyPathDependencies($workspace, $repositoryPath, $applicationRoot);
 
         return ['commitTimestamp' => $this->commitTimestamp($repositoryPath, $commitHash), 'sourcePaths' => $sourcePaths];
     }
@@ -87,7 +87,7 @@ final class WorkspaceSourcePreparer
     /**
      * @return array{commitTimestamp: int, sourcePaths: array<int, string>, dependencyLocks: array<int, array<string, mixed>>}
      */
-    public function prepareRemoteCommit(BuildWorkspace $workspace, string $repositoryPath, string $repositoryUrl, string $remoteName, string $branch, string $commitHash, ?callable $onTick = null, array $dependencyContract = [], array $dependencyAllowlist = [], array $repositoryMappings = [], string $repositoryMapping = 'primary-project'): array
+    public function prepareRemoteCommit(BuildWorkspace $workspace, string $repositoryPath, string $repositoryUrl, string $remoteName, string $branch, string $commitHash, ?callable $onTick = null, array $dependencyContract = [], array $dependencyAllowlist = [], array $repositoryMappings = [], string $repositoryMapping = 'primary-project', string $applicationRoot = '.'): array
     {
         if (SafetyChecker::productionSourcePathForbidden($repositoryPath)) {
             throw new LocalBuildFailedException('production_source_forbidden', "Production target '{$repositoryPath}' cannot be used as a Git or artifact source.");
@@ -138,7 +138,8 @@ final class WorkspaceSourcePreparer
             if (($dependencyContract['version'] ?? null) !== 2 || !is_array($dependencies) || ($pinningRequired && $dependencies === [])) {
                 throw new LocalBuildFailedException('local_workspace_prepare_failed', 'A valid dependency contract v2 is required for this project.');
             }
-            $composerPaths = self::parsePathRepositoryUrls($workspace->projectDir() . '/composer.json');
+            $applicationDirectory = ApplicationRoot::resolve($workspace->projectDir(), $applicationRoot);
+            $composerPaths = self::parsePathRepositoryUrls($applicationDirectory . '/composer.json');
             $requestedPaths = array_map(static fn (array $dependency): string => (string) ($dependency['destination_path'] ?? ''), $dependencies);
             sort($composerPaths, SORT_STRING);
             sort($requestedPaths, SORT_STRING);
@@ -164,7 +165,7 @@ final class WorkspaceSourcePreparer
             $dependencyLocks = (new PinnedDependencyMaterializer($this->git, null, $this->retryPolicy, $this->logger))->materialize($workspace, $dependencies, $dependencyAllowlist, $repositoryMappings, $onTick);
         } else {
             // Contract v1 compatibility only. Projects opted into pinning never reach this branch.
-            $this->copyPathDependencies($workspace, $repositoryPath);
+            $this->copyPathDependencies($workspace, $repositoryPath, $applicationRoot);
         }
 
         return ['commitTimestamp' => $this->commitTimestamp($workspace->projectDir(), $commitHash), 'sourcePaths' => $sourcePaths, 'dependencyLocks' => $dependencyLocks];
@@ -355,15 +356,16 @@ final class WorkspaceSourcePreparer
         return $timestamp > 0 ? $timestamp : time();
     }
 
-    private function copyPathDependencies(BuildWorkspace $workspace, string $repositoryPath): void
+    private function copyPathDependencies(BuildWorkspace $workspace, string $repositoryPath, string $applicationRoot = '.'): void
     {
-        $composerJsonPath = $workspace->projectDir() . '/composer.json';
+        $applicationDirectory = ApplicationRoot::resolve($workspace->projectDir(), $applicationRoot);
+        $composerJsonPath = $applicationDirectory . '/composer.json';
         if (!is_file($composerJsonPath)) {
             return;
         }
 
         foreach (self::parsePathRepositoryUrls($composerJsonPath) as $url) {
-            $this->copyOnePathDependency($workspace, $repositoryPath, $url);
+            $this->copyOnePathDependency($workspace, $repositoryPath, $url, $applicationRoot);
         }
     }
 
@@ -387,7 +389,7 @@ final class WorkspaceSourcePreparer
         return array_values(array_unique($urls));
     }
 
-    private function copyOnePathDependency(BuildWorkspace $workspace, string $repositoryPath, string $url): void
+    private function copyOnePathDependency(BuildWorkspace $workspace, string $repositoryPath, string $url, string $applicationRoot = '.'): void
     {
         // Composer itself supports glob patterns in path repository URLs
         // (e.g. "../packages/*") — not handled here (none of this
@@ -402,7 +404,7 @@ final class WorkspaceSourcePreparer
             );
         }
 
-        $target = $workspace->resolvePathDependencyTarget($url);
+        $target = $workspace->resolvePathDependencyTarget($url, $applicationRoot);
 
         // A path repository declared relative to composer.json (no `..`
         // escaping the project root) may live INSIDE the same Git tree as
@@ -421,7 +423,8 @@ final class WorkspaceSourcePreparer
             return;
         }
 
-        $realSource = realpath(rtrim($repositoryPath, '\\/') . '/' . $url);
+        $applicationDirectory = ApplicationRoot::resolve($repositoryPath, $applicationRoot);
+        $realSource = realpath(rtrim($applicationDirectory, '\\/') . '/' . $url);
         if ($realSource === false || !is_dir($realSource)) {
             throw new LocalBuildFailedException(
                 'local_workspace_prepare_failed',
@@ -437,3 +440,5 @@ final class WorkspaceSourcePreparer
         return str_starts_with($path, '/') || preg_match('#^[A-Za-z]:[\\\\/]#', $path) === 1;
     }
 }
+
+

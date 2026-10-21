@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace DeploymentAgent;
 
-use LocalAgent\ArtifactFileManifest;
-use LocalAgent\SafeFilesystem;
+use DeploymentAgent\ArtifactFileManifest;
+use DeploymentAgent\SafeFilesystem;
 
 /**
  * Server Agent runtime snapshot collector.

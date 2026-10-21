@@ -21,6 +21,18 @@ final class SentinelLocalArtifactAdapter implements ArtifactChecksumReader
         'storage/json-import-samples/webflow-sample.json',
     ];
 
+    /**
+     * Build-generated provenance manifests sealed into every artifact by the
+     * Local Agent (never committed source): the release manifest and the
+     * deterministic file manifest. Exact names only — the .deployment/
+     * prefix itself stays untrusted and every other untracked entry is
+     * still rejected as proof_untracked_content.
+     */
+    private const ADMITTED_UNTRACKED_PATHS = [
+        '.deployment/release-manifest.json',
+        '.deployment/file-manifest.json',
+    ];
+
     private ?array $observed = null;
     public function __construct(private readonly SentinelLocalProofFilesystem $filesystem) {}
 
@@ -163,7 +175,8 @@ final class SentinelLocalArtifactAdapter implements ArtifactChecksumReader
         }
         foreach ($archiveHashes as $name => $digest) {
             if (!isset($committedHashes[$name]) && !str_starts_with($name, 'vendor/')
-                && !str_starts_with($name, 'public/build/') && $name !== '.deployment/release-manifest.json') {
+                && !str_starts_with($name, 'public/build/')
+                && !in_array($name, self::ADMITTED_UNTRACKED_PATHS, true)) {
                 throw new RuntimeException('proof_untracked_content');
             }
         }
@@ -222,7 +235,7 @@ final class SentinelLocalArtifactAdapter implements ArtifactChecksumReader
                 }
                 if (!str_ends_with($name, '/') && !isset($source[$name])
                     && !str_starts_with($name, 'vendor/') && !str_starts_with($name, 'public/build/')
-                    && $name !== '.deployment/release-manifest.json') {
+                    && !in_array($name, self::ADMITTED_UNTRACKED_PATHS, true)) {
                     throw new RuntimeException('proof_untracked_content');
                 }
                 if (!str_ends_with($name, '/')) {

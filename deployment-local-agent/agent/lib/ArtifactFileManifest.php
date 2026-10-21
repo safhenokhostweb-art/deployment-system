@@ -237,8 +237,19 @@ final class ArtifactFileManifest
         // Normalize to forward slashes
         $normalized = str_replace('\\', '/', $path);
 
-        // Remove leading ./ if present
-        $normalized = ltrim($normalized, './');
+        // Remove any number of leading "./" segments ONLY. A
+        // character-list ltrim('./') here would also strip the leading
+        // dot from dotfiles (".env" -> "env",
+        // ".deployment/file-manifest.json" ->
+        // "deployment/file-manifest.json"), which both misnames every
+        // top-level dotfile entry and breaks the manifest's
+        // self-exclusion on every build after the first (the previous
+        // build's manifest gets inventoried under the stripped name,
+        // so each rebuild hashes the last manifest's bytes and the
+        // sealed ZIP is never byte-identical across builds).
+        while (str_starts_with($normalized, './')) {
+            $normalized = substr($normalized, 2);
+        }
 
         // Reject empty or root
         if ($normalized === '' || $normalized === '.') {

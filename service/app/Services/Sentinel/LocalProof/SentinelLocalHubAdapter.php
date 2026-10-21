@@ -234,7 +234,10 @@ final class SentinelLocalHubAdapter implements ReleaseExpectationProvider
 
     public function readRuntime(SentinelCollectionTarget $target, SentinelReleaseExpectation $expectation): ?\App\Services\Sentinel\SentinelRuntimeSnapshot
     {
-        return $this->withModels(fn () => (new AgentRuntimeEvidenceReader())->read($target, $expectation));
+        // Local proof context: this adapter's own ingest validated and persisted
+        // the approved Local Agent's snapshot, so reading it back is authorized.
+        // The production Hub reader keeps the flag's false default.
+        return $this->withModels(fn () => (new AgentRuntimeEvidenceReader(allowLocalAgent: true))->read($target, $expectation));
     }
 
     public function persistedSnapshot(): ?array

@@ -132,7 +132,7 @@ final class ArtifactManager
             // required_paths contract. A failure here discards staging and
             // leaves the currently-active release completely untouched.
             $validator = $this->releaseValidator ?? new ReleaseValidator($phpBinary ?? 'php');
-            $validation = $validator->validate($stagingPath, (string) ($artifactDescriptor['commit_hash'] ?? ''), $artifactDescriptor['required_paths'] ?? [], ($artifactDescriptor['dependency_lock_required'] ?? false) === true);
+            $validation = $validator->validate($stagingPath, (string) ($artifactDescriptor['commit_hash'] ?? ''), $artifactDescriptor['required_paths'] ?? [], ($artifactDescriptor['dependency_lock_required'] ?? false) === true, (string) ($artifactDescriptor['application_root'] ?? '.'));
             if (!$validation['pass']) {
                 self::recursiveDelete($stagingPath);
 

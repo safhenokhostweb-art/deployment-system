@@ -57,9 +57,16 @@ final class ReleaseValidator
      *   vite_required: bool
      * }
      */
-    public function validate(string $releaseRoot, string $commitSha, array $descriptorRequiredPaths, bool $dependencyLockRequired = false): array
+    public function validate(string $releaseRoot, string $commitSha, array $descriptorRequiredPaths, bool $dependencyLockRequired = false, string $applicationRoot = '.'): array
     {
         $root = rtrim($releaseRoot, '/\\');
+        if ($applicationRoot !== '.' && $applicationRoot !== '') {
+            $relative = str_replace('\\', '/', trim($applicationRoot, '/\\'));
+            if ($relative === '' || str_starts_with($relative, '/') || preg_match('#^[A-Za-z]:#', $relative) === 1 || str_contains($relative, '..')) {
+                throw new \InvalidArgumentException('Invalid application_root');
+            }
+            $root .= '/' . $relative;
+        }
         $checks = [];
         $failures = [];
 

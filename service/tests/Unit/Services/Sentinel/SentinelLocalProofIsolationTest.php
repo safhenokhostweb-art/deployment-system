@@ -256,6 +256,23 @@ class SentinelLocalProofIsolationTest extends TestCase
         }
     }
 
+    public function test_file_manifest_is_admitted_but_unknown_untracked_entries_are_rejected(): void
+    {
+        // Real build-to-proof contract: ArtifactBuilder seals committed source plus the
+        // release manifest AND the never-committed .deployment/file-manifest.json (both
+        // declared in required_paths). Local proof must admit the exact manifest names
+        // while still rejecting every other untracked entry.
+        $committed = ['app.php' => hash('sha256', 'committed')];
+        $archive = $committed + [
+            '.deployment/release-manifest.json' => hash('sha256', 'release-manifest'),
+            '.deployment/file-manifest.json' => hash('sha256', 'file-manifest'),
+        ];
+        $this->artifacts->verifySourceEntries($committed, $archive);
+        $this->rejected(fn () => $this->artifacts->verifySourceEntries($committed, $archive + ['untracked.txt' => hash('sha256', 'untracked')]));
+        // Only the exact contract names are admitted — never the .deployment/ prefix.
+        $this->rejected(fn () => $this->artifacts->verifySourceEntries($committed, $committed + ['.deployment/other.json' => hash('sha256', 'other')]));
+    }
+
     public function test_manifest_requires_npm_build_and_rejects_forged_external_handoff(): void
     {
         $manifest = $this->manifest();

@@ -30,6 +30,17 @@ use Illuminate\Support\Facades\DB;
  */
 final class AgentRuntimeEvidenceReader implements AgentRuntimeReader
 {
+    public function __construct(
+        /**
+         * Explicit opt-in for the local proof context only. Default false:
+         * in the production Hub a Local Agent's source workspace is never
+         * evidence of deployed runtime. The local proof Hub enables this
+         * flag so it can read back the snapshot its own ingest validated
+         * and persisted — no other validation is bypassed either way.
+         */
+        private readonly bool $allowLocalAgent = false,
+    ) {}
+
     public function read(SentinelCollectionTarget $target, SentinelReleaseExpectation $expectation): ?SentinelRuntimeSnapshot
     {
         // Resolve the agent (Server Agent or Local Agent) that serves this release/environment
@@ -91,12 +102,24 @@ final class AgentRuntimeEvidenceReader implements AgentRuntimeReader
      */
     private function resolveAgent(SentinelCollectionTarget $target, SentinelReleaseExpectation $expectation): Agent|LocalAgent|null
     {
-        // 1. Explicit agentId in expectation — check both tables
+        // 1. Explicit agentId in expectation — check both tables. Server Agent
+        // keeps priority; the Local Agent fallback is gated behind the explicit
+        // local proof flag and never active in the production Hub.
         if ($expectation->agentId !== null) {
-            return Agent::query()
+            $server = Agent::query()
                 ->where('public_id', $expectation->agentId)
                 ->where('status', Agent::STATUS_APPROVED)
                 ->first();
+            if ($server !== null) {
+                return $server;
+            }
+            if ($this->allowLocalAgent) {
+                return LocalAgent::query()
+                    ->where('public_id', $expectation->agentId)
+                    ->where('status', LocalAgent::STATUS_APPROVED)
+                    ->first();
+            }
+            return null;
         }
 
         // 2. Server Agent via Deployment chain (production runtime)

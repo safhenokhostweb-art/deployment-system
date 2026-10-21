@@ -34,6 +34,8 @@ require __DIR__ . '/lib/ReleaseValidator.php';
 require __DIR__ . '/lib/PipelineExecutor.php';
 require __DIR__ . '/lib/ProductionPathGuard.php';
 require __DIR__ . '/lib/SelfUpgradeManager.php';
+require __DIR__ . '/lib/ArtifactFileManifest.php';
+require __DIR__ . '/lib/SafeFilesystem.php';
 
 use DeploymentAgent\ArtifactManager;
 use DeploymentAgent\SelfUpgradeManager;

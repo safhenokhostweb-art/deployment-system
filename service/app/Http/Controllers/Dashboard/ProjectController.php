@@ -523,6 +523,15 @@ class ProjectController extends Controller
 
         $pipeline = json_decode($validated['pipeline'], true);
 
+        if ($project !== null && is_string($pipeline) && $project->pipeline === $pipeline) {
+            $pipeline = match ($pipeline) {
+                'laravel' => self::PIPELINE_PRESET_LARAVEL,
+                'wordpress' => self::PIPELINE_PRESET_WORDPRESS,
+                'static' => self::PIPELINE_PRESET_STATIC,
+                default => null,
+            };
+        }
+
         if (!is_array($pipeline) || $pipeline === []) {
             abort(422, 'Pipeline must be a non-empty JSON array of {name, command} steps.');
         }
