@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\AgentArtifactController;
 use App\Http\Controllers\Api\AgentDiscoveryController;
+use App\Http\Controllers\Api\ArtifactVerificationController;
 use App\Http\Controllers\Api\AgentJobController;
 use App\Http\Controllers\Api\AgentOperationController;
 use App\Http\Controllers\Api\AgentRegistrationController;
@@ -64,6 +65,11 @@ Route::middleware('agent.signed')->prefix('agent')->group(function () {
     // downloads an artifact the Local Agent already uploaded — see
     // AgentArtifactController and ArtifactManager on the agent side.
     Route::get('/artifacts/{id}/download', [AgentArtifactController::class, 'download'])->name('agent.artifacts.download');
+
+    // Root-cause fix (Deployment #184 — independent artifact verification
+    // without a Deployment record): read-only status + physical integrity
+    // preflight for Server Agents — see ArtifactVerificationController.
+    Route::get('/artifacts/{id}/verify', [ArtifactVerificationController::class, 'verify'])->name('agent.artifacts.verify');
 
     // Root-cause fix (Deployment #184 — no channel from the Hub to the
     // Server Agent runtime at all): the Server Agent's own exact-commit
