@@ -492,7 +492,10 @@ check('sealed file manifest hash matches the build descriptor', (function () use
             return false;
         }
         $manifest = ArtifactFileManifest::fromJson($manifestBytes);
-        if ($manifest->manifestHash() !== ($archive['file_manifest_hash'] ?? null)) {
+        // file_manifest_hash is SHA-256 of the raw bytes of .deployment/file-manifest.json
+        // as they appear in the sealed ZIP — i.e. hash('sha256', $manifest->toJson()),
+        // which matches ArtifactService::validateArchiveContents().
+        if (hash('sha256', $manifest->toJson()) !== ($archive['file_manifest_hash'] ?? null)) {
             return false;
         }
 

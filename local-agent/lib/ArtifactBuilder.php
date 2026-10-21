@@ -91,7 +91,14 @@ final class ArtifactBuilder
                 'checksum' => $checksum,
                 'size' => $size,
                 'requiredPaths' => $this->requiredPaths($projectDir, $buildResult),
-                'file_manifest_hash' => $fileManifestHash,
+                // Contract alignment: file_manifest_hash must be SHA-256 of the
+                // raw bytes of .deployment/file-manifest.json as they appear in
+                // the sealed ZIP — i.e. hash('sha256', $manifest->toJson()),
+                // which matches ArtifactService::validateArchiveContents().
+                // manifestHash() (canonical JSON without manifest_hash field)
+                // is intentionally a different value and is used only where the
+                // manifest re-derives/validates itself (fromCanonical).
+                'file_manifest_hash' => hash('sha256', $fileManifest->toJson()),
                 'file_manifest_entry_count' => $fileManifestEntryCount,
                 'file_manifest_total_size' => $fileManifestTotalSize,
             ];
