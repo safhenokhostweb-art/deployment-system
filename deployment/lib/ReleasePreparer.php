@@ -10,6 +10,7 @@ final class ReleasePreparer
 {
     private array $policy;
     private array $task;
+    private array $reviewedMigrations = [];
 
     public function __construct(private readonly string $root, private readonly string $taskPath = '.deployment/release-task.json')
     {
@@ -90,6 +91,7 @@ final class ReleasePreparer
             'branch' => $branch,
             'changed_files' => $candidate,
             'migration_files' => $migrations,
+            'reviewed_migrations' => $this->reviewedMigrations,
             'dependency_commits' => $dependencyCommits,
             'test_results' => $tests,
             'build_result' => [
@@ -226,17 +228,48 @@ final class ReleasePreparer
     private function checkMigrations(array $candidate): array
     {
         $paths = $this->policy['migration_policy']['paths'] ?? [];
+        $reviews = $this->migrationReviews();
         $migrations = array_values(array_filter($candidate, fn (string $path): bool => $this->matches($path, $paths)));
         foreach ($migrations as $path) {
             $content = @file_get_contents($this->absolute($path));
             $this->block($content === false, 'MIGRATION REVIEW REQUIRED: cannot inspect '.$path);
             foreach ($this->policy['migration_policy']['review_required_patterns'] ?? [] as $pattern) {
                 if (@preg_match('/'.$pattern.'/i', $content) === 1) {
+                    // A recorded owner review releases exactly the reviewed
+                    // bytes; any later edit to the file voids it.
+                    $review = $reviews[$path] ?? null;
+                    if ($review !== null && hash_equals($review['sha256'], self::migrationDigest($content))) {
+                        $this->reviewedMigrations[] = $review;
+                        break;
+                    }
                     throw new RuntimeException('MIGRATION REVIEW REQUIRED: '.$path.' matched '.$pattern);
                 }
             }
         }
         return $migrations;
+    }
+
+    /** sha256 of the file with line endings normalized to LF, so checkout EOL settings cannot void a review. */
+    public static function migrationDigest(string $content): string
+    {
+        return hash('sha256', str_replace(["\r\n", "\r"], "\n", $content));
+    }
+
+    /** @return array<string, array{path: string, sha256: string, reviewed_by: string, reviewed_at: string, reason: string}> */
+    private function migrationReviews(): array
+    {
+        $reviews = [];
+        foreach ($this->policy['migration_policy']['reviewed'] ?? [] as $review) {
+            $valid = is_array($review)
+                && is_string($review['path'] ?? null) && $review['path'] !== ''
+                && is_string($review['sha256'] ?? null) && preg_match('/^[0-9a-f]{64}$/', $review['sha256']) === 1;
+            foreach (['reviewed_by', 'reviewed_at', 'reason'] as $field) {
+                $valid = $valid && is_string($review[$field] ?? null) && trim($review[$field]) !== '';
+            }
+            $this->block(! $valid, 'Release policy has an invalid migration review: path, sha256, reviewed_by, reviewed_at and reason are required.');
+            $reviews[$review['path']] = $review;
+        }
+        return $reviews;
     }
 
     private function runChecks(): array

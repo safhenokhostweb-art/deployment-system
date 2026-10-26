@@ -164,6 +164,41 @@ test('safe migrations are candidates and unsafe migrations are blocked', functio
     expectFailure(fn () => (new ReleasePreparer($root))->run(false), 'MIGRATION REVIEW REQUIRED');
 });
 
+test('a recorded review releases exactly the reviewed migration bytes', function (): void {
+    $source = "<?php\nSchema::create('things', fn () => null);\n// down\nSchema::drop('things');\n";
+    $review = [
+        'path' => 'database/migrations/003_create_things.php',
+        'sha256' => ReleasePreparer::migrationDigest($source),
+        'reviewed_by' => 'owner',
+        'reviewed_at' => '2026-10-26',
+        'reason' => 'down() only drops the table up() creates.',
+    ];
+    [$root] = fixture([
+        'task' => ['owned_paths' => ['database/migrations/**']],
+        'policy' => ['migration_policy' => ['reviewed' => [$review]]],
+    ]);
+    // CRLF checkouts must not void a review recorded from LF bytes.
+    file_put_contents($root.'/database/migrations/003_create_things.php', str_replace("\n", "\r\n", $source));
+    $result = (new ReleasePreparer($root))->run(false);
+    if ($result['status'] !== 'READY' || $result['reviewed_migrations'] !== [$review]) {
+        throw new RuntimeException('Reviewed migration was not released with its review recorded.');
+    }
+    file_put_contents($root.'/database/migrations/003_create_things.php', $source."Schema::drop('users');\n");
+    expectFailure(fn () => (new ReleasePreparer($root))->run(false), 'MIGRATION REVIEW REQUIRED');
+    rename($root.'/database/migrations/003_create_things.php', $root.'/database/migrations/004_other.php');
+    file_put_contents($root.'/database/migrations/004_other.php', $source);
+    expectFailure(fn () => (new ReleasePreparer($root))->run(false), 'MIGRATION REVIEW REQUIRED');
+});
+
+test('malformed migration reviews fail closed', function (): void {
+    [$root] = fixture([
+        'task' => ['owned_paths' => ['database/migrations/**']],
+        'policy' => ['migration_policy' => ['reviewed' => [['path' => 'database/migrations/x.php', 'sha256' => 'not-a-digest']]]],
+    ]);
+    file_put_contents($root.'/database/migrations/x.php', "<?php Schema::drop('x');\n");
+    expectFailure(fn () => (new ReleasePreparer($root))->run(false), 'invalid migration review');
+});
+
 test('failing tests prevent a commit', function (): void {
     [$root, , $base] = fixture(['policy' => ['checks' => [['name' => 'forced-failure', 'type' => 'test', 'command' => 'php -r "exit(7);"']]]]);
     file_put_contents($root.'/src/app.php', "<?php\nreturn 2;\n");
