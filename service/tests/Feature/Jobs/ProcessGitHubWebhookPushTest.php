@@ -145,7 +145,7 @@ class ProcessGitHubWebhookPushTest extends TestCase
 
         // The Agent's own exact-commit upgrade authority: a ready Release
         // and succeeded Deployment for the deployment-system project,
-        // shipping canonical Agent 1.5.6 (the real, currently checked-out
+        // shipping canonical Agent 1.5.7 (the real, currently checked-out
         // agent.php — see LocalAgentVersionResolver::canonical()).
         $upgradeCommit = str_repeat('c', 40);
         $upgradeProject = Project::factory()->create(['project_key' => 'deployment-system', 'branch' => 'master']);
@@ -174,7 +174,7 @@ class ProcessGitHubWebhookPushTest extends TestCase
 
         $upgradeJob = LocalAgentControlJob::where('local_agent_id', $agent->id)->where('action', LocalAgentControlJob::ACTION_UPGRADE)->sole();
         $this->assertSame(LocalAgentControlJob::STATUS_QUEUED, $upgradeJob->status);
-        $this->assertSame('1.5.6', $upgradeJob->expected_version);
+        $this->assertSame('1.5.7', $upgradeJob->expected_version);
 
         $this->assertDatabaseHas('audit_log_entries', [
             'action' => 'release.artifact_build_blocked_by_authoritative_agent',

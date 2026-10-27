@@ -90,7 +90,7 @@ class ServerAgentUpgradeFlowTest extends TestCase
             'status' => 'succeeded',
             'commit_hash' => $commit,
             'repository_mapping' => 'deployment-system',
-            'agent_version' => '1.4.2',
+            'agent_version' => '1.4.3',
             'tree_hash' => str_repeat('9', 40),
             'checksum_sha256' => hash('sha256', $content),
             'size_bytes' => strlen($content),
@@ -111,7 +111,7 @@ class ServerAgentUpgradeFlowTest extends TestCase
 
         $controlJob = ServerAgentControlJob::sole();
         $this->assertSame(ServerAgentControlJob::STATUS_QUEUED, $controlJob->status);
-        $this->assertSame('1.4.2', $controlJob->target_version);
+        $this->assertSame('1.4.3', $controlJob->target_version);
 
         // --- Server Agent: poll, claim ---
         $polled = $this->get('/api/agent/control-jobs/next', $this->agentHeadersFor($agent, $agentToken, $agentSecret, 'GET', '/api/agent/control-jobs/next'))
@@ -142,12 +142,12 @@ class ServerAgentUpgradeFlowTest extends TestCase
             ->assertJson(['status' => 'awaiting_heartbeat']);
 
         // --- Server Agent process restarts, heartbeats as the new process/version ---
-        $heartbeatBody = ['agent_version' => '1.4.2'];
+        $heartbeatBody = ['agent_version' => '1.4.3'];
         $this->postJson('/api/agent/heartbeat', $heartbeatBody, $this->agentHeadersFor($agent, $agentToken, $agentSecret, 'POST', '/api/agent/heartbeat', json_encode($heartbeatBody)))
             ->assertOk();
 
         $this->assertSame(ServerAgentControlJob::STATUS_SUCCEEDED, $controlJob->fresh()->status);
-        $this->assertSame('1.4.2', $agent->fresh()->agent_version);
+        $this->assertSame('1.4.3', $agent->fresh()->agent_version);
         $this->assertTrue($agent->fresh()->enforcesPreActivationMaintenanceOrdering());
     }
 }

@@ -91,7 +91,14 @@ final class ArtifactBuilder
                 'checksum' => $checksum,
                 'size' => $size,
                 'requiredPaths' => $this->requiredPaths($projectDir, $buildResult),
-                'file_manifest_hash' => $fileManifestHash,
+                // Contract alignment: file_manifest_hash must be SHA-256 of the
+                // raw bytes of .deployment/file-manifest.json as they appear in
+                // the sealed ZIP — i.e. hash('sha256', $manifest->toJson()),
+                // which matches ArtifactService::validateArchiveContents().
+                // manifestHash() (canonical JSON without manifest_hash field)
+                // is intentionally a different value and is used only where the
+                // manifest re-derives/validates itself (fromCanonical).
+                'file_manifest_hash' => hash('sha256', $fileManifest->toJson()),
                 'file_manifest_entry_count' => $fileManifestEntryCount,
                 'file_manifest_total_size' => $fileManifestTotalSize,
             ];
@@ -115,13 +122,15 @@ final class ArtifactBuilder
 
         $manifest = ArtifactFileManifest::buildFromFiles($files);
 
-        $manifestDir = "{$projectDir}/.deployment";
+        $manifestPath = "{$projectDir}/" . ArtifactFileManifest::MANIFEST_FILENAME;
+        $manifestDir = dirname($manifestPath);
         if (!is_dir($manifestDir)) {
             mkdir($manifestDir, 0755, true);
         }
 
-        $manifestPath = "{$manifestDir}/" . ArtifactFileManifest::MANIFEST_FILENAME;
-        file_put_contents($manifestPath, $manifest->toJson());
+        if (file_put_contents($manifestPath, $manifest->toJson()) === false) {
+            throw new LocalBuildFailedException('artifact_build_failed', 'Could not write file manifest to the assembled artifact.');
+        }
 
         return $manifest;
     }
@@ -165,6 +174,16 @@ final class ArtifactBuilder
             $paths[] = 'public/build/manifest.json';
         }
         $paths[] = '.deployment/release-manifest.json';
+        // Contract alignment: writeReleaseManifest() already advertises
+        // this path in the in-artifact manifest's required_paths, but the
+        // descriptor list uploaded to the Hub (and stored as the artifact's
+        // required_paths) did not — so the Server Agent's
+        // firstMissingRequiredPath/ReleaseValidator gates never verified
+        // the file manifest's presence while the artifact's own provenance
+        // manifest declared it required. Both halves must say the same
+        // thing; the manifest is written unconditionally by
+        // generateAndWriteFileManifest(), so it is unconditionally required.
+        $paths[] = ArtifactFileManifest::MANIFEST_FILENAME;
         if (is_file($projectDir . '/' . self::DEPENDENCY_LOCK_MARKER)) {
             $paths[] = self::DEPENDENCY_LOCK_MARKER;
         }
@@ -219,7 +238,9 @@ final class ArtifactBuilder
                 $manifest['dependency_locks'] = array_values($provenance['dependency_locks'] ?? []);
             }
 
-            file_put_contents("{$manifestDir}/release-manifest.json", json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+            if (file_put_contents("{$manifestDir}/release-manifest.json", json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)) === false) {
+                throw new LocalBuildFailedException('artifact_build_failed', 'Could not write release manifest to the assembled artifact.');
+            }
         }
 
     private function validateDependencyLocks(string $projectDir, array $locks, bool $sealed): void

@@ -32,9 +32,7 @@ use Tests\TestCase;
  *     create the Server Agent upgrade staging directory"): the same
  *     CRLF-hash risk applies to upgrade-1.4.2.sh and its new
  *     deployment-server-agent-activate helper, checked here against
- *     this repository's own git INDEX (the content about to be
- *     committed as the 1.4.2 release) rather than a not-yet-existing
- *     historical commit.
+ *     1.4.2's own exact release commit (e598894).
  *
  *  3. Version-to-commit authority drift (classified "B) safe today but
  *     insufficiently enforced" during the Server Agent 1.4.1 bootstrap
@@ -60,8 +58,8 @@ use Tests\TestCase;
  */
 class ServerAgentReleaseSyncTest extends TestCase
 {
-    private const PINNED_AGENT_PHP_BLOB = 'a289336c068231aa61890a582538b77dc6b9ef3a';
-    private const PINNED_LIB_TREE = 'c61afff75a3a988d9f3110fafe86c017f07923d1';
+    private const PINNED_AGENT_PHP_BLOB = '092252f0bec38f8854028280949843a126e5d6a7';
+    private const PINNED_LIB_TREE = '57c5817d733dcdb0084a01594929a814f22085cf';
 
     public function test_marker_matches_the_shipped_agent_version(): void
     {
@@ -110,34 +108,32 @@ class ServerAgentReleaseSyncTest extends TestCase
     }
 
     /**
-     * 1.4.2 has no fixed historical release commit yet — it is being
-     * introduced in this very commit — so its candidate literals are
-     * checked against the git INDEX (the content about to be
-     * committed), never a not-yet-known future commit SHA and never a
-     * plain working-tree read (which this checkout's core.autocrlf
-     * would silently CRLF-convert, reproducing the exact bug this
-     * guards against).
+     * 1.4.2's candidate literals are pinned to its own exact release
+     * commit (e598894), exactly like 1.4.1 is pinned to 757e1b5 above.
+     * They were originally checked against the git INDEX while 1.4.2
+     * was being introduced; once agent.php moved on toward 1.4.3, an
+     * index read would no longer mean "1.4.2's candidate".
      */
-    public function test_1_4_2_bootstrap_script_candidate_hashes_match_the_committed_source(): void
+    public function test_1_4_2_bootstrap_script_candidate_hashes_match_its_exact_release_commit(): void
     {
         $script = base_path('../agent/install/upgrade-1.4.2.sh');
 
-        $this->assertSame($this->canonicalIndexBlobSha256('agent/agent.php'), $this->extractHashLiteral($script, 'C_AGENT'));
-        $this->assertSame($this->canonicalIndexBlobSha256('agent/lib/SelfUpgradeManager.php'), $this->extractHashLiteral($script, 'C_SELFUPGRADE'));
-        $this->assertSame($this->canonicalIndexBlobSha256('agent/install/deployment-server-agent-activate'), $this->extractHashLiteral($script, 'C_ACTIVATE_HELPER'));
-        $this->assertSame($this->canonicalIndexBlobSha256('agent/install/deployment-server-agent-activate.sudoers'), $this->extractHashLiteral($script, 'C_ACTIVATE_SUDOERS'));
+        $this->assertSame($this->canonicalBlobSha256('e598894', 'agent/agent.php'), $this->extractHashLiteral($script, 'C_AGENT'));
+        $this->assertSame($this->canonicalBlobSha256('e598894', 'agent/lib/SelfUpgradeManager.php'), $this->extractHashLiteral($script, 'C_SELFUPGRADE'));
+        $this->assertSame($this->canonicalBlobSha256('e598894', 'agent/install/deployment-server-agent-activate'), $this->extractHashLiteral($script, 'C_ACTIVATE_HELPER'));
+        $this->assertSame($this->canonicalBlobSha256('e598894', 'agent/install/deployment-server-agent-activate.sudoers'), $this->extractHashLiteral($script, 'C_ACTIVATE_SUDOERS'));
     }
 
-    public function test_1_4_2_lineage_manifest_candidate_hashes_match_the_committed_source(): void
+    public function test_1_4_2_lineage_manifest_candidate_hashes_match_its_exact_release_commit(): void
     {
         $lineage = json_decode((string) file_get_contents(base_path('../agent/release/1.4.2-lineage.json')), true);
         $this->assertIsArray($lineage);
         $candidates = $lineage['candidate_snapshot_sha256'] ?? [];
 
-        $this->assertSame($this->canonicalIndexBlobSha256('agent/agent.php'), $candidates['agent.php'] ?? null);
-        $this->assertSame($this->canonicalIndexBlobSha256('agent/lib/SelfUpgradeManager.php'), $candidates['lib/SelfUpgradeManager.php'] ?? null);
-        $this->assertSame($this->canonicalIndexBlobSha256('agent/install/deployment-server-agent-activate'), $candidates['install/deployment-server-agent-activate'] ?? null);
-        $this->assertSame($this->canonicalIndexBlobSha256('agent/install/deployment-server-agent-activate.sudoers'), $candidates['install/deployment-server-agent-activate.sudoers'] ?? null);
+        $this->assertSame($this->canonicalBlobSha256('e598894', 'agent/agent.php'), $candidates['agent.php'] ?? null);
+        $this->assertSame($this->canonicalBlobSha256('e598894', 'agent/lib/SelfUpgradeManager.php'), $candidates['lib/SelfUpgradeManager.php'] ?? null);
+        $this->assertSame($this->canonicalBlobSha256('e598894', 'agent/install/deployment-server-agent-activate'), $candidates['install/deployment-server-agent-activate'] ?? null);
+        $this->assertSame($this->canonicalBlobSha256('e598894', 'agent/install/deployment-server-agent-activate.sudoers'), $candidates['install/deployment-server-agent-activate.sudoers'] ?? null);
     }
 
     public function test_1_4_2_bootstrap_script_and_lineage_manifest_cannot_silently_diverge_from_each_other(): void
@@ -162,25 +158,21 @@ class ServerAgentReleaseSyncTest extends TestCase
      * without needing to already know this release's own future commit
      * SHA.
      */
-    public function test_agent_runtime_identity_has_not_drifted_from_the_pinned_1_4_2_release(): void
+    public function test_agent_runtime_identity_has_not_drifted_from_the_pinned_1_4_3_release(): void
     {
-        $repoRoot = base_path('..');
-        $tree = $this->writeTreeFromIsolatedIndex($repoRoot);
-
-        $agentPhpBlob = $this->runGit($repoRoot, ['git', 'rev-parse', "{$tree}:agent/agent.php"]);
-        $libTree = $this->runGit($repoRoot, ['git', 'rev-parse', "{$tree}:agent/lib"]);
+        [$agentPhpBlob, $libTree] = $this->resolveFromIsolatedIndex(base_path('..'), ['agent/agent.php', 'agent/lib']);
 
         $this->assertSame(
             self::PINNED_AGENT_PHP_BLOB,
             $agentPhpBlob,
-            'agent/agent.php has changed since the 1.4.2 release. If this is an intentional runtime change, bump AGENT_VERSION (and the service/.deployment/server-agent-version.json marker) and update the pinned blob id here; if unintentional, revert it.',
+            'agent/agent.php has changed since the 1.4.3 release. If this is an intentional runtime change, bump AGENT_VERSION (and the service/.deployment/server-agent-version.json marker) and update the pinned blob id here; if unintentional, revert it.',
         );
         $this->assertSame(
             self::PINNED_LIB_TREE,
             $libTree,
-            'agent/lib has changed since the 1.4.2 release. If this is an intentional runtime change, bump AGENT_VERSION (and the service/.deployment/server-agent-version.json marker) and update the pinned tree id here; if unintentional, revert it.',
+            'agent/lib has changed since the 1.4.3 release. If this is an intentional runtime change, bump AGENT_VERSION (and the service/.deployment/server-agent-version.json marker) and update the pinned tree id here; if unintentional, revert it.',
         );
-        $this->assertSame('1.4.2', $this->extractAgentVersion(), 'AGENT_VERSION must still read 1.4.2 while the runtime identity pin above is unchanged.');
+        $this->assertSame('1.4.3', $this->extractAgentVersion(), 'AGENT_VERSION must still read 1.4.3 while the runtime identity pin above is unchanged.');
     }
 
     private function extractHashLiteral(string $scriptPath, string $name): ?string
@@ -199,23 +191,12 @@ class ServerAgentReleaseSyncTest extends TestCase
     }
 
     /**
-     * The git INDEX's current version of a path — the content about to
-     * be committed, LF-normalized by git regardless of this checkout's
-     * own core.autocrlf setting. Used for a release still being
-     * introduced in the current, not-yet-committed change set.
-     */
-    private function canonicalIndexBlobSha256(string $relativePath): string
-    {
-        return $this->canonicalBlobSha256('', $relativePath);
-    }
-
-    /**
      * Normalizes CRLF to LF before regex matching, so this test's own
      * result never depends on this checkout's core.autocrlf setting —
      * only the file's actual textual content (the hash literal itself)
      * is under test here, never the working tree's line endings. The
      * canonical hash each literal is compared against still comes from
-     * a real git blob (canonicalBlobSha256()/canonicalIndexBlobSha256()),
+     * a real git blob (canonicalBlobSha256()),
      * never from this working-tree read.
      */
     private function readTextNormalized(string $path): string
@@ -251,8 +232,17 @@ class ServerAgentReleaseSyncTest extends TestCase
         return $result->output();
     }
 
-    /** Build the current index tree without writing inside the repository. */
-    private function writeTreeFromIsolatedIndex(string $repoRoot): string
+    /**
+     * Build the current index tree without writing inside the repository
+     * and resolve each path's object id in it. The lookups must run against
+     * the same isolated object directory: whenever the index differs from
+     * HEAD (exactly the pre-commit run described above) the new trees exist
+     * only there, and it is deleted on return.
+     *
+     * @param  list<string>  $paths
+     * @return list<string>
+     */
+    private function resolveFromIsolatedIndex(string $repoRoot, array $paths): array
     {
         $gitDir = $this->runGit($repoRoot, ['git', 'rev-parse', '--absolute-git-dir']);
         $originalIndex = $gitDir . DIRECTORY_SEPARATOR . 'index';
@@ -270,16 +260,23 @@ class ServerAgentReleaseSyncTest extends TestCase
         }
 
         try {
-            $result = Process::path($repoRoot)->env([
+            $git = fn (array $command) => Process::path($repoRoot)->env([
                 'GIT_INDEX_FILE' => $tempIndex,
                 'GIT_OBJECT_DIRECTORY' => $tempObjects,
                 'GIT_ALTERNATE_OBJECT_DIRECTORIES' => $originalObjects,
                 'GIT_OPTIONAL_LOCKS' => '0',
-            ])->run(['git', 'write-tree']);
+            ])->run($command);
 
+            $result = $git(['git', 'write-tree']);
             $this->assertTrue($result->successful(), 'Isolated git write-tree failed: ' . $result->errorOutput());
+            $tree = trim($result->output());
 
-            return trim($result->output());
+            return array_map(function (string $path) use ($git, $tree): string {
+                $resolved = $git(['git', 'rev-parse', "{$tree}:{$path}"]);
+                $this->assertTrue($resolved->successful(), "Isolated git rev-parse {$tree}:{$path} failed: " . $resolved->errorOutput());
+
+                return trim($resolved->output());
+            }, $paths);
         } finally {
             File::deleteDirectory($tempRoot);
         }

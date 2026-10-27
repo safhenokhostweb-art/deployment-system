@@ -171,8 +171,19 @@ final class SentinelExactCommitExporterTest extends TestCase
     public function test_actual_target_deploy_bat_and_five_fixtures_are_byte_identical_in_temp_zip(): void
     {
         $repo = dirname(__DIR__, 6) . '/saas-platform';
-        $config = SentinelProofRunConfig::create($repo, '13c845b0f0cd519e12722ac8f0e8a0b587078b68',
-            'fix/canvas-default-homepage', 18101, 18102, 'fixture-project');
+        $sha = '13c845b0f0cd519e12722ac8f0e8a0b587078b68';
+        $branch = 'fix/canvas-default-homepage';
+        // This reads the live sibling checkout, which the exporter rightly
+        // refuses (proof_source_changed) unless HEAD is exactly the pinned
+        // commit on the pinned branch. Work committed in saas-platform is an
+        // environment change, not a regression in this repository.
+        $head = new Process(['git', '-C', $repo, 'rev-parse', 'HEAD']);
+        $current = new Process(['git', '-C', $repo, 'branch', '--show-current']);
+        if (!is_dir($repo) || $head->run() !== 0 || $current->run() !== 0
+            || trim($head->getOutput()) !== $sha || trim($current->getOutput()) !== $branch) {
+            self::markTestSkipped("Sibling saas-platform checkout is not at the pinned proof source {$sha} on {$branch}.");
+        }
+        $config = SentinelProofRunConfig::create($repo, $sha, $branch, 18101, 18102, 'fixture-project');
         // Dedicated component fixture root, unrelated to the preserved failed run.
         $files = new SentinelLocalProofFilesystem($config);
         $files->initialize(true);

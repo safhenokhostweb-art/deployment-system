@@ -446,7 +446,7 @@ class SentinelEvidenceCollectorTest extends TestCase
 
     public function test_file_comparison_without_per_file_entries_is_unknown(): void
     {
-        config(['sentinel.file_verification_enabled' => true]);
+        config(['deployment.sentinel.file_verification_enabled' => true]);
 
         $manifestHash = 'a'.str_repeat('0', 63);
 

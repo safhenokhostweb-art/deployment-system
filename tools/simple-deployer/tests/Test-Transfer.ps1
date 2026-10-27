@@ -77,7 +77,25 @@ Assert-That 'ssh args end with the remote command as its own single token' (@($s
 # ============================================================
 Assert-That 'a plain value quotes cleanly' ((ConvertTo-PosixShellQuotedString 'plain') -eq "'plain'")
 
-$bashPath = (Get-Command bash.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+# The first bash.exe on PATH can be the WSL launcher (System32\bash.exe),
+# which cannot open a Windows script path at all and exits 127 -- that
+# says nothing about the quoting. Use the first bash that can actually
+# run a script from a Windows path (e.g. Git Bash, which is usually not on
+# PATH itself but ships next to git.exe as <git root>\bin\bash.exe).
+$bashCandidates = @(Get-Command bash.exe -All -ErrorAction SilentlyContinue | ForEach-Object { $_.Source })
+$gitExe = (Get-Command git.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+if ($gitExe) {
+    $gitBash = Join-Path (Split-Path (Split-Path $gitExe -Parent) -Parent) 'bin\bash.exe'
+    if (Test-Path -LiteralPath $gitBash) { $bashCandidates = @($gitBash) + $bashCandidates }
+}
+$bashPath = $null
+foreach ($candidate in $bashCandidates) {
+    $probePath = Join-Path $env:TEMP "sdtest-bash-probe-$([Guid]::NewGuid().ToString('N').Substring(0,8)).sh"
+    Set-Content -LiteralPath $probePath -Value "printf '%s' ok" -Encoding ASCII -NoNewline
+    $probe = Invoke-ExternalCommand -FilePath $candidate -ArgumentList @($probePath) -TimeoutSeconds 10
+    Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
+    if ($probe.StdOut -ceq 'ok') { $bashPath = $candidate; break }
+}
 if ($bashPath) {
     $dangerousValues = @(
         "it's-a-test",

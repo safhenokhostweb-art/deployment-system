@@ -30,7 +30,7 @@ class ServerAgentVersionResolverTest extends TestCase
 
     public function test_canonical_reads_the_real_marker(): void
     {
-        $this->assertSame('1.4.2', ServerAgentVersionResolver::canonical());
+        $this->assertSame('1.4.3', ServerAgentVersionResolver::canonical());
     }
 
     public function test_canonical_reads_the_version_from_a_well_formed_marker(): void

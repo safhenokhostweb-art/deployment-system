@@ -22,6 +22,9 @@ config.php
 *.pem
 *.key
 
+# Per-run release task (generated locally; .deployment/release-task.json.example is the template)
+.deployment/release-task.json
+
 service.backup-*/
 service.failed-*/
 persistent/

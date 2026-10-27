@@ -67,7 +67,7 @@ class LocalAgentControlTest extends TestCase
             'local_agent_id' => $agent->id,
             'action' => LocalAgentControlJob::ACTION_UPGRADE,
             'status' => LocalAgentControlJob::STATUS_QUEUED,
-            'expected_version' => '1.5.6',
+            'expected_version' => '1.5.7',
             'expected_commit_hash' => $commit,
             'repository_mapping' => 'deployment-system',
         ]);
@@ -204,16 +204,16 @@ class LocalAgentControlTest extends TestCase
     /**
      * The exact Deployment #177 scenario: an installed Agent still on the
      * previous official release (1.5.2) must be flagged outdated against
-     * the real, un-overridden canonical default (1.5.6) — proving the
+     * the real, un-overridden canonical default (1.5.7) — proving the
      * fix (LocalAgentVersionResolver, see LocalAgentVersionSyncTest) makes
-     * the "Upgrade to 1.5.6" action actually surface, with no env override
+     * the "Upgrade to 1.5.7" action actually surface, with no env override
      * and no manual config edit in this test.
      */
     public function test_installed_previous_official_release_agent_is_outdated_against_the_real_canonical_default(): void
     {
         $agent = LocalAgent::factory()->approved()->create(['agent_version' => '1.5.2']);
 
-        $this->assertSame('1.5.6', config('deployment.latest_local_agent_version'));
+        $this->assertSame('1.5.7', config('deployment.latest_local_agent_version'));
         $this->assertTrue($agent->isUpdateAvailable());
     }
 

@@ -121,7 +121,7 @@ class ServerAgentControlJobServiceTest extends TestCase
 
         $this->assertSame(ServerAgentControlJob::ACTION_UPGRADE, $job->action);
         $this->assertSame(ServerAgentControlJob::STATUS_QUEUED, $job->status);
-        $this->assertSame('1.4.2', $job->target_version);
+        $this->assertSame('1.4.3', $job->target_version);
         $this->assertSame($target['commit'], $job->target_commit_sha);
         $this->assertSame($target['package']->id, $job->server_agent_package_id);
         $this->assertSame($target['package']->checksum_sha256, $job->expected_package_hash);
@@ -136,7 +136,7 @@ class ServerAgentControlJobServiceTest extends TestCase
     public function test_queue_upgrade_rejects_an_agent_already_at_the_latest_version(): void
     {
         $this->createUpgradeAuthorityWithPackage();
-        $agent = Agent::factory()->approved()->create(['agent_version' => '1.4.2']);
+        $agent = Agent::factory()->approved()->create(['agent_version' => '1.4.3']);
 
         $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
         app(ServerAgentControlJobService::class)->queueUpgrade($agent, 'admin@example.test');
@@ -362,9 +362,9 @@ class ServerAgentControlJobServiceTest extends TestCase
         $this->assertSame(0, $service->verifyUpgradeHeartbeat($agent, '1.4.0'));
         $this->assertSame(ServerAgentControlJob::STATUS_AWAITING_HEARTBEAT, $job->fresh()->status);
 
-        $this->assertSame(1, $service->verifyUpgradeHeartbeat($agent, '1.4.2'));
+        $this->assertSame(1, $service->verifyUpgradeHeartbeat($agent, '1.4.3'));
         $this->assertSame(ServerAgentControlJob::STATUS_SUCCEEDED, $job->fresh()->status);
-        $this->assertSame('1.4.2', $job->fresh()->reported_version);
+        $this->assertSame('1.4.3', $job->fresh()->reported_version);
         $this->assertNotNull($job->fresh()->upgrade_verified_at);
 
         $this->assertDatabaseHas('audit_log_entries', [

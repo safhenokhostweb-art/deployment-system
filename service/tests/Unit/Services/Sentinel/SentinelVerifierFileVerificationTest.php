@@ -78,7 +78,7 @@ class SentinelVerifierFileVerificationTest extends TestCase
         ]);
 
         // Mock config to enable file verification
-        config(['sentinel.file_verification_enabled' => true]);
+        config(['deployment.sentinel.file_verification_enabled' => true]);
 
         $result = $this->verifier->verify($evidence, $this->baseExpectation());
 
@@ -92,7 +92,7 @@ class SentinelVerifierFileVerificationTest extends TestCase
             'observed_file_manifest_hash' => 'b'.str_repeat('0', 63),
         ]);
 
-        config(['sentinel.file_verification_enabled' => true]);
+        config(['deployment.sentinel.file_verification_enabled' => true]);
 
         $result = $this->verifier->verify($evidence, $this->baseExpectation());
 
@@ -107,7 +107,7 @@ class SentinelVerifierFileVerificationTest extends TestCase
             'observed_file_manifest_hash' => 'a'.str_repeat('0', 63),
         ]);
 
-        config(['sentinel.file_verification_enabled' => true]);
+        config(['deployment.sentinel.file_verification_enabled' => true]);
 
         $result = $this->verifier->verify($evidence, $this->baseExpectation());
 
@@ -126,7 +126,7 @@ class SentinelVerifierFileVerificationTest extends TestCase
             'observed_file_manifest_entry_count' => 100,
         ]);
 
-        config(['sentinel.file_verification_enabled' => true]);
+        config(['deployment.sentinel.file_verification_enabled' => true]);
 
         $result = $this->verifier->verify($evidence, $this->baseExpectation());
 
@@ -140,7 +140,7 @@ class SentinelVerifierFileVerificationTest extends TestCase
             'observed_file_manifest_entry_count' => 99,
         ]);
 
-        config(['sentinel.file_verification_enabled' => true]);
+        config(['deployment.sentinel.file_verification_enabled' => true]);
 
         $result = $this->verifier->verify($evidence, $this->baseExpectation());
 
@@ -159,7 +159,7 @@ class SentinelVerifierFileVerificationTest extends TestCase
             'observed_file_manifest_total_size' => 1024000,
         ]);
 
-        config(['sentinel.file_verification_enabled' => true]);
+        config(['deployment.sentinel.file_verification_enabled' => true]);
 
         $result = $this->verifier->verify($evidence, $this->baseExpectation());
 
@@ -173,7 +173,7 @@ class SentinelVerifierFileVerificationTest extends TestCase
             'observed_file_manifest_total_size' => 1023999,
         ]);
 
-        config(['sentinel.file_verification_enabled' => true]);
+        config(['deployment.sentinel.file_verification_enabled' => true]);
 
         $result = $this->verifier->verify($evidence, $this->baseExpectation());
 
@@ -200,7 +200,7 @@ class SentinelVerifierFileVerificationTest extends TestCase
             ],
         ]);
 
-        config(['sentinel.file_verification_enabled' => true]);
+        config(['deployment.sentinel.file_verification_enabled' => true]);
 
         $result = $this->verifier->verify($evidence, $this->baseExpectation());
 
@@ -222,7 +222,7 @@ class SentinelVerifierFileVerificationTest extends TestCase
             ],
         ]);
 
-        config(['sentinel.file_verification_enabled' => true]);
+        config(['deployment.sentinel.file_verification_enabled' => true]);
 
         $result = $this->verifier->verify($evidence, $this->baseExpectation());
 
@@ -245,7 +245,7 @@ class SentinelVerifierFileVerificationTest extends TestCase
             ],
         ]);
 
-        config(['sentinel.file_verification_enabled' => true]);
+        config(['deployment.sentinel.file_verification_enabled' => true]);
 
         $result = $this->verifier->verify($evidence, $this->baseExpectation());
 
@@ -278,7 +278,7 @@ class SentinelVerifierFileVerificationTest extends TestCase
 
     public function test_file_verification_explicitly_disabled(): void
     {
-        config(['sentinel.file_verification_enabled' => false]);
+        config(['deployment.sentinel.file_verification_enabled' => false]);
 
         $evidence = $this->baseEvidence([
             'expected_file_manifest_hash' => 'a'.str_repeat('0', 63),
@@ -298,7 +298,7 @@ class SentinelVerifierFileVerificationTest extends TestCase
     // Manifest hash matches but detailed comparison missing
     // ------------------------------------------------------------------
 
-    public function test_manifest_hash_match_implies_pass(): void
+    public function test_manifest_hash_match_without_inventories_is_unknown_not_pass(): void
     {
         $hash = 'a'.str_repeat('0', 63);
 
@@ -313,13 +313,17 @@ class SentinelVerifierFileVerificationTest extends TestCase
             'checks' => [], // No recorded file_comparison check
         ]);
 
-        config(['sentinel.file_verification_enabled' => true]);
+        config(['deployment.sentinel.file_verification_enabled' => true]);
 
         $result = $this->verifier->verify($evidence, $this->baseExpectation());
 
-        // When manifest hashes match, file_comparison should pass
-        $this->assertSame(SentinelEvidenceContract::CHECK_STATUS_PASS, $result->statusOf('file_comparison'));
+        // Manifest hashes match but inventories are incomplete (no per-file entries),
+        // so verdict is UNKNOWN per SentinelFileComparisonService spec: PASS requires
+        // complete, valid expected and observed inventories.
+        $this->assertSame(SentinelEvidenceContract::CHECK_STATUS_PASS, $result->statusOf('file_manifest_hash_match'));
+        $this->assertSame(SentinelEvidenceContract::CHECK_STATUS_UNKNOWN, $result->statusOf('file_comparison'));
         $checks = $result->checks();
-        $this->assertStringContainsString('manifest hash verified', $checks['file_comparison']['detail'] ?? '');
+        $this->assertStringContainsString('UNKNOWN', $checks['file_comparison']['detail'] ?? '');
+        $this->assertNotSame(SentinelVerificationResult::VERIFIED, $result->result());
     }
 }
