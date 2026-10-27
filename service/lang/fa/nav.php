@@ -7,6 +7,7 @@ return [
     'projects' => 'پروژه‌ها',
     'servers' => 'سرورها',
     'agents' => 'کارگزارها',
+    'agent_dashboard' => 'بوم ایجنت‌ها',
     'local_agents' => 'کارگزارهای محلی',
     'publish_history' => 'تاریخچه انتشار',
     'local_agent_setup' => 'راه‌اندازی Local Agent',

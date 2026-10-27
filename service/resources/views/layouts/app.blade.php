@@ -310,6 +310,9 @@
         @can('agents.view')
         <a href="{{ route('agents.index') }}" @if(request()->routeIs('agents.*')) aria-current="page" @endif>{{ __('nav.agents') }}</a>
         @endcan
+        @can('workspace_agents.view')
+        <a href="{{ route('agent-dashboard.index') }}" @if(request()->routeIs('agent-dashboard.*')) aria-current="page" @endif>{{ __('nav.agent_dashboard') }}</a>
+        @endcan
         @can('local_agents.view')
         <a href="{{ route('local-agents.index') }}" @if(request()->routeIs('local-agents.index', 'local-agents.pending', 'local-agents.show')) aria-current="page" @endif>{{ __('nav.local_agents') }}</a>
         <a href="{{ route('publish.history') }}" @if(request()->routeIs('publish.history', 'projects.publish.show')) aria-current="page" @endif>{{ __('nav.publish_history') }}</a>
