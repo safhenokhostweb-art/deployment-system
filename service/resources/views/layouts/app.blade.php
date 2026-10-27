@@ -8,7 +8,7 @@
          so it starts fetching before the CSS parser reaches the @font-face
          rule. Medium/SemiBold/Bold are used far more sparingly (headings,
          labels, badges) so they're left to load on demand, not preloaded. --}}
-    <link rel="preload" href="/fonts/vazirmatn/Vazirmatn-Regular.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="{{ asset('fonts/vazirmatn/Vazirmatn-Regular.woff2') }}" as="font" type="font/woff2" crossorigin>
     <style>
         /* Phase 4-I: single, centralized font source for the whole panel —
            see docs/PHASE_4I_DEPLOYMENT_EXPERIENCE_REPORT.md §9. Every weight
@@ -20,28 +20,28 @@
            actually renders with (never all four up front). */
         @font-face {
             font-family: 'Vazirmatn';
-            src: url('/fonts/vazirmatn/Vazirmatn-Regular.woff2') format('woff2');
+            src: url('{{ asset('fonts/vazirmatn/Vazirmatn-Regular.woff2') }}') format('woff2');
             font-weight: 400;
             font-style: normal;
             font-display: swap;
         }
         @font-face {
             font-family: 'Vazirmatn';
-            src: url('/fonts/vazirmatn/Vazirmatn-Medium.woff2') format('woff2');
+            src: url('{{ asset('fonts/vazirmatn/Vazirmatn-Medium.woff2') }}') format('woff2');
             font-weight: 500;
             font-style: normal;
             font-display: swap;
         }
         @font-face {
             font-family: 'Vazirmatn';
-            src: url('/fonts/vazirmatn/Vazirmatn-SemiBold.woff2') format('woff2');
+            src: url('{{ asset('fonts/vazirmatn/Vazirmatn-SemiBold.woff2') }}') format('woff2');
             font-weight: 600;
             font-style: normal;
             font-display: swap;
         }
         @font-face {
             font-family: 'Vazirmatn';
-            src: url('/fonts/vazirmatn/Vazirmatn-Bold.woff2') format('woff2');
+            src: url('{{ asset('fonts/vazirmatn/Vazirmatn-Bold.woff2') }}') format('woff2');
             font-weight: 700;
             font-style: normal;
             font-display: swap;

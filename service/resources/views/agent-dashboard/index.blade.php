@@ -3,7 +3,7 @@
 @section('title', __('agent_dashboard.title'))
 
 @section('content')
-<link rel="stylesheet" href="/vendor/drawflow/drawflow.min.css">
+<link rel="stylesheet" href="{{ asset('vendor/drawflow/drawflow.min.css') }}">
 <style>
     /* Scoped dark theme: the rest of the panel stays light. */
     .ad-shell {
@@ -182,7 +182,7 @@
     ];
 @endphp
 <script type="application/json" id="ad-config">@json($agentDashboardConfig)</script>
-<script src="/vendor/drawflow/drawflow.min.js"></script>
+<script src="{{ asset('vendor/drawflow/drawflow.min.js') }}"></script>
 <script>
 (() => {
     const cfg = JSON.parse(document.getElementById('ad-config').textContent);
