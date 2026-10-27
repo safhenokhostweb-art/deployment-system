@@ -107,7 +107,7 @@ final class SentinelEvidenceCollector implements SentinelEvidenceCollection
         ];
 
         // Add file-level check if feature is enabled
-        if (config('sentinel.file_verification_enabled', false) === true) {
+        if (config('deployment.sentinel.file_verification_enabled', false) === true) {
             $checks['file_comparison'] = $fileComparisonCheck;
         }
 
@@ -137,7 +137,7 @@ final class SentinelEvidenceCollector implements SentinelEvidenceCollection
         ];
 
         // Add file-level fields (feature-flagged)
-        if (config('sentinel.file_verification_enabled', false) === true) {
+        if (config('deployment.sentinel.file_verification_enabled', false) === true) {
             $evidenceInput['expected_file_manifest_hash'] = $expectation?->expectedFileManifestHash;
             $evidenceInput['observed_file_manifest_hash'] = $snapshot?->fileManifestHash;
             $evidenceInput['expected_file_manifest_entry_count'] = $expectation?->expectedFileManifestEntryCount;
@@ -393,7 +393,7 @@ final class SentinelEvidenceCollector implements SentinelEvidenceCollection
      */
     private function checkFileComparison(?SentinelReleaseExpectation $expectation, ?SentinelRuntimeSnapshot $snapshot, ?SentinelArtifactObservation $artifact): array
     {
-        if (! config('sentinel.file_verification_enabled', false)) {
+        if (! config('deployment.sentinel.file_verification_enabled', false)) {
             return $this->unknown('file verification is disabled.');
         }
 

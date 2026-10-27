@@ -113,7 +113,7 @@ use LocalAgent\RuntimeSnapshotCollector;
  * Hub side for why this never triggers an automatic download). Bump
  * when agent.php or lib/* changes in a way that matters operationally.
  */
-const LOCAL_AGENT_VERSION = '1.5.6';
+const LOCAL_AGENT_VERSION = '1.5.7';
 
 $configPath = __DIR__ . '/config.php';
 

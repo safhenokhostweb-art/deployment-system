@@ -58,7 +58,7 @@ use DeploymentAgent\WorkspaceScanner;
  * can flag servers running an outdated agent. Bump this when agent.php or
  * lib/* changes in a way that matters operationally.
  */
-const AGENT_VERSION = '1.4.2';
+const AGENT_VERSION = '1.4.3';
 
 $configPath = __DIR__ . '/config.php';
 
@@ -171,7 +171,7 @@ do {
 
 function pollAndExecute(Client $client, RecipeStepRunner $recipeRunner, PipelineExecutor $pipelineExecutor, array $config, Logger $logger): void
 {
-    sendHeartbeat($client, $logger);
+    sendHeartbeat($client, $logger, $config);
 
     $response = $client->request('GET', '/api/agent/jobs/next');
 
@@ -462,7 +462,7 @@ function pollAndExecuteSelfUpgrade(Client $client, Executor $executor, Logger $l
  * Failure here must never block job polling — a heartbeat hiccup is not a
  * reason to stop deploying.
  */
-function sendHeartbeat(Client $client, Logger $logger): void
+function sendHeartbeat(Client $client, Logger $logger, array $config): void
 {
     try {
         // Phase 4-K Task 11: same existing heartbeat call, three new
@@ -487,8 +487,17 @@ function sendHeartbeat(Client $client, Logger $logger): void
         // RuntimeSnapshotCollector contract (sentinel.runtime.v1). Best-effort:
         // any failure degrades to snapshot_status=incomplete, never a fatal
         // error, and never reads .env or any secret-shaped file.
-        $runtimeSnapshot = collectServerRuntimeSnapshot($config ?? []);
-        if ($runtimeSnapshot !== null) {
+        // $config must be passed in explicitly: it is a file-scope variable
+        // and invisible here, so a `$config ?? []` fallback silently
+        // collected nothing and no heartbeat ever carried a snapshot.
+        //
+        // Only a complete snapshot is attached: the Hub answers any
+        // parseable-but-unstorable snapshot (incomplete, stale) with 409
+        // before it runs self-upgrade heartbeat verification, so sending
+        // an incomplete one would turn a healthy heartbeat into a failure
+        // while carrying no usable evidence.
+        $runtimeSnapshot = collectServerRuntimeSnapshot($config);
+        if (($runtimeSnapshot['snapshot_status'] ?? null) === 'complete') {
             $payload['runtime_snapshot'] = $runtimeSnapshot;
         }
 

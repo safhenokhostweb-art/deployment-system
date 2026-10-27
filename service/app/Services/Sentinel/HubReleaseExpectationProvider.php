@@ -55,11 +55,11 @@ final class HubReleaseExpectationProvider implements ReleaseExpectationProvider
         $expectedFileManifestTotalSize = null;
         $fileComparisonScope = null;
 
-        if (config('sentinel.file_verification_enabled', false) === true) {
+        if (config('deployment.sentinel.file_verification_enabled', false) === true) {
             $expectedFileManifestHash = $artifact?->file_manifest_hash;
             $expectedFileManifestEntryCount = $artifact?->file_manifest_entry_count;
             $expectedFileManifestTotalSize = $artifact?->file_manifest_total_size;
-            $fileComparisonScope = config('sentinel.file_comparison_scope', 'full');
+            $fileComparisonScope = config('deployment.sentinel.file_comparison_scope', 'full');
         }
 
         return new SentinelReleaseExpectation(

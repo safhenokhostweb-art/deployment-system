@@ -91,9 +91,10 @@ final class BuildWorkspace
      *     path-repository URL, or one with enough `..` segments to
      *     escape the workspace entirely. Never silently written to.
      */
-    public function resolvePathDependencyTarget(string $relativeUrl): string
+    public function resolvePathDependencyTarget(string $relativeUrl, string $applicationRoot = '.'): string
     {
-        $target = self::normalizeJoinedPath($this->projectDir, $relativeUrl);
+        $applicationDirectory = ApplicationRoot::resolve($this->projectDir, $applicationRoot);
+        $target = self::normalizeJoinedPath($applicationDirectory, $relativeUrl);
         $root = self::normalizeJoinedPath($this->root, '');
 
         if ($target !== $root && !str_starts_with($target, $root . '/')) {
@@ -250,3 +251,5 @@ final class BuildWorkspace
         }
     }
 }
+
+

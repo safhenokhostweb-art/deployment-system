@@ -371,6 +371,12 @@ return [
     // reported by the one authoritative Agent configured on the Project.
     'artifact_workspace_report_max_age_seconds' => (int) env('DEPLOYMENT_ARTIFACT_WORKSPACE_REPORT_MAX_AGE_SECONDS', 300),
 
+    // Maximum age of an Agent runtime snapshot (sentinel.runtime.v1) the Hub
+    // accepts on heartbeat and uses as Sentinel evidence. Read as
+    // deployment.runtime_snapshot_freshness_seconds by both heartbeat
+    // controllers and the Sentinel readers, so it lives at this level.
+    'runtime_snapshot_freshness_seconds' => (int) env('DEPLOYMENT_RUNTIME_SNAPSHOT_FRESHNESS_SECONDS', 300),
+
     /*
     |--------------------------------------------------------------------------
     | Sentinel file-level verification
@@ -417,9 +423,6 @@ return [
         'file_observation_max_files' => (int) env('SENTINEL_FILE_OBSERVATION_MAX_FILES', 10000),
         'file_observation_max_total_bytes' => (int) env('SENTINEL_FILE_OBSERVATION_MAX_TOTAL_BYTES', 500 * 1024 * 1024),
         'file_observation_max_execution_seconds' => (int) env('SENTINEL_FILE_OBSERVATION_MAX_EXECUTION_SECONDS', 30),
-        
-        // Runtime snapshot freshness (reused for file observation)
-        'runtime_snapshot_freshness_seconds' => (int) env('DEPLOYMENT_RUNTIME_SNAPSHOT_FRESHNESS_SECONDS', 300),
     ],
 
 ];

@@ -31,7 +31,7 @@ use InvalidArgumentException;
  * collectors that observe the live runtime come in a later phase.
  *
  * File-level verification (additive, feature-flagged): when enabled
- * via the sentinel.file_verification_enabled config, the verifier
+ * via the deployment.sentinel.file_verification_enabled config, the verifier
  * performs strict comparison of the artifact's file manifest against
  * the Server Agent's observed file manifest.
  */
@@ -59,7 +59,7 @@ final class SentinelVerifier
         // documented opt-in default — disabled — applies. Never enabled implicitly.
         $container = Container::getInstance();
         $fileVerificationEnabled = $container->bound('config')
-            && $container->make('config')->get('sentinel.file_verification_enabled', false) === true;
+            && $container->make('config')->get('deployment.sentinel.file_verification_enabled', false) === true;
 
         $checks = [
             'evidence_version' => $this->checkVersion($evidence),
