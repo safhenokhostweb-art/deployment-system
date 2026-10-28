@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Dashboard\AgentController;
+use App\Http\Controllers\Dashboard\AgentDashboardController;
 use App\Http\Controllers\Dashboard\AuthController;
 use App\Http\Controllers\Dashboard\ChangeDetectionController;
 use App\Http\Controllers\Dashboard\DashboardController;
@@ -157,4 +158,18 @@ Route::middleware('auth')->group(function () {
     Route::get('/operations/{operationJob}', [OperationController::class, 'show'])->name('operations.show');
 
     Route::get('/readiness', [ReadinessController::class, 'index'])->name('readiness.index');
+
+    // Visual Agent Management Dashboard. Session-authenticated JSON under
+    // /api/agents (the signed machine API lives under /api/agent/ and
+    // /api/local-agent/, untouched); the page itself is /agent-dashboard
+    // because /agents/{agent} is already the Server Agent detail route.
+    Route::get('/agent-dashboard', [AgentDashboardController::class, 'index'])->name('agent-dashboard.index');
+    Route::prefix('api/agents')->name('agent-dashboard.')->controller(AgentDashboardController::class)->group(function () {
+        Route::get('/graph', 'graph')->name('graph');
+        Route::post('/graph/save', 'save')->name('save');
+        Route::post('/{id}/toggle', 'toggle')->where('id', '[a-z][a-z0-9-]*')->name('toggle');
+        Route::post('/{id}/run', 'run')->where('id', '[a-z][a-z0-9-]*')->middleware('throttle:10,1')->name('run');
+        Route::post('/{id}/stop', 'stop')->where('id', '[a-z][a-z0-9-]*')->name('stop');
+        Route::get('/{id}/logs', 'logs')->where('id', '[a-z][a-z0-9-]*')->name('logs');
+    });
 });

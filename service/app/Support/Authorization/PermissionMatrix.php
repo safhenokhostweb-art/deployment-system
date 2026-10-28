@@ -43,6 +43,11 @@ class PermissionMatrix
                 // already has for deployments/operations.
                 'local_agents.view',
                 'local_agents.publish',
+                // Visual Agent Management Dashboard: see the canvas only.
+                // workspace_agents.manage (run/stop/toggle/save) stays
+                // Admin-only — it writes agents.json and starts processes
+                // on the Hub host.
+                'workspace_agents.view',
             ],
 
             // Task 3: "مشاهده Project، مشاهده Deployment، Trigger Deploy...
@@ -63,6 +68,7 @@ class PermissionMatrix
                 // still without touching Server/GitHub management.
                 'local_agents.view',
                 'local_agents.publish',
+                'workspace_agents.view',
             ],
 
             // Task 3: "فقط مشاهده: Dashboard، Project، Deployment Status".
@@ -77,6 +83,7 @@ class PermissionMatrix
                 // Phase 5: view only, matching every other capability here
                 // — never .publish, never .manage.
                 'local_agents.view',
+                'workspace_agents.view',
             ],
         ];
     }

@@ -7,6 +7,7 @@ return [
     'projects' => 'Projects',
     'servers' => 'Servers',
     'agents' => 'Agents',
+    'agent_dashboard' => 'Agent Canvas',
     'local_agents' => 'Local Agents',
     'publish_history' => 'Publish History',
     'local_agent_setup' => 'Setup Local Agent',

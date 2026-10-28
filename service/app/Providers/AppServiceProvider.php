@@ -10,6 +10,11 @@ use App\Console\Commands\DatabaseSafety\GuardedWipeCommand;
 use App\Listeners\NotificationEventSubscriber;
 use App\Models\Project;
 use App\Models\User;
+use App\Services\AgentDashboard\AgentGraphService;
+use App\Services\AgentDashboard\AgentProcessLauncher;
+use App\Services\AgentDashboard\AgentRunManager;
+use App\Services\AgentDashboard\AgentRuntimeRepository;
+use App\Services\AgentDashboard\NativeAgentProcessLauncher;
 use App\Services\Sentinel\AgentRuntimeReader;
 use App\Services\Sentinel\AgentRuntimeEvidenceReader;
 use App\Services\Sentinel\ArtifactChecksumReader;
@@ -55,6 +60,23 @@ class AppServiceProvider extends ServiceProvider
                 (array) config('deployment.sentinel_health_probe', []),
             );
         });
+
+        $this->app->bind(AgentProcessLauncher::class, NativeAgentProcessLauncher::class);
+        $this->app->bind(AgentRuntimeRepository::class, fn (): AgentRuntimeRepository => new AgentRuntimeRepository(
+            rtrim((string) config('agent_dashboard.runtime_path'), '/\\'),
+        ));
+        $this->app->bind(AgentRunManager::class, fn ($app): AgentRunManager => new AgentRunManager(
+            $app->make(AgentRuntimeRepository::class),
+            $app->make(AgentProcessLauncher::class),
+            (string) config('agent_dashboard.state_path'),
+            config('agent_dashboard.php_binary'),
+            (int) config('agent_dashboard.kept_run_logs', 10),
+        ));
+        $this->app->bind(AgentGraphService::class, fn ($app): AgentGraphService => new AgentGraphService(
+            $app->make(AgentRuntimeRepository::class),
+            $app->make(AgentRunManager::class),
+            (int) config('agent_dashboard.journal_tail_bytes', 1048576),
+        ));
     }
 
     /**
