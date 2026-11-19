@@ -145,6 +145,99 @@ class DeploymentDispatcher
     }
 
     /**
+     * Root-cause fix (auto_deploy dead since the release-readiness
+     * contract, faa75e7): push webhooks stopped creating Deployments and no
+     * other path consulted `projects.auto_deploy`, so a READY Release always
+     * waited for "Deploy Latest" + "Approve" even with the box ticked.
+     *
+     * This is the single automatic path. It is reached only from
+     * ReleaseAutoDeployService after a Release transitions to READY, and it
+     * applies the SAME gates an operator confirmation does: the Release row
+     * is locked and must still be READY; the bound Artifact is re-resolved
+     * under lock and physically re-verified; ReleaseReadiness must report
+     * deployable for EVERY readiness policy (stricter than the operator
+     * path, which skips it for legacy-fallback Releases). The owner's
+     * auto_deploy opt-in is the approval, recorded as approved_by
+     * `auto_deploy`. Returns null (no write) when any Deployment already
+     * exists for this Release, so a repeated READY sync can never create a
+     * second attempt or resurrect one an operator cancelled.
+     */
+    public function createAutomaticFromReadyRelease(Release $readyRelease): ?Deployment
+    {
+        return DB::transaction(function () use ($readyRelease): ?Deployment {
+            $release = Release::query()->whereKey($readyRelease->id)->lockForUpdate()->first();
+            abort_unless($release !== null && $release->status === Release::STATUS_READY, 409, 'The Release is no longer READY.');
+
+            $project = Project::query()->whereKey($release->project_id)->first();
+            abort_unless($project !== null && $project->auto_deploy && $project->is_active, 409, 'Automatic deployment is not enabled for this project.');
+
+            if (Deployment::query()->where('release_id', $release->id)->exists()) {
+                return null;
+            }
+
+            $artifact = Artifact::query()
+                ->where('release_id', $release->id)
+                ->where('project_id', $project->id)
+                ->where('commit_hash', $release->commit_hash)
+                ->where('branch', $release->branch)
+                ->where('status', Artifact::STATUS_AVAILABLE)
+                ->latest('id')
+                ->lockForUpdate()
+                ->first();
+            abort_unless($artifact !== null, 409, 'The READY Release has no available Artifact bound to it.');
+            $artifact = $this->artifacts->assertPhysicalIntegrity($artifact);
+
+            $readiness = $this->releaseReadiness->for($release->commit_hash, $release, $artifact);
+            abort_unless($readiness['deployable'], 409, $readiness['message']);
+
+            $triggeredBy = 'system:release-auto-deploy';
+            $auditAction = 'deployment.created_from_ready_release_auto_deploy';
+            $auditMetadata = [
+                'project_id' => $project->id,
+                'release_id' => $release->id,
+                'artifact_id' => $artifact->id,
+                'commit_hash' => $artifact->commit_hash,
+                'branch' => $artifact->branch,
+                'readiness_policy' => $release->readiness_policy,
+            ];
+
+            $targets = $this->resolver->resolveTargetsFor($project);
+            if ($this->isLegacyTargetSet($targets)) {
+                return $this->createLegacy(
+                    project: $project,
+                    commitHash: $artifact->commit_hash,
+                    branch: $artifact->branch,
+                    trigger: Deployment::TRIGGER_PUBLISH,
+                    triggeredBy: $triggeredBy,
+                    autoApprove: true,
+                    approvedBy: 'auto_deploy',
+                    auditAction: $auditAction,
+                    auditActorType: AuditLogEntry::ACTOR_SYSTEM,
+                    auditActorIdentifier: $triggeredBy,
+                    auditMetadata: $auditMetadata,
+                    artifactId: $artifact->id,
+                    releaseId: $release->id,
+                );
+            }
+
+            return $this->createMultiTarget(
+                project: $project,
+                targets: $targets,
+                commitHash: $artifact->commit_hash,
+                branch: $artifact->branch,
+                trigger: Deployment::TRIGGER_PUBLISH,
+                triggeredBy: $triggeredBy,
+                autoApprove: true,
+                auditAction: $auditAction,
+                auditActorType: AuditLogEntry::ACTOR_SYSTEM,
+                auditMetadata: $auditMetadata,
+                artifactId: $artifact->id,
+                releaseId: $release->id,
+            );
+        });
+    }
+
+    /**
      * Create a brand-new manual deployment from an Artifact the operator
      * explicitly selected. The Artifact is re-resolved under a row lock so
      * its project/commit/branch/availability contract cannot change between
