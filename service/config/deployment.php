@@ -237,6 +237,21 @@ return [
     'artifact_retention_days' => (int) env('DEPLOYMENT_ARTIFACT_RETENTION_DAYS', 14),
     'artifact_max_size_mb' => (int) env('DEPLOYMENT_ARTIFACT_MAX_SIZE_MB', 500),
 
+    /*
+    | Deployed-artifact retention (artifacts:prune-deployed). The two
+    | settings above never touch an artifact that a Deployment references,
+    | so those used to be kept forever. Per project, the newest N deployed
+    | artifacts (ordered by their latest use) keep their bytes, and on top
+    | of N the live artifact, its rollback target and anything still
+    | in flight are always kept (DeployedArtifactPruner). A pruned artifact
+    | loses its file but keeps its row (status "deleted"), so deployment
+    | history, checksums and commit identity stay intact.
+    | artifact_prune_deployed_auto: run the prune daily with --execute.
+    | Off by default; the operator runs the dry run first.
+    */
+    'artifact_keep_deployed_per_project' => (int) env('DEPLOYMENT_ARTIFACT_KEEP_DEPLOYED', 3),
+    'artifact_prune_deployed_auto' => (bool) env('DEPLOYMENT_ARTIFACT_PRUNE_DEPLOYED_AUTO', false),
+
     // Versioned, Hub-owned allowlist. Build-request callers cannot supply a
     // repository URL or package path; they can only receive this policy.
     //
