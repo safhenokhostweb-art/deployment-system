@@ -76,6 +76,16 @@ Schedule::command('artifacts:cleanup')
     ->withoutOverlapping()
     ->onOneServer();
 
+// Deployed-artifact retention (DeployedArtifactPruner): keeps the newest
+// DEPLOYMENT_ARTIFACT_KEEP_DEPLOYED per project plus live, rollback target
+// and in-flight artifacts. Runs only once the operator opts in with
+// DEPLOYMENT_ARTIFACT_PRUNE_DEPLOYED_AUTO=true after reviewing a dry run.
+Schedule::command('artifacts:prune-deployed --execute')
+    ->dailyAt('04:30')
+    ->when(fn (): bool => (bool) config('deployment.artifact_prune_deployed_auto'))
+    ->withoutOverlapping()
+    ->onOneServer();
+
 // Root-cause fix (release-orchestration bootstrap deadlock): a Release
 // stranded awaiting_artifact by a temporarily-ineligible authoritative
 // build Agent (most commonly: an exact-commit self-upgrade in flight) has

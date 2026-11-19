@@ -68,16 +68,37 @@ class CleanupArtifacts extends Command
             ->get();
 
         foreach ($abandoned as $artifact) {
+            // The row used to be deleted with any partial file left behind
+            // on the artifacts disk, where nothing would ever reclaim it.
+            $fileDeleted = false;
+            if ($artifact->disk_path !== null && Storage::disk('artifacts')->exists($artifact->disk_path)) {
+                $fileDeleted = Storage::disk('artifacts')->delete($artifact->disk_path);
+            }
+
+            // A row that deployments reference (a pruned artifact being
+            // rebuilt) keeps its row, so those deployments keep their link.
+            $referenced = $artifact->deployments()->exists();
+
             AuditLogEntry::record(
                 actorType: AuditLogEntry::ACTOR_SYSTEM,
                 actorIdentifier: null,
                 action: 'artifact.abandoned_upload_deleted',
                 subjectType: Artifact::class,
                 subjectId: $artifact->id,
-                metadata: ['project_id' => $artifact->project_id, 'commit_hash' => $artifact->commit_hash, 'age_minutes' => $artifact->created_at->diffInMinutes(now())],
+                metadata: [
+                    'project_id' => $artifact->project_id,
+                    'commit_hash' => $artifact->commit_hash,
+                    'age_minutes' => $artifact->created_at->diffInMinutes(now()),
+                    'file_deleted' => $fileDeleted,
+                    'row_kept_for_deployments' => $referenced,
+                ],
             );
 
-            $artifact->delete();
+            if ($referenced) {
+                $artifact->update(['status' => Artifact::STATUS_DELETED]);
+            } else {
+                $artifact->delete();
+            }
         }
 
         return $abandoned->count();

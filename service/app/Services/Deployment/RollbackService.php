@@ -46,6 +46,14 @@ class RollbackService
                 'An artifact-required rollback must target a deployment with an available artifact.',
             );
 
+            // artifacts:prune-deployed may have removed an old target's file;
+            // the agent's download would then fail after the rollback is queued.
+            abort_if(
+                $target->artifact_id !== null && !$target->artifact?->isAvailable(),
+                409,
+                'The artifact of that deployment was removed by retention; rebuild its commit before rolling back to it.',
+            );
+
             $rollback = Deployment::create([
                 'project_id' => $project->id,
                 'server_id' => $usesPersistedTargets ? $targets[0]->serverId : $project->server_id,
