@@ -188,6 +188,11 @@ class ReleaseOrchestrator
     public function syncArtifactState(Release $release): Release
     {
         return DB::transaction(function () use ($release): Release {
+            // Read from the row, not the (possibly stale) passed-in model:
+            // automatic deployment fires only on a real not-READY -> READY
+            // transition, never for a Release that was already READY.
+            $wasReady = Release::query()->whereKey($release->id)->value('status') === Release::STATUS_READY;
+
             $artifact = Artifact::query()
                 ->where('project_id', $release->project_id)
                 ->where('commit_hash', $release->commit_hash)
@@ -244,6 +249,14 @@ class ReleaseOrchestrator
                         'failure_code' => null,
                         'failure_message' => null,
                     ])->save();
+
+                    if (! $wasReady) {
+                        // After commit, so the auto-deploy transaction never
+                        // nests inside (or rolls back with) this one. Runs
+                        // immediately when there is no outer transaction.
+                        $releaseId = $release->id;
+                        DB::afterCommit(static fn () => app(ReleaseAutoDeployService::class)->afterReleaseReady($releaseId));
+                    }
 
                     return $release->refresh();
                 }

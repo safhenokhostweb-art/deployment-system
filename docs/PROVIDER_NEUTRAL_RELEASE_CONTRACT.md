@@ -4,7 +4,7 @@
 
 Each repository owns a versioned `.deployment/release-policy.json`; each active task owns an uncommitted `.deployment/release-task.json`. The shared `deployment/release-prepare.php` executable is the reference implementation. Git is the source boundary, task metadata is the ownership boundary, project policy is the validation boundary, HMAC-authenticated JSON is the handoff boundary, and Deployment System's `Release` plus exact `Artifact` records are the deployment boundary.
 
-Push webhooks prepare releases and may queue the configured authoritative Agent to build the exact commit. They never create a production Deployment. A deployment is created only by the operator confirmation POST.
+Push webhooks prepare releases and may queue the configured authoritative Agent to build the exact commit. They never create a production Deployment. A deployment is created by the operator confirmation POST, or — only when the owner has enabled the Project's `auto_deploy` flag — automatically at the moment a Release transitions to READY (see §8a).
 
 ## 2. Provider-neutral guarantees
 
@@ -40,6 +40,10 @@ Versioned JSON contains project key, commit SHA, base SHA, branch, task/summary,
 
 `POST /api/projects/{project-key}/releases` accepts the project-generated JSON with `X-Deployment-Signature-256`. The push webhook creates the commit-keyed Release and queues an artifact build only through the configured authoritative build Agent. Artifact upload synchronizes that exact Release. No available Artifact for another SHA can satisfy readiness.
 
+## 8a. Owner opt-in automatic deployment (`auto_deploy`)
+
+When `projects.auto_deploy` is on, `ReleaseOrchestrator::syncArtifactState()` hands a Release that has just transitioned to READY to `ReleaseAutoDeployService` after its transaction commits. The service skips (and audits `release.auto_deploy_skipped` with a reason) when the project is inactive, a newer Release exists on the deployable branch, a Deployment already exists for the Release (so a cancelled attempt is never recreated), or the commit is already the latest successful deployment. Otherwise `DeploymentDispatcher::createAutomaticFromReadyRelease()` locks the Release and its bound Artifact, re-verifies physical integrity, requires `ReleaseReadiness` to be deployable for every readiness policy, and creates one `queued` Deployment with `approved_by = auto_deploy`. A Release that was already READY when the flag was switched on is never deployed retroactively. Failures are audited as `release.auto_deploy_failed` and never fail the artifact upload or build report. With the flag off, behaviour is unchanged: explicit confirmation only.
+
 ## 9. UI workflow
 
 The project action is **Review & Deploy Latest**. Its readiness view presents project, branch/commit, summary, changed count/list, tests, migration verdict, risk flags, exact Artifact, and health contract. Derived states are `NOT READY`, `MIXED WORKTREE`, `TEST FAILURE`, `MIGRATION REVIEW REQUIRED`, `ARTIFACT BUILDING`, and `READY TO DEPLOY`. Only the last state renders **Confirm deployment**. Neither SHA nor Artifact ID is entered by the operator.
@@ -68,4 +72,4 @@ The standalone suite covers coherent ownership, unrelated work, runtime exclusio
 4. Install it in `customer-site`; configure sibling Git dependencies; split its current mixed work before creating an active task.
 5. Configure HMAC metadata URL/secret in trusted release environments and exercise `check` against a harmless task.
 6. Prepare and push one non-production pilot release; verify metadata, auto-build, exact Artifact, readiness UI, and mandatory confirmation without confirming production.
-7. Enable the operator workflow project-by-project. Keep auto-deploy disabled.
+7. Enable the operator workflow project-by-project. Auto-deploy stays off unless the owner explicitly enables it per project (§8a).
