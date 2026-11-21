@@ -1,62 +1,48 @@
 # Deployment System
 
-A standalone deployment pipeline that sits between GitHub and production
-servers, so development tools (including this one) never touch production
-directly.
+A standalone, zero-inbound-port deployment pipeline that sits between GitHub and production servers, ensuring development tools and control planes never touch production environments directly.
 
-```
+```text
 GitHub  --push-->  Deployment Service  <--poll--  Deployment Agent (on each server)
         (webhook)   (service/, Laravel)            (agent/, plain PHP)
 ```
 
-- **`service/`** — the Laravel app. Receives GitHub webhooks, manages
-  deployment jobs, tracks commit hashes, stores logs, shows status, handles
-  approvals and rollbacks. See `service/README.md` (dashboard usage) and
-  `docs/ARCHITECTURE.md`.
-- **`agent/`** — the lightweight PHP agent. Runs on a target server, polls
-  the service over outbound HTTPS only, executes the configured pipeline
-  locally, and reports logs/status back. See `agent/README.md`.
-- **`docs/ARCHITECTURE.md`** — full design write-up: data flow, security
-  model, why the split works this way.
+## Architecture Overview
 
-## Why the agent polls instead of the service pushing
+- **`service/`** — The central Laravel control plane. Receives GitHub webhooks, manages deployment jobs, tracks commit hashes, stores execution logs, displays real-time status, and handles manual approvals and rollbacks. See `service/README.md` and `docs/ARCHITECTURE.md`.
+- **`agent/`** — The lightweight, dependency-free PHP agent. Runs on target production servers, polls the service strictly over outbound HTTPS, executes configured pipeline steps locally, and streams logs and status back. See `agent/README.md`.
+- **`docs/ARCHITECTURE.md`** — Full architectural specification covering data flow, cryptographic request signing, and security boundaries.
 
-The service never connects to a server. The agent, which lives on that
-server, always initiates the connection outward. That means:
+## Why Outbound Polling Over Push
 
-- No inbound port has to be opened on production for deployment tooling.
-- No SSH keypair distribution or SSH surface exposed to the Deployment
-  Service.
-- A firewall on the production box can allow only outbound HTTPS and still
-  fully support deployments.
+The Deployment Service never initiates an inbound connection to a target server. Instead, the agent living on each server always initiates connections outward:
 
-## Getting started
+- **Zero Inbound Ports:** No inbound firewall ports need to be opened on production servers for deployment tooling.
+- **No SSH Key Distribution:** Eliminates shared SSH keypairs and removes SSH attack surfaces from the central control plane.
+- **Strict Firewall Compatibility:** A production server can block all inbound management traffic, allow only outbound HTTPS, and still support fully automated deployments and rollbacks.
 
-1. Stand up `service/` (see its README) — set `DB_CONNECTION`, run
-   migrations, create an admin user with `php artisan deployment:create-admin`.
-2. In the dashboard, register a server. Copy the `server_id`, `agent_token`,
-   and `signing_secret` shown once.
-3. Install `agent/` on that server (see `agent/README.md`), paste those
-   values plus the local working directory for each project into
-   `agent/config.php`.
-4. In the dashboard, create a project (repository, branch, server, pipeline
-   commands). Copy the generated webhook URL + secret into the GitHub repo's
-   webhook settings.
-5. Push to the tracked branch. Depending on the project's `auto_deploy`
-   flag, either approve the deployment in the dashboard or let it queue
-   automatically. The agent picks it up on its next poll.
+## Getting Started
 
-## Restrictions honored
+1. **Set up `service/`:** Configure `DB_CONNECTION` in `.env`, run database migrations, and create an initial administrator via `php artisan deployment:create-admin` (see `service/README.md`).
+2. **Register a target server:** In the web dashboard, register a server and copy the one-time generated `server_id`, `agent_token`, and `signing_secret`.
+3. **Install `agent/` on the server:** Deploy the lightweight `agent/` directory onto the target host (see `agent/README.md`) and populate `agent/config.php` (gitignored) with your credentials and local project paths.
+4. **Configure a project:** Create a project in the dashboard specifying the repository, branch, target server, and shell pipeline commands, then add the generated webhook URL and secret to your GitHub repository settings.
+5. **Deploy:** Push to the tracked branch. Depending on the project's `auto_deploy` policy, approve the job in the dashboard or let it queue automatically for the agent's next poll cycle.
 
-- Nothing here modifies any existing application; this is a new, separate
-  project directory with its own git history.
-- No dependency on Claude/Codex or any AI tooling is wired into the
-  deployment path — it's plain PHP/Laravel executing configured shell
-  commands.
-- No server hostnames, IPs, credentials, or filesystem paths are hardcoded
-  anywhere in the code. Servers, projects, pipelines, and credentials are
-  all data — created through the dashboard/database (service side) or a
-  local `config.php` you fill in yourself (agent side, gitignored).
-- Nothing was committed or pushed by the agent building this.
+## Security & Design Principles
 
-Local Agent Test 07/27/2026 23:02:36
+- **Deterministic Runtime:** The deployment execution path relies purely on standard PHP and Laravel with zero runtime AI dependencies.
+- **Zero Hardcoded Infrastructure:** No server hostnames, IP addresses, credentials, or filesystem paths exist in source control; all environment configuration is managed dynamically via the database or gitignored `config.php` files.
+
+## Ecosystem Repositories
+
+This repository is part of a modular, self-hosted open-source ecosystem:
+
+- **[saas-platform](https://github.com/safhenokhostweb-art/saas-platform)** — Core multi-tenant orchestration engine, RBAC, and central API.
+- **[customer-site](https://github.com/safhenokhostweb-art/customer-site)** — Tenant-facing web application and storefront.
+- **[deployment-system](https://github.com/safhenokhostweb-art/deployment-system)** — Standalone pull-based deployment service and server agent *(this repository)*.
+- **[agents](https://github.com/safhenokhostweb-art/agents)** — AI-driven operational agents for diagnostics, log analysis, and workflow automation.
+
+## License
+
+Released under the [MIT License](LICENSE).
