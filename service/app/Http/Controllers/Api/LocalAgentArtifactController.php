@@ -127,11 +127,22 @@ class LocalAgentArtifactController extends Controller
         }
 
         try {
-            $finalized = $this->artifacts->finalizeUpload(
-                artifact: $artifact,
-                rawBytes: $request->getContent(),
-                retentionCount: (int) config('deployment.artifact_retention_count_per_project'),
-            );
+            $tempFile = $request->attributes->get('uploaded_temp_file');
+            if ($tempFile && file_exists($tempFile)) {
+                $finalized = $this->artifacts->finalizeUploadFromFile(
+                    artifact: $artifact,
+                    filePath: $tempFile,
+                    retentionCount: (int) config('deployment.artifact_retention_count_per_project'),
+                    precalculatedHash: $request->attributes->get('uploaded_temp_file_hash'),
+                    fileSize: (int) $request->attributes->get('uploaded_temp_file_size'),
+                );
+            } else {
+                $finalized = $this->artifacts->finalizeUpload(
+                    artifact: $artifact,
+                    rawBytes: $request->getContent(),
+                    retentionCount: (int) config('deployment.artifact_retention_count_per_project'),
+                );
+            }
         } catch (ArtifactValidationException $e) {
             // `reason` lets ArtifactUploader (Local Agent side) report a
             // specific PublishJob::FAILURE_CODE_ARTIFACT_MISSING_VENDOR/

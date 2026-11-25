@@ -413,6 +413,42 @@ class LocalAgentArtifactFlowTest extends TestCase
         ]);
     }
 
+    public function test_content_upload_streams_into_temp_file_and_cleans_up(): void
+    {
+        [$agent, $project] = $this->mappedAgentAndProject();
+        $content = $this->buildZipBytes(['index.php' => '<?php echo "streamed-upload-ok";']);
+        $checksum = hash('sha256', $content);
+
+        $createBody = [
+            'project_key' => $project->project_key,
+            'commit_hash' => str_repeat('a', 40),
+            'branch' => 'main',
+            'checksum_sha256' => $checksum,
+            'size_bytes' => strlen($content),
+        ];
+        $createPath = '/api/local-agent/artifacts';
+        $artifactId = $this->postJson($createPath, $createBody, $this->headersFor($agent, 'POST', $createPath, json_encode($createBody)))
+            ->assertCreated()
+            ->json('artifact_id');
+
+        $contentPath = "/api/local-agent/artifacts/{$artifactId}/content";
+        $headers = $this->headersFor($agent, 'POST', $contentPath, $content);
+
+        $response = $this->call('POST', $contentPath, [], [], [], array_merge(
+            $this->toRawServerVars($headers),
+            ['CONTENT_TYPE' => 'application/octet-stream'],
+        ), $content);
+
+        $response->assertOk()
+            ->assertJsonPath('status', 'ok')
+            ->assertJsonPath('artifact_id', $artifactId)
+            ->assertJsonPath('size_bytes', strlen($content));
+
+        $artifact = Artifact::where('public_id', $artifactId)->firstOrFail();
+        $this->assertSame(Artifact::STATUS_AVAILABLE, $artifact->status);
+        $this->assertTrue(\Illuminate\Support\Facades\Storage::disk('artifacts')->exists($artifact->disk_path));
+    }
+
     /**
      * @param array<string, string> $headers
      * @return array<string, string>

@@ -182,16 +182,47 @@ class ArtifactService
      */
     public function finalizeUpload(Artifact $artifact, string $rawBytes, int $retentionCount): Artifact
     {
+        $tempFile = tempnam(sys_get_temp_dir(), 'hub_art_fin_');
+        file_put_contents($tempFile, $rawBytes);
+        try {
+            return $this->finalizeUploadFromFile(
+                artifact: $artifact,
+                filePath: $tempFile,
+                retentionCount: $retentionCount,
+                precalculatedHash: hash('sha256', $rawBytes),
+                fileSize: strlen($rawBytes),
+            );
+        } finally {
+            if (file_exists($tempFile)) {
+                @unlink($tempFile);
+            }
+        }
+    }
+
+    /**
+     * Streams artifact upload directly from a local file without holding
+     * the entire payload in memory, protecting against PHP memory exhaustion
+     * on large (55MB+) artifacts.
+     *
+     * @throws ArtifactValidationException on checksum mismatch or a failed content validation
+     */
+    public function finalizeUploadFromFile(
+        Artifact $artifact,
+        string $filePath,
+        int $retentionCount,
+        ?string $precalculatedHash = null,
+        ?int $fileSize = null,
+    ): Artifact {
+        $actualSize = $fileSize ?? (int) filesize($filePath);
+        $actualChecksum = $precalculatedHash ?? hash_file('sha256', $filePath);
+
         if ($artifact->status === Artifact::STATUS_AVAILABLE) {
-            $actualChecksum = hash('sha256', $rawBytes);
             abort_if($actualChecksum !== $artifact->checksum_sha256, 409, 'artifact_checksum_conflict: uploaded bytes differ from the available artifact.');
 
             return $artifact;
         }
         abort_unless($artifact->status === Artifact::STATUS_UPLOADING, 409, "Artifact is not awaiting upload (status: {$artifact->status}).");
-        abort_if(strlen($rawBytes) > $this->maxSizeBytes(), 422, 'Artifact exceeds the maximum allowed size of ' . (int) ($this->maxSizeBytes() / 1024 / 1024) . 'MB.');
-
-        $actualChecksum = hash('sha256', $rawBytes);
+        abort_if($actualSize > $this->maxSizeBytes(), 422, 'Artifact exceeds the maximum allowed size of ' . (int) ($this->maxSizeBytes() / 1024 / 1024) . 'MB.');
 
         if ($actualChecksum !== $artifact->checksum_sha256) {
             $this->rejectUpload($artifact, 'checksum_mismatch', "Checksum mismatch: expected {$artifact->checksum_sha256}, received {$actualChecksum}.", [
@@ -200,7 +231,14 @@ class ArtifactService
             ]);
         }
 
-        Storage::disk('artifacts')->put($artifact->disk_path, $rawBytes);
+        $stream = fopen($filePath, 'rb');
+        try {
+            Storage::disk('artifacts')->put($artifact->disk_path, $stream);
+        } finally {
+            if (is_resource($stream)) {
+                fclose($stream);
+            }
+        }
 
         $contentIssue = $this->validateArchiveContents($artifact);
         if ($contentIssue !== null) {
@@ -220,7 +258,7 @@ class ArtifactService
 
         $artifact->update([
             'status' => Artifact::STATUS_AVAILABLE,
-            'size_bytes' => strlen($rawBytes),
+            'size_bytes' => $actualSize,
             'semantic_status' => $artifact->publish_job_id !== null ? 'verified' : 'legacy',
             'semantic_verified_at' => $artifact->publish_job_id !== null ? now() : null,
             'semantic_failure' => null,

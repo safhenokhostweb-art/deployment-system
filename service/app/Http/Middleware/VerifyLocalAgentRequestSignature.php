@@ -66,43 +66,114 @@ class VerifyLocalAgentRequestSignature
             return $this->reject($request, $agent->public_id, 'invalid_token');
         }
 
-        $rawBody = $request->getContent();
-        $contentLength = (int) $request->header('Content-Length', 0);
-        if ($contentLength > 0 && $rawBody === '') {
-            AuditLogEntry::record(
-                actorType: AuditLogEntry::ACTOR_AGENT,
-                actorIdentifier: $agent->public_id,
-                action: 'local_agent.payload_truncated',
-                metadata: ['content_length' => $contentLength, 'path' => $request->path()],
-                ipAddress: $request->ip(),
+        $tempFile = null;
+        if ($isContentUpload) {
+            $tempFile = tempnam(sys_get_temp_dir(), 'hub_art_up_');
+            $tempHandle = fopen($tempFile, 'wb');
+            $hashCtx = hash_init('sha256');
+            $totalBytes = 0;
+            $stream = $request->getContent(true);
+
+            if (is_resource($stream)) {
+                while (!feof($stream)) {
+                    $chunk = fread($stream, 65536);
+                    if ($chunk === false || $chunk === '') {
+                        break;
+                    }
+                    hash_update($hashCtx, $chunk);
+                    fwrite($tempHandle, $chunk);
+                    $totalBytes += strlen($chunk);
+                }
+                fclose($stream);
+            }
+            fclose($tempHandle);
+            $bodyHash = hash_final($hashCtx);
+
+            $contentLength = (int) $request->header('Content-Length', 0);
+            if ($contentLength > 0 && $totalBytes === 0) {
+                @unlink($tempFile);
+                AuditLogEntry::record(
+                    actorType: AuditLogEntry::ACTOR_AGENT,
+                    actorIdentifier: $agent->public_id,
+                    action: 'local_agent.payload_truncated',
+                    metadata: ['content_length' => $contentLength, 'path' => $request->path()],
+                    ipAddress: $request->ip(),
+                );
+
+                return response()->json([
+                    'message' => 'Request body was empty despite non-zero Content-Length; check server post_max_size / upload limits.',
+                ], 413);
+            }
+
+            $valid = $this->signer->verifyWithBodyHash(
+                $request->method(),
+                '/' . ltrim($request->path(), '/'),
+                $timestamp,
+                $nonce,
+                $bodyHash,
+                (string) $agent->signing_secret,
+                $signature,
             );
 
-            return response()->json([
-                'message' => 'Request body was empty despite non-zero Content-Length; check server post_max_size / upload limits.',
-            ], 413);
-        }
-        $valid = $this->signer->verify(
-            $request->method(),
-            '/' . ltrim($request->path(), '/'),
-            $timestamp,
-            $nonce,
-            $rawBody,
-            (string) $agent->signing_secret,
-            $signature,
-        );
+            if (!$valid) {
+                @unlink($tempFile);
 
-        if (!$valid) {
-            return $this->reject($request, $agent->public_id, 'invalid_signature');
+                return $this->reject($request, $agent->public_id, 'invalid_signature');
+            }
+
+            $request->attributes->set('uploaded_temp_file', $tempFile);
+            $request->attributes->set('uploaded_temp_file_hash', $bodyHash);
+            $request->attributes->set('uploaded_temp_file_size', $totalBytes);
+        } else {
+            $rawBody = $request->getContent();
+            $contentLength = (int) $request->header('Content-Length', 0);
+            if ($contentLength > 0 && $rawBody === '') {
+                AuditLogEntry::record(
+                    actorType: AuditLogEntry::ACTOR_AGENT,
+                    actorIdentifier: $agent->public_id,
+                    action: 'local_agent.payload_truncated',
+                    metadata: ['content_length' => $contentLength, 'path' => $request->path()],
+                    ipAddress: $request->ip(),
+                );
+
+                return response()->json([
+                    'message' => 'Request body was empty despite non-zero Content-Length; check server post_max_size / upload limits.',
+                ], 413);
+            }
+            $valid = $this->signer->verify(
+                $request->method(),
+                '/' . ltrim($request->path(), '/'),
+                $timestamp,
+                $nonce,
+                $rawBody,
+                (string) $agent->signing_secret,
+                $signature,
+            );
+
+            if (!$valid) {
+                return $this->reject($request, $agent->public_id, 'invalid_signature');
+            }
         }
 
         if (!$this->consumeNonce($agent->id, $nonce)) {
+            if ($tempFile && file_exists($tempFile)) {
+                @unlink($tempFile);
+            }
+
             return $this->reject($request, $agent->public_id, 'replayed_nonce');
         }
 
-        $agent->forceFill(['last_seen_at' => now()])->saveQuietly();
-        $request->attributes->set('deployment_local_agent', $agent);
+        try {
+            $agent->forceFill(['last_seen_at' => now()])->saveQuietly();
+            $request->attributes->set('deployment_local_agent', $agent);
 
-        return $next($request);
+            return $next($request);
+        } finally {
+            $cleanupFile = $request->attributes->get('uploaded_temp_file');
+            if ($cleanupFile && file_exists($cleanupFile)) {
+                @unlink($cleanupFile);
+            }
+        }
     }
 
     private function consumeNonce(int $localAgentId, string $nonce): bool
