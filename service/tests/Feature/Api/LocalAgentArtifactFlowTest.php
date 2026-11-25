@@ -307,6 +307,112 @@ class LocalAgentArtifactFlowTest extends TestCase
         $this->assertDatabaseHas('artifacts', ['project_id' => $project->id, 'commit_hash' => str_repeat('3', 40), 'status' => Artifact::STATUS_AVAILABLE]);
     }
 
+    public function test_content_upload_allows_extended_skew_and_returns_413_when_body_truncated(): void
+    {
+        [$agent, $project] = $this->mappedAgentAndProject();
+        $content = $this->buildZipBytes(['index.php' => 'extended-skew-ok']);
+        $checksum = hash('sha256', $content);
+        $commitHash = str_repeat('e', 40);
+
+        $createBody = ['project_key' => $project->project_key, 'commit_hash' => $commitHash, 'branch' => 'main', 'checksum_sha256' => $checksum, 'size_bytes' => strlen($content)];
+        $createPath = '/api/local-agent/artifacts';
+        $artifactId = $this->postJson($createPath, $createBody, $this->headersFor($agent, 'POST', $createPath, json_encode($createBody)))
+            ->assertCreated()
+            ->json('artifact_id');
+
+        // 1) Simulate body discarded by server upload limits (Content-Length > 0, raw body empty) -> 413
+        $contentPath = "/api/local-agent/artifacts/{$artifactId}/content";
+        $truncatedHeaders = $this->headersFor($agent, 'POST', $contentPath, $content);
+        $this->call('POST', $contentPath, [], [], [], array_merge(
+            $this->toRawServerVars($truncatedHeaders),
+            ['CONTENT_TYPE' => 'application/octet-stream', 'CONTENT_LENGTH' => (string) strlen($content)],
+        ), '')->assertStatus(413);
+
+        // 2) Simulate a 10-minute (600s) slow upload -> accepted within 1800s window
+        $oldTimestamp = (string) (time() - 600);
+        $nonce = bin2hex(random_bytes(16));
+        $signer = app(\App\Services\Security\RequestSigner::class);
+        $sig = $signer->sign('POST', $contentPath, $oldTimestamp, $nonce, $content, LocalAgentFactory::$lastPlainSecret);
+        $slowHeaders = [
+            'Authorization' => 'Bearer ' . LocalAgentFactory::$lastPlainToken,
+            'X-Deployment-Local-Agent-Id' => $agent->public_id,
+            'X-Deployment-Timestamp' => $oldTimestamp,
+            'X-Deployment-Nonce' => $nonce,
+            'X-Deployment-Signature' => $sig,
+        ];
+        $this->call('POST', $contentPath, [], [], [], array_merge(
+            $this->toRawServerVars($slowHeaders),
+            ['CONTENT_TYPE' => 'application/octet-stream'],
+        ), $content)->assertOk();
+    }
+
+    public function test_new_publish_job_reclaims_uploading_artifact_from_failed_or_cancelled_job(): void
+    {
+        [$agent, $project] = $this->mappedAgentAndProject();
+        $commitHash = str_repeat('f', 40);
+        $content = $this->buildZipBytes(['index.php' => 'reclaim-ok']);
+        $checksum = hash('sha256', $content);
+
+        $release1 = \App\Models\Release::factory()->create([
+            'project_id' => $project->id,
+            'commit_hash' => $commitHash,
+            'branch' => 'main',
+        ]);
+        $failedJob = \App\Models\PublishJob::factory()->create([
+            'project_id' => $project->id,
+            'release_id' => $release1->id,
+            'local_agent_id' => $agent->id,
+            'action' => \App\Models\PublishJob::ACTION_BUILD_ARTIFACT,
+            'reviewed_head_sha' => $commitHash,
+            'reviewed_branch' => 'main',
+            'status' => \App\Models\PublishJob::STATUS_FAILED,
+        ]);
+
+        // Previous job left artifact stuck in uploading
+        $artifact = Artifact::create([
+            'project_id' => $project->id,
+            'publish_job_id' => $failedJob->id,
+            'release_id' => $release1->id,
+            'commit_hash' => $commitHash,
+            'branch' => 'main',
+            'checksum_sha256' => $checksum,
+            'size_bytes' => strlen($content),
+            'disk_path' => 'artifacts/' . $project->project_key . '/' . $commitHash . '.zip',
+            'status' => Artifact::STATUS_UPLOADING,
+            'uploaded_by' => $agent->public_id,
+            'expires_at' => now()->addDays(7),
+        ]);
+
+        $newJob = \App\Models\PublishJob::factory()->create([
+            'project_id' => $project->id,
+            'release_id' => $release1->id,
+            'local_agent_id' => $agent->id,
+            'action' => \App\Models\PublishJob::ACTION_BUILD_ARTIFACT,
+            'reviewed_head_sha' => $commitHash,
+            'reviewed_branch' => 'main',
+            'status' => \App\Models\PublishJob::STATUS_RUNNING,
+        ]);
+
+        $createBody = [
+            'project_key' => $project->project_key,
+            'commit_hash' => $commitHash,
+            'branch' => 'main',
+            'checksum_sha256' => $checksum,
+            'size_bytes' => strlen($content),
+            'publish_job_id' => $newJob->public_id,
+        ];
+        $createPath = '/api/local-agent/artifacts';
+        $this->postJson($createPath, $createBody, $this->headersFor($agent, 'POST', $createPath, json_encode($createBody)))
+            ->assertCreated()
+            ->assertJsonPath('artifact_id', $artifact->public_id);
+
+        $this->assertDatabaseHas('artifacts', [
+            'id' => $artifact->id,
+            'publish_job_id' => $newJob->id,
+            'status' => Artifact::STATUS_UPLOADING,
+        ]);
+    }
+
     /**
      * @param array<string, string> $headers
      * @return array<string, string>

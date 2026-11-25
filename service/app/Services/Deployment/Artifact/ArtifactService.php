@@ -76,9 +76,18 @@ class ArtifactService
         return DB::transaction(function () use ($project, $commitHash, $branch, $claimedChecksum, $claimedSizeBytes, $uploadedBy, $requiredPaths, $diskPath, $publishJobId, $fileManifestHash, $fileManifestEntryCount, $fileManifestTotalSize) {
             $existing = Artifact::where('project_id', $project->id)->where('commit_hash', $commitHash)->lockForUpdate()->first();
             if ($existing !== null) {
-                // A deleted row (file removed by artifacts:prune-deployed)
-                // is rebuilt exactly like a failed one.
-                if (in_array($existing->status, [Artifact::STATUS_FAILED, Artifact::STATUS_DELETED], true) && $publishJobId !== null) {
+                $previousJobEnded = $existing->publishJob !== null
+                    && in_array($existing->publishJob->status, [
+                        \App\Models\PublishJob::STATUS_FAILED,
+                        \App\Models\PublishJob::STATUS_REJECTED,
+                        \App\Models\PublishJob::STATUS_TIMED_OUT,
+                        \App\Models\PublishJob::STATUS_ABANDONED,
+                        'cancelled',
+                        'canceled',
+                    ], true);
+                // A deleted row (file removed by artifacts:prune-deployed) or an
+                // uploading row whose previous PublishJob failed/cancelled is rebuilt.
+                if ($publishJobId !== null && !$existing->isAvailable() && (in_array($existing->status, [Artifact::STATUS_FAILED, Artifact::STATUS_DELETED], true) || $previousJobEnded)) {
                     $existing->update([
                         'publish_job_id' => $publishJobId,
                         'branch' => $branch,

@@ -105,8 +105,10 @@ class LocalAgentArtifactController extends Controller
             fileManifestTotalSize: $validated['file_manifest_total_size'] ?? null,
         );
         if ($job !== null) {
-            abort_if($artifact->release_id !== null && $artifact->release_id !== $job->release_id, 409, 'Artifact is already bound to a different Release.');
-            $artifact->update(['release_id' => $job->release_id]);
+            abort_if($artifact->isAvailable() && $artifact->release_id !== null && $artifact->release_id !== $job->release_id, 409, 'Artifact is already bound to a different Release.');
+            if ($artifact->release_id !== $job->release_id) {
+                $artifact->update(['release_id' => $job->release_id]);
+            }
         }
 
         return response()->json(['status' => 'ok', 'artifact_id' => $artifact->public_id], 201);

@@ -25,6 +25,7 @@ use Symfony\Component\HttpFoundation\Response;
 class VerifyLocalAgentRequestSignature
 {
     private const MAX_CLOCK_SKEW_SECONDS = 300;
+    private const MAX_CONTENT_UPLOAD_SKEW_SECONDS = 1800;
 
     public function __construct(
         private readonly RequestSigner $signer,
@@ -44,7 +45,10 @@ class VerifyLocalAgentRequestSignature
             return $this->reject($request, null, 'missing_auth_headers');
         }
 
-        if (!ctype_digit($timestamp) || abs(time() - (int) $timestamp) > self::MAX_CLOCK_SKEW_SECONDS) {
+        $isContentUpload = $request->is('api/local-agent/artifacts/*/content');
+        $maxSkew = $isContentUpload ? self::MAX_CONTENT_UPLOAD_SKEW_SECONDS : self::MAX_CLOCK_SKEW_SECONDS;
+
+        if (!ctype_digit($timestamp) || abs(time() - (int) $timestamp) > $maxSkew) {
             return $this->reject($request, $publicId, 'stale_or_invalid_timestamp');
         }
 
@@ -63,6 +67,20 @@ class VerifyLocalAgentRequestSignature
         }
 
         $rawBody = $request->getContent();
+        $contentLength = (int) $request->header('Content-Length', 0);
+        if ($contentLength > 0 && $rawBody === '') {
+            AuditLogEntry::record(
+                actorType: AuditLogEntry::ACTOR_AGENT,
+                actorIdentifier: $agent->public_id,
+                action: 'local_agent.payload_truncated',
+                metadata: ['content_length' => $contentLength, 'path' => $request->path()],
+                ipAddress: $request->ip(),
+            );
+
+            return response()->json([
+                'message' => 'Request body was empty despite non-zero Content-Length; check server post_max_size / upload limits.',
+            ], 413);
+        }
         $valid = $this->signer->verify(
             $request->method(),
             '/' . ltrim($request->path(), '/'),
